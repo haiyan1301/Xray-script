@@ -65,6 +65,7 @@ declare SHARE_LINK_COMPONENT_TLS     # TLS 安全传输的参数部分
 declare SHARE_LINK_COMPONENT_REALITY # Reality 安全传输的参数部分
 declare SHARE_LINK_COMPONENT_XHTTP   # XHTTP 网络传输的参数部分
 declare SHARE_LINK_COMPONENT_FLOW    # Flow 控制参数部分
+declare SHARE_LINK_COMPONENT_HOST    # XHTTP Host 参数部分
 declare SHARE_LINK_COMPONENT_EXTRA   # 额外参数 (如 downloadSettings) 部分
 declare SHARE_LINK_COMPONENT_VLESS_ENC # VLESS enc 的 encryption 参数部分
 
@@ -354,6 +355,12 @@ function get_share_link_component() {
     SHARE_LINK_COMPONENT_XHTTP="&path=%2F${CLIENT_CONFIG[path]#/}"
     # 生成 Flow 控制参数部分 (&flow=...)
     SHARE_LINK_COMPONENT_FLOW="&flow=${CLIENT_CONFIG[flow]}"
+    # 生成 XHTTP Host 参数部分 (&host=...), 仅在设置了 host 时输出
+    if [[ -n "${CLIENT_CONFIG[host]}" ]]; then
+        SHARE_LINK_COMPONENT_HOST="&host=$(echo "${CLIENT_CONFIG[host]}" | urlencode)"
+    else
+        SHARE_LINK_COMPONENT_HOST=""
+    fi
     # 生成额外参数部分 (&extra=...), 使用之前编码好的 XHTTP_EXTRA_ENCODED
     SHARE_LINK_COMPONENT_EXTRA="&extra=${XHTTP_EXTRA_ENCODED}"
     # 若启用了 VLESS enc，生成 encryption 参数部分
@@ -403,6 +410,22 @@ function get_xhttp_share_link() {
     get_share_link_component
     # 将 VLESS 基础部分、Reality 安全参数、XHTTP 路径参数和可选的 VLESS enc 拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
+}
+
+# =============================================================================
+# 函数名称: get_cdn_share_link
+# 功能描述: 为 CDN 场景的 VLESS + XHTTP + TLS 生成完整的分享链接。
+# 参数: 无 (直接使用全局变量 CLIENT_CONFIG 和 SCRIPT_CONFIG)
+# 返回值: 无 (直接修改全局变量 CLIENT_CONFIG 和 SHARE_LINK)
+# =============================================================================
+function get_cdn_share_link() {
+    CLIENT_CONFIG[security]="tls"
+    CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    CLIENT_CONFIG[host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+
+    get_share_link_component
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}"
 }
 
 # =============================================================================
@@ -627,6 +650,7 @@ function main() {
     trojan) get_trojan_share_link ;;  # Trojan 模式
     fallback) show_fallback_config ;; # Fallback 模式
     sni) show_sni_config ;;           # SNI 模式
+    cdn) get_cdn_share_link ;;        # CDN 模式
     *) get_vision_share_link ;;       # 默认为 Vision 模式
     esac
 
