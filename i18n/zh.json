@@ -226,10 +226,12 @@
       "check": "正在检查路径合法性：",
       "valid": "路径格式合法：",
       "empty": "路径为空，将自动生成随机路径",
+      "required_error": "路径不能为空，请输入路径",
       "space_error": "路径不能包含空格：",
       "length_error": "路径长度不能超过 128 个字符：",
       "char_error": "路径包含非法字符（只允许字母、数字、斜杠、连字符、下划线、点）：",
-      "double_slash_error": "路径不能包含连续斜杠："
+      "double_slash_error": "路径不能包含连续斜杠：",
+      "root_error": "路径不能使用根目录 / ："
     },
     "short": {
       "check": "正在检查 shortId 合法性：",

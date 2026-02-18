@@ -290,7 +290,12 @@ function exec_read() {
             ;;
         path)
             # 验证路径
-            exec_check '--path' "${result}" || continue
+            local config_tag="${CONFIG_DATA['tag']}"
+            if [[ "${config_tag,,}" == "sni" || "${config_tag,,}" == "cdn" ]]; then
+                exec_check '--path-required' "${result}" || continue
+            else
+                exec_check '--path' "${result}" || continue
+            fi
             ;;
         xhttp-mode)
             result="${result:-auto}"
@@ -1684,13 +1689,11 @@ function handler_web() {
         # 启用 Cloudreve 配置 (取消注释)
         sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
         sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        sed -i "s|include web/normal.conf;|# include web/normal.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
         ;;
     *)
         # 禁用 Cloudreve 配置 (添加注释)
         sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
         sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
-        sed -i "s|# include web/normal.conf;|include web/normal.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
         ;;
     esac
     # 重启或启动 Nginx 与 xray 服务

@@ -226,10 +226,12 @@
       "check": "Checking path validity: ",
       "valid": "Path format is valid: ",
       "empty": "Path is empty, will auto-generate random path",
+      "required_error": "Path is required, please enter a path",
       "space_error": "Path cannot contain spaces: ",
       "length_error": "Path length cannot exceed 128 characters: ",
       "char_error": "Path contains invalid characters (only letters, digits, /, -, _, . allowed): ",
-      "double_slash_error": "Path cannot contain consecutive slashes: "
+      "double_slash_error": "Path cannot contain consecutive slashes: ",
+      "root_error": "Path cannot use root /: "
     },
     "short": {
       "check": "Checking shortId validity: ",

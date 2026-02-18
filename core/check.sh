@@ -375,6 +375,11 @@ function check_path() {
         return 0
     fi
 
+    if [[ "${path}" == "/" ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.root_error")$path"
+        return 1
+    fi
+
     # 检查路径中是否包含空格
     if [[ "${path}" =~ *\ * ]]; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
@@ -400,6 +405,44 @@ function check_path() {
     fi
 
     # 如果所有检查都通过，则路径有效
+    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.valid")$path"
+    return 0
+}
+
+function check_path_required() {
+    local path="$1"
+    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.check")${path}"
+
+    if [[ -z "${path}" ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.required_error")"
+        return 1
+    fi
+
+    if [[ "${path}" == "/" ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.root_error")$path"
+        return 1
+    fi
+
+    if [[ "${path}" =~ *\ * ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
+        return 1
+    fi
+
+    if ((${#path} > 128)); then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.length_error")$path"
+        return 1
+    fi
+
+    if [[ "${path}" =~ [^a-zA-Z0-9_/.\-] ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.char_error")$path"
+        return 1
+    fi
+
+    if [[ "${path}" =~ // ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.double_slash_error")$path"
+        return 1
+    fi
+
     _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.valid")$path"
     return 0
 }
@@ -650,6 +693,7 @@ function main() {
     --uuid) check_uuid "$@" >&2 ;;                # 检查 UUID
     --password) check_password "$@" >&2 ;;        # 检查密码
     --path) check_path "$@" >&2 ;;                # 检查路径
+    --path-required) check_path_required "$@" >&2 ;;
     --short) check_short_id "$@" >&2 ;;           # 检查 Short ID
     --domain) check_domain_security "$@" >&2 ;;   # 检查域名安全性
     --dns) check_dns_resolution "$@" >&2 ;;       # 检查 DNS 解析
