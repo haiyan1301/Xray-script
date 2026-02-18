@@ -18,6 +18,7 @@
     "trojan": "",
     "kcp": "",
     "path": "",
+    "xhttpMode": "",
     "privateKey": "",
     "publicKey": "",
     "hash32": "",

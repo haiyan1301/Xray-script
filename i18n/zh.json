@@ -63,6 +63,7 @@
       "option4": "Trojan+XHTTP+REALITY",
       "option5": "双协议复合配置",
       "option6": "SNI分流复合配置",
+      "option7": "CDN 独立配置",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
       "info3": "XHTTP 全场景通吃的时代正式到来(详情: https://github.com/XTLS/Xray-core/discussions/4113    )",
@@ -70,7 +71,8 @@
       "info3_2": "此外 v2rayN&G 客户端有全局 mux.cool 设置，用 XHTTP 前记得关闭，不然连不上新版 Xray 服务端",
       "info4": "VLESS 替换为 Trojan",
       "info5": "利用 VLESS+Vision+REALITY 回落 VLESS+XHTTP 共用 443 端口",
-      "info6": "通过 Nginx 的 SNI 分流共用 443 端口，实现 REALITY 直连与过 CDN 共存"
+      "info6": "通过 Nginx 的 SNI 分流共用 443 端口，实现 REALITY 直连与过 CDN 共存",
+      "info7": "仅启用 CDN（XHTTP over TLS），不包含 REALITY 直连"
     },
     "web_config": {
       "title": "Web 配置",
@@ -181,6 +183,8 @@
     "short": "请输入 shortId (多个值请用英文逗号分隔，默认自动生成): ",
     "short_id_tip": "支持输入 0 到 8 自动生成对应倍数长度的 shortId",
     "path": "请输入 path (默认自动生成): ",
+    "xhttp_mode": "请输入 XHTTP 传输模式 (默认 auto): ",
+    "xhttp_mode_tip": "常用模式: auto(自动选择), stream(流式), packet(包式)。留空默认 auto",
     "warp_ip": "请输入分流到 WARP 的 ip",
     "warp_domain": "请输入分流到 WARP 的 domain",
     "block_ip": "请输入分流到 block 的 ip",

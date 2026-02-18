@@ -63,6 +63,7 @@
       "option4": "Trojan+XHTTP+REALITY",
       "option5": "Dual Protocol Composite",
       "option6": "SNI Split Composite",
+      "option7": "CDN Standalone",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
       "info3": "XHTTP supports all scenarios",
@@ -70,7 +71,8 @@
       "info3_2": "v2rayN&G clients have global mux.cool settings, disable before using XHTTP",
       "info4": "Replace VLESS with Trojan",
       "info5": "Use VLESS+Vision+REALITY fallback to VLESS+XHTTP on port 443",
-      "info6": "SNI-based split through Nginx on port 443, supports CDN and direct connection"
+      "info6": "SNI-based split through Nginx on port 443, supports CDN and direct connection",
+      "info7": "CDN only (XHTTP over TLS), no REALITY direct link"
     },
     "web_config": {
       "title": "Web Config",
@@ -181,6 +183,8 @@
     "short": "Enter shortId (comma separated, default auto-generated): ",
     "short_id_tip": "Supports input 0 to 8 to automatically generate shortId of corresponding length",
     "path": "Enter path (default auto-generated): ",
+    "xhttp_mode": "Enter XHTTP mode (default auto): ",
+    "xhttp_mode_tip": "Common modes: auto, stream, packet. Leave empty for auto.",
     "warp_ip": "Enter IP to route to WARP",
     "warp_domain": "Enter domain to route to WARP",
     "block_ip": "Enter IP to route to block",

@@ -292,6 +292,9 @@ function exec_read() {
             # 验证路径
             exec_check '--path' "${result}" || continue
             ;;
+        xhttp-mode)
+            result="${result:-auto}"
+            ;;
         esac
         # 输入验证通过，设置 flag 为 false 退出循环
         flag=false
@@ -521,8 +524,10 @@ function handler_script_config() {
     local KCP_SEED="${CONFIG_DATA['seed']:-$(exec_generate '--password')}"
     # 获取或生成 XHTTP 路径
     local XHTTP_PATH="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
+    local XHTTP_MODE="${CONFIG_DATA['xhttp-mode']:-auto}"
     # 获取或生成目标域名
     local TARGET_DOMAIN="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
+    local NGINX_DOMAIN="${CONFIG_DATA['domain']:-${TARGET_DOMAIN}}"
     # 生成服务器名称列表
     local SERVER_NAMES="$(exec_generate '--server-names' "${TARGET_DOMAIN}")"
     # 获取 CDN 域名
@@ -545,7 +550,7 @@ function handler_script_config() {
         # 更新 Trojan 密码
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg password "${TROJAN_PASSWORD}" '.xray.trojan = $password')"
         ;;
-    mkcp | vision | xhttp | fallback | sni)
+    mkcp | vision | xhttp | fallback | sni | cdn)
         # 更新 UUID
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.xray.uuid = $uuid')"
         ;;
@@ -566,15 +571,21 @@ function handler_script_config() {
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${FALLBACK_UUID}" '.xray.fallback = $uuid')"
         # 为 SNI 更新 CA 邮箱、域名和 CDN
         [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${TARGET_DOMAIN}" '.nginx.domain = $domain')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${NGINX_DOMAIN}" '.nginx.domain = $domain')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        ;;
+    cdn)
+        [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${NGINX_DOMAIN}" '.nginx.domain = $domain')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
         ;;
     esac
     # 根据配置标签更新特定字段 (第三部分)
     case "${CONFIG_TAG,,}" in
-    xhttp | trojan | fallback | sni)
+    xhttp | trojan | fallback | sni | cdn)
         # 更新路径
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg path "${XHTTP_PATH}" '.xray.path = $path')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mode "${XHTTP_MODE}" '.xray.xhttpMode = $mode')"
         ;;
     esac
     # 根据配置标签更新特定字段 (第四部分)
@@ -657,6 +668,7 @@ function handler_xray_config() {
     local PRIVATE_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.privateKey')"        # 获取私钥
     local SHORT_IDS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds')"            # 获取 Short IDs
     local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path')"               # 获取路径
+    local XHTTP_MODE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')"
     local XRAY_RULES_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')" # 获取规则状态
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"        # 获取 bt 规则状态
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"        # 获取 cn 规则状态
@@ -676,8 +688,8 @@ function handler_xray_config() {
     fi
     # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' ${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json)"
-    # 如果配置标签不是 sni，则更新端口
-    if [[ "${CONFIG_TAG,,}" != 'sni' ]]; then
+    # 如果配置标签不是 sni/cdn，则更新端口
+    if [[ "${CONFIG_TAG,,}" != 'sni' && "${CONFIG_TAG,,}" != 'cdn' ]]; then
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.inbounds[1].port = $port')"
     fi
     # 若启用了 VLESS enc，将 decryption 写入 VLESS inbounds
@@ -691,7 +703,7 @@ function handler_xray_config() {
     fi
     # 根据配置标签更新特定字段 (第一部分)
     case "${CONFIG_TAG,,}" in
-    mkcp | vision | xhttp | fallback | sni)
+    mkcp | vision | xhttp | fallback | sni | cdn)
         # 更新客户端 UUID
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.inbounds[1].settings.clients[0].id = $uuid')"
         ;;
@@ -719,14 +731,16 @@ function handler_xray_config() {
     esac
     # 根据配置标签更新特定字段 (第三部分)
     case "${CONFIG_TAG,,}" in
-    xhttp | trojan)
+    xhttp | trojan | cdn)
         # 更新 XHTTP 路径
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg path "${XHTTP_PATH}" '.inbounds[1].streamSettings.xhttpSettings.path = $path')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg mode "${XHTTP_MODE}" '.inbounds[1].streamSettings.xhttpSettings.mode = $mode')"
         ;;
     fallback | sni)
         # 更新 Fallback 客户端 UUID 和 XHTTP 路径
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg uuid "${FALLBACK_UUID}" '.inbounds[2].settings.clients[0].id = $uuid')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg path "${XHTTP_PATH}" '.inbounds[2].streamSettings.xhttpSettings.path = $path')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg mode "${XHTTP_MODE}" '.inbounds[2].streamSettings.xhttpSettings.mode = $mode')"
         ;;
     esac
     # 处理路由规则
@@ -832,7 +846,7 @@ function handler_read_xray_config() {
     # 根据配置标签读取特定参数 (第一部分)
     case "${CONFIG_TAG,,}" in
     trojan) exec_read 'password' ;;                             # 读取 Trojan 密码
-    mkcp | vision | xhttp | fallback | sni) exec_read 'uuid' ;; # 读取 UUID
+    mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' ;; # 读取 UUID
     esac
     # 根据配置标签读取特定参数 (第二部分)
     case "${CONFIG_TAG,,}" in
@@ -842,7 +856,7 @@ function handler_read_xray_config() {
     # 根据配置标签读取特定参数 (第三部分)
     case "${CONFIG_TAG,,}" in
     vision | xhttp | trojan | fallback) exec_read 'target' ;; # 读取目标域名
-    sni)
+    sni | cdn)
         # 为 SNI 配置读取域名和 CDN
         local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
         # 如果 CA 邮箱为空，则读取邮箱
@@ -857,7 +871,10 @@ function handler_read_xray_config() {
     esac
     # 根据配置标签读取特定参数 (第五部分)
     case "${CONFIG_TAG,,}" in
-    xhttp | trojan | fallback | sni) exec_read 'path' ;; # 读取路径
+    xhttp | trojan | fallback | sni | cdn)
+        exec_read 'path'
+        exec_read 'xhttp-mode'
+        ;;
     esac
 }
 
@@ -882,7 +899,7 @@ function handler_sni_config() {
         handler_cloudreve_v4 'stop'
         handler_nginx_stop
         ;;
-    sni)
+    sni | cdn)
         # 为域名和 CDN 配置 Nginx 和 SSL
         handler_change_domain 'domain' 'n'
         handler_change_domain 'cdn' 'n'

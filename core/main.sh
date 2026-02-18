@@ -151,6 +151,7 @@ function exec_handler() {
 
 function processes_web_config() {
     local is_change="${1:-y}" # 获取 is_change 参数，默认为 'y'
+    local config_tag="${2:-SNI}"
     # 显示 Web 配置菜单
     exec_menu '--web'
     # 获取菜单选择的退出码 (代表用户选择)
@@ -167,7 +168,7 @@ function processes_web_config() {
         exec_handler '--web' "${web}"
     else
         # 如果 is_change 为 'n'，则执行完整安装流程
-        exec_handler '--script-config' 'SNI'  # 设置脚本配置为 SNI
+        exec_handler '--script-config' "${config_tag}" # 设置脚本配置为 SNI/CDN
         exec_handler '--install'              # 安装核心组件
         exec_handler '--nginx-install'        # 安装 Nginx
         exec_handler '--xray-config' "${web}" # 配置 Xray 使用选定的 web 类型
@@ -200,12 +201,15 @@ function processes_xray_config() {
     4) XTLS_CONFIG='Trojan' ;;   # 选择 4 对应 Trojan
     5) XTLS_CONFIG='Fallback' ;; # 选择 5 对应 Fallback
     6) XTLS_CONFIG='SNI' ;;      # 选择 6 对应 SNI
+    7) XTLS_CONFIG='CDN' ;;      # 选择 7 对应 CDN
     *) XTLS_CONFIG='Vision' ;;   # 其他情况 (包括 2 和默认) 对应 Vision
     esac
     # 如果选择了 SNI 配置
     if [[ "${XTLS_CONFIG}" == 'SNI' ]]; then
         # 调用 processes_web_config 处理 SNI 特殊流程 (不执行完整安装)
-        processes_web_config 'n'
+        processes_web_config 'n' 'SNI'
+    elif [[ "${XTLS_CONFIG}" == 'CDN' ]]; then
+        processes_web_config 'n' 'CDN'
     else
         # 对于其他配置类型
         exec_handler '--script-config' "${XTLS_CONFIG}" # 设置脚本配置

@@ -142,6 +142,7 @@ declare -A param_map=(
     ["--email"]="config,email"
     ["--short"]="config,short"
     ["--path"]="config,path"
+    ["--xhttp-mode"]="config,xhttp_mode"
     ["--warp-ip"]="rule,warp_ip"
     ["--warp-domain"]="rule,warp_domain"
     ["--block-ip"]="rule,block_ip"
@@ -183,6 +184,9 @@ function main() {
     # 对于 --short 参数，额外打印一条关于 Short ID 格式的提示
     if [[ "$1" == "--short" ]]; then
         echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r '.read.short_id_tip')" >&2
+    fi
+    if [[ "$1" == "--xhttp-mode" ]]; then
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r '.read.xhttp_mode_tip')" >&2
     fi
 
     # 调用 read_input 函数显示提示信息
