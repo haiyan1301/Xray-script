@@ -1418,6 +1418,7 @@ function handler_ssl_install() {
 function handler_change_domain() {
     # 获取 XHTTP PATH
     local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path')"
+    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
     # 获取目标域名类型参数
     local target_domain="$1"
     # 获取管理停止证书签发服务参数
@@ -1509,24 +1510,32 @@ function handler_change_domain() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${old_domain}" 'if $key == "domain" then del(.target[$key]) else . end')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" 'if $key == "domain" then .xray.target = $domain else . end')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${CONFIG_DATA["${target_domain}"]}" 'if $key == "domain" then .xray.serverNames = [$domain] else . end')"
-    # 删除旧域名的 Nginx 配置文件
-    rm -rf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
-    # 复制 stream.conf 配置模板到 modules-enabled 目录
-    cp -f "${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
-    # 替换 stream.conf 的 example.com 与 cdn.example.com 为实际域名
-    sed -i "s|cdn.example.com|$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn')|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
-    sed -i "s|example.com|$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain')|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+    if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
+        # 删除旧域名的 Nginx 配置文件
+        rm -rf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
+        # 复制 stream.conf 配置模板到 modules-enabled 目录
+        cp -f "${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+        # 替换 stream.conf 的 example.com 与 cdn.example.com 为实际域名
+        sed -i "s|cdn.example.com|$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn')|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+        sed -i "s|example.com|$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain')|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+    else
+        rm -rf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
+    fi
     # 将更新后的脚本配置写入文件
     echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
     # 如果仅更新域名
     if [[ "${CONFIG_DATA['only-change-domain'],,}" == "y" ]]; then
         # 恢复备份的 Nginx 配置文件
-        mv -f ${SCRIPT_CONFIG_DIR}/stream.conf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
+        if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
+            mv -f ${SCRIPT_CONFIG_DIR}/stream.conf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
+        fi
         mv -f ${SCRIPT_CONFIG_DIR}/${old_domain}.conf ${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf
         rm -rf "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
         # 更新域名
         sed -i "s|${old_domain}|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-        sed -i "s|${old_domain}|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+        if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
+            sed -i "s|${old_domain}|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
+        fi
         # 创建从 available 到 enabled 的软链接
         ln -sf "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf" "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
     fi
