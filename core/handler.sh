@@ -662,7 +662,7 @@ function handler_xray_config() {
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ip')"        # 获取 ad 规则状态
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
-    local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // "")'  # VLESS enc 服务端 decryption
+    local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')" # VLESS enc 服务端 decryption
     # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' ${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json)"
     # 如果配置标签不是 sni，则更新端口
