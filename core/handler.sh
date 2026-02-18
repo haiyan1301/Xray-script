@@ -768,8 +768,14 @@ function handler_xray_config() {
 # 返回值: 无 (直接修改 CONFIG_DATA 全局关联数组)
 # =============================================================================
 function run_vlessenc_prompt() {
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
-    read -r vless_enc_reply
+    local auto="${1:-0}"
+    local vless_enc_reply
+    if [[ "${auto}" != "1" ]]; then
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
+        read -r vless_enc_reply
+    else
+        vless_enc_reply="y"
+    fi
     if [[ "${vless_enc_reply,,}" != "y" ]]; then
         return 0
     fi
@@ -1673,7 +1679,7 @@ function handler_quick_install() {
     handler_install 'release'
     # 仅 VLESS 类模板询问是否启用 VLESS enc
     if [[ "${quick_install_type,,}" != 'trojan' ]]; then
-        run_vlessenc_prompt
+        run_vlessenc_prompt 1
         # 若用户选择了 VLESS enc，将结果写回脚本配置
         if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
             SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
