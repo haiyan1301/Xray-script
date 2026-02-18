@@ -642,6 +642,7 @@ function handler_x25519_config() {
 # 返回值: 无 (直接修改 XRAY_CONFIG 全局变量和 XRAY_CONFIG_PATH/SCRIPT_CONFIG_PATH 文件)
 # =============================================================================
 function handler_xray_config() {
+    local skip_vlessenc="${1:-0}"
     # 打印绿色的 Xray 配置更新提示
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray.config_update")" >&2
     # 从脚本配置中读取各项参数
@@ -662,7 +663,17 @@ function handler_xray_config() {
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ip')"        # 获取 ad 规则状态
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
-    local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')" # VLESS enc 服务端 decryption
+    local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
+        if [[ -z "${VLESS_ENC_DECRYPTION}" ]]; then
+            run_vlessenc_prompt
+            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+            fi
+        fi
+    fi
     # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' ${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json)"
     # 如果配置标签不是 sni，则更新端口
@@ -842,10 +853,6 @@ function handler_read_xray_config() {
     case "${CONFIG_TAG,,}" in
     xhttp | trojan | fallback | sni) exec_read 'path' ;; # 读取路径
     esac
-    # VLESS 类配置（非 Trojan）时询问是否启用 VLESS enc
-    if [[ "${CONFIG_TAG,,}" != 'trojan' ]]; then
-        run_vlessenc_prompt
-    fi
 }
 
 # =============================================================================
@@ -1014,6 +1021,9 @@ function handler_purge() {
 # 返回值: 无 (通过 systemctl 命令执行操作)
 # =============================================================================
 function handler_start() {
+    if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        handler_xray_config 1
+    fi
     # 检查 Xray 服务是否活跃，如果不活跃则启动
     systemctl -q is-active xray || systemctl -q start xray
     # 检查 Xray 服务是否已启用，如果未启用则启用
@@ -1048,6 +1058,9 @@ function handler_stop() {
 # 返回值: 无 (通过 systemctl 命令执行操作)
 # =============================================================================
 function handler_restart() {
+    if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        handler_xray_config 1
+    fi
     # 检查 Xray 服务是否活跃，如果活跃则重启，否则启动
     systemctl -q is-active xray && systemctl -q restart xray || systemctl -q start xray
     # 检查 Xray 服务是否已启用，如果未启用则启用
