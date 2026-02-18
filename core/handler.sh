@@ -676,13 +676,20 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    local FORCE_VLESSENC=0
+    if [[ "${CONFIG_TAG,,}" == 'sni' || "${CONFIG_TAG,,}" == 'cdn' ]]; then
+        FORCE_VLESSENC=1
+    fi
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
-        if [[ -z "${VLESS_ENC_DECRYPTION}" ]]; then
+        if [[ -z "${VLESS_ENC_DECRYPTION}" || "${FORCE_VLESSENC}" == "1" ]]; then
             run_vlessenc_prompt
             if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
                 SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
                 SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
                 VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+            elif [[ "${FORCE_VLESSENC}" == "1" ]]; then
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+                VLESS_ENC_DECRYPTION=""
             fi
         fi
     fi
