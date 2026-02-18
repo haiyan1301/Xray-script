@@ -676,21 +676,15 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
-    local FORCE_VLESSENC=0
-    if [[ "${CONFIG_TAG,,}" == 'sni' || "${CONFIG_TAG,,}" == 'cdn' ]]; then
-        FORCE_VLESSENC=1
-    fi
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
-        if [[ -z "${VLESS_ENC_DECRYPTION}" || "${FORCE_VLESSENC}" == "1" ]]; then
-            run_vlessenc_prompt
-            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
-            elif [[ "${FORCE_VLESSENC}" == "1" ]]; then
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
-                VLESS_ENC_DECRYPTION=""
-            fi
+        run_vlessenc_prompt
+        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+            VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+        else
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+            VLESS_ENC_DECRYPTION=""
         fi
     fi
     # 加载对应配置标签的 Xray 配置模板
@@ -1452,39 +1446,57 @@ function handler_change_domain() {
     sed -i "s|example.com|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
     # 替换配置文件中的 /yourpath 为 xhttp path
     sed -i "s|/yourpath|${XHTTP_PATH}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
+    if [[ "${CONFIG_TAG,,}" == "cdn" && "${target_domain}" == "cdn" ]]; then
+        local site_conf="${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
+        sed -i $'s|listen .*cdn_to_nginx.sock.*|listen 443 ssl reuseport;\\\n    listen [::]:443 ssl reuseport;|g' "${site_conf}"
+        sed -i '/set_real_ip_from[[:space:]]\+unix:;/d' "${site_conf}"
+        sed -i '/real_ip_header[[:space:]]\+proxy_protocol;/d' "${site_conf}"
+        if ! grep -q "server_name" "${site_conf}"; then
+            sed -i "/listen \\[::\\]:443 ssl reuseport;/a\\    server_name               ${CONFIG_DATA["${target_domain}"]};" "${site_conf}"
+        fi
+    fi
     # 创建从 available 到 enabled 的软链接
     ln -sf "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf" "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 询问证书来源：自动申请(acme) 或 自行填写证书路径
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.prompt")" >&2
-    read -r cert_source_reply
-    cert_source_reply="${cert_source_reply:-1}"
+    local cert_source_reply="${CONFIG_DATA['cert_source']:-}"
+    if [[ -z "${cert_source_reply}" ]]; then
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.prompt")" >&2
+        read -r cert_source_reply
+        cert_source_reply="${cert_source_reply:-1}"
+        CONFIG_DATA['cert_source']="${cert_source_reply}"
+    fi
     local cert_ok=false
     if [[ "${cert_source_reply}" == "2" ]]; then
-        # 自行填写证书路径
+        local cached_fullchain="${CONFIG_DATA['cert_fullchain']:-}"
+        local cached_privkey="${CONFIG_DATA['cert_privkey']:-}"
         local cert_dir="${NGINX_CONFIG_DIR}/certs/${CONFIG_DATA["${target_domain}"]}"
-        local user_fullchain user_privkey
-        while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.fullchain")" >&2
-            read -r user_fullchain
-            user_fullchain="$(echo "${user_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-            [[ -z "${user_fullchain}" ]] && continue
-            if [[ ! -r "${user_fullchain}" ]]; then
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
-                continue
-            fi
-            break
-        done
-        while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.privkey")" >&2
-            read -r user_privkey
-            user_privkey="$(echo "${user_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-            [[ -z "${user_privkey}" ]] && continue
-            if [[ ! -r "${user_privkey}" ]]; then
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
-                continue
-            fi
-            break
-        done
+        local user_fullchain="${cached_fullchain}"
+        local user_privkey="${cached_privkey}"
+        if [[ -z "${user_fullchain}" || -z "${user_privkey}" || ! -r "${user_fullchain}" || ! -r "${user_privkey}" ]]; then
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.fullchain")" >&2
+                read -r user_fullchain
+                user_fullchain="$(echo "${user_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -z "${user_fullchain}" ]] && continue
+                if [[ ! -r "${user_fullchain}" ]]; then
+                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                    continue
+                fi
+                break
+            done
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.privkey")" >&2
+                read -r user_privkey
+                user_privkey="$(echo "${user_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -z "${user_privkey}" ]] && continue
+                if [[ ! -r "${user_privkey}" ]]; then
+                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                    continue
+                fi
+                break
+            done
+            CONFIG_DATA['cert_fullchain']="${user_fullchain}"
+            CONFIG_DATA['cert_privkey']="${user_privkey}"
+        fi
         mkdir -p "${cert_dir}"
         cp -f "${user_fullchain}" "${cert_dir}/fullchain.pem" && cp -f "${user_privkey}" "${cert_dir}/privkey.pem" && cert_ok=true
         if [[ "${cert_ok}" == true ]]; then
