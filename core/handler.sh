@@ -862,12 +862,12 @@ function handler_read_xray_config() {
     # 根据配置标签读取特定参数 (第三部分)
     case "${CONFIG_TAG,,}" in
     vision | xhttp | trojan | fallback) exec_read 'target' ;; # 读取目标域名
-    sni | cdn)
+    sni)
         # 为 SNI 配置读取域名和 CDN
-        local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
-        # 如果 CA 邮箱为空，则读取邮箱
-        [[ -z "${CA_EMAIL}" ]] && exec_read 'email'
         exec_read 'domain' # 读取域名
+        exec_read 'cdn'    # 读取 CDN
+        ;;
+    cdn)
         exec_read 'cdn'    # 读取 CDN
         ;;
     esac
@@ -1505,10 +1505,18 @@ function handler_change_domain() {
         mkdir -p "${cert_dir}"
         cp -f "${user_fullchain}" "${cert_dir}/fullchain.pem" && cp -f "${user_privkey}" "${cert_dir}/privkey.pem" && cert_ok=true
         if [[ "${cert_ok}" == true ]]; then
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
-        fi
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
     fi
     if [[ "${cert_ok}" != true ]]; then
+        local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
+        # 如果 CA 邮箱为空，则读取邮箱
+        if [[ -z "${CA_EMAIL}" ]]; then
+            exec_read 'email'
+            CA_EMAIL="${CONFIG_DATA['email']}"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
+            echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        fi
+        handler_ssl_install
         # 自动申请 SSL 证书
         if exec_ssl '--issue' --domain=${CONFIG_DATA["${target_domain}"]}; then
             cert_ok=true
