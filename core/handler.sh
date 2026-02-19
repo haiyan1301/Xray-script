@@ -681,13 +681,19 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    local VLESS_ENC_ENABLE="${CONFIG_DATA['vless_enc_enable']:-}"
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
-        run_vlessenc_prompt
-        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-            VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
-        else
+        if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
+            run_vlessenc_prompt 1
+            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+            else
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+                VLESS_ENC_DECRYPTION=""
+            fi
+        elif [[ "${VLESS_ENC_ENABLE}" == "n" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
             VLESS_ENC_DECRYPTION=""
         fi
@@ -787,6 +793,18 @@ function handler_xray_config() {
 # 参数: 无
 # 返回值: 无 (直接修改 CONFIG_DATA 全局关联数组)
 # =============================================================================
+function run_vlessenc_choice() {
+    local vless_enc_reply
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
+    read -r vless_enc_reply
+    vless_enc_reply="${vless_enc_reply:-n}"
+    if [[ "${vless_enc_reply,,}" == "y" ]]; then
+        CONFIG_DATA['vless_enc_enable']="y"
+    else
+        CONFIG_DATA['vless_enc_enable']="n"
+    fi
+}
+
 function run_vlessenc_prompt() {
     local auto="${1:-0}"
     local vless_enc_reply
@@ -837,6 +855,9 @@ function handler_read_xray_config() {
     fi
     # 将配置标签存储到 CONFIG_DATA
     CONFIG_DATA['tag']="${CONFIG_TAG}"
+    if [[ "${CONFIG_TAG,,}" != 'trojan' ]]; then
+        run_vlessenc_choice
+    fi
     # 检查脚本配置中的规则状态，如果是 current 或 reset 则读取规则输入
     if echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset' | grep -Eq '^(0|1)$'; then
         exec_read 'rules'
