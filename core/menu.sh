@@ -21,71 +21,24 @@
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-# 将常用路径添加到 PATH 环境变量，确保脚本能在不同环境中找到所需命令
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
-export PATH
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"
+readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)"
 
-# 定义颜色代码，用于在终端输出带颜色的信息
-readonly GREEN='\033[32m'  # 绿色
-readonly YELLOW='\033[33m' # 黄色
-readonly RED='\033[31m'    # 红色
-readonly NC='\033[0m'      # 无颜色（重置）
-
-# 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
-readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
-readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# 引入公共库
+source "${PROJECT_ROOT}/lib/common.sh"
 
 # 定义配置文件和相关目录的路径
-readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
-readonly I18N_DIR="${PROJECT_ROOT}/i18n"                       # 国际化文件目录
-readonly CONFIG_DIR="${PROJECT_ROOT}/config"                   # 配置文件目录
-readonly GENERATE_PATH="${CUR_DIR}/generate.sh"                # 项目中的 generate.sh 脚本路径
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
+readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
+readonly I18N_DIR="${PROJECT_ROOT}/i18n"
+readonly CONFIG_DIR="${PROJECT_ROOT}/config"
+readonly GENERATE_PATH="${CUR_DIR}/generate.sh"
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 
 # --- 全局变量声明 ---
-# 声明用于存储语言参数和国际化数据的全局变量
-declare LANG_PARAM='' # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''  # 存储从 i18n JSON 文件中读取的全部数据
+declare LANG_PARAM=''
+declare I18N_DATA=''
 
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从脚本配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
-
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
 
 # =============================================================================
 # 函数名称: menu_language
@@ -323,14 +276,14 @@ function menu_route() {
     # 打印选项 5
     echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option5")"
     # 打印选项 6
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option6")"
+    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option6")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
-    # 打印选项 1 的说明信息 (有重复)
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info1")"
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info2")"
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info3")"
+    # 打印选项 1 的说明信息
+    echo -e "1.1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info1")"
+    echo -e "1.2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info2")"
+    echo -e "1.3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info3")"
     # 打印选项 2 的说明信息
     echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info4")"
     # 打印选项 3 的说明信息

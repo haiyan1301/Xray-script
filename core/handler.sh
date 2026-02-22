@@ -25,191 +25,73 @@
 #   - ${HOME}/.acme.sh/: 读取和写入 SSL 证书相关文件
 # =============================================================================
 
+
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-# 将常用路径添加到 PATH 环境变量，确保脚本能在不同环境中找到所需命令
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
-export PATH
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"
+readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)"
 
-# 定义颜色代码，用于在终端输出带颜色的信息
-readonly GREEN='\033[32m'  # 绿色
-readonly YELLOW='\033[33m' # 黄色
-readonly RED='\033[31m'    # 红色
-readonly NC='\033[0m'      # 无颜色（重置）
-
-# 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
-readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
-readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# 引入公共库
+source "${PROJECT_ROOT}/lib/common.sh"
 
 # 定义项目内相关目录和脚本的路径
-readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script" # 主配置文件目录
-readonly I18N_DIR="${PROJECT_ROOT}/i18n"          # 国际化文件目录
-readonly CONFIG_DIR="${PROJECT_ROOT}/config"      # 配置文件目录
-readonly SERVICE_DIR="${PROJECT_ROOT}/service"    # 服务管理脚本目录
-readonly TOOL_DIR="${PROJECT_ROOT}/tool"          # 工具脚本目录
-readonly SCRIPT_XRAY_DIR="${CONFIG_DIR}/xray"     # Xray 配置模板目录
-readonly NGINX_CONFIG_DIR="/usr/local/nginx/conf" # Nginx 配置目录 (目标路径)
-# 定义项目内子脚本的路径
-readonly GENERATE_PATH="${CUR_DIR}/generate.sh" # 生成器脚本
-readonly CHECK_PATH="${CUR_DIR}/check.sh"       # 检查器脚本
-readonly SHARE_PATH="${CUR_DIR}/share.sh"       # 分享链接生成脚本
-readonly READ_PATH="${CUR_DIR}/read.sh"         # 用户输入读取脚本
-readonly NGINX_PATH="${SERVICE_DIR}/nginx.sh"   # Nginx 服务管理脚本
-readonly SSL_PATH="${SERVICE_DIR}/ssl.sh"       # SSL 证书管理脚本
-readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh" # Docker 容器管理脚本
-readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"  # 流量统计脚本
-readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"  # GeoData 更新脚本
-# 定义外部配置文件和脚本的路径
-readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"    # Xray 最终配置文件路径
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
-readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"                  # ACME.sh 脚本路径
+readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
+readonly I18N_DIR="${PROJECT_ROOT}/i18n"
+readonly CONFIG_DIR="${PROJECT_ROOT}/config"
+readonly SERVICE_DIR="${PROJECT_ROOT}/service"
+readonly TOOL_DIR="${PROJECT_ROOT}/tool"
+readonly SCRIPT_XRAY_DIR="${CONFIG_DIR}/xray"
+readonly NGINX_CONFIG_DIR="/usr/local/nginx/conf"
+readonly GENERATE_PATH="${CUR_DIR}/generate.sh"
+readonly CHECK_PATH="${CUR_DIR}/check.sh"
+readonly SHARE_PATH="${CUR_DIR}/share.sh"
+readonly READ_PATH="${CUR_DIR}/read.sh"
+readonly NGINX_PATH="${SERVICE_DIR}/nginx.sh"
+readonly SSL_PATH="${SERVICE_DIR}/ssl.sh"
+readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh"
+readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"
+readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"
+readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
+readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"
 
 # --- 全局变量声明 ---
-# 声明用于存储配置数据和国际化数据的全局变量
-declare SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")" # 存储从 config.json 读取的脚本配置
-declare XRAY_CONFIG=""                                    # 存储 Xray 配置 (通常在运行时加载)
-declare LANG_PARAM=''                                     # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''                                      # 存储从 i18n JSON 文件中读取的全部数据
-# 声明一个关联数组，用于在脚本运行时临时存储用户输入的配置数据
-declare -A CONFIG_DATA # 用于临时存储用户输入的配置数据
+declare SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
+declare XRAY_CONFIG=""
+declare LANG_PARAM=''
+declare I18N_DATA=''
+declare -A CONFIG_DATA
 
 # =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
-    fi
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
-
-# =============================================================================
-# 函数名称: _error
-# 功能描述: 打印错误信息到标准错误输出并退出脚本。
-# 参数:
-#   $@: 要输出的错误信息文本
-# 返回值: 无 (直接打印到标准错误输出 >&2 并退出)
-# 退出码: 1
+# handler.sh 专用函数
 # =============================================================================
 function _error() {
-    # 打印红色的错误标题（从 i18n 数据获取）
     printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}" >&2
-    # 打印传入的错误信息
     printf -- "%s" "$@" >&2
-    # 打印换行符
     printf "\n" >&2
-    # 退出脚本，错误码为 1
     exit 1
 }
 
-# =============================================================================
-# 函数名称: exec_generate
-# 功能描述: 执行 generate.sh 脚本，用于生成 UUID、密码、密钥等。
-# 参数:
-#   $@: 传递给 generate.sh 脚本的参数
-# 返回值: generate.sh 脚本的输出 (echo 输出)
-# =============================================================================
 function exec_generate() {
-    # 执行 generate.sh 脚本，并传递所有参数
     bash "${GENERATE_PATH}" "$@"
 }
 
-# =============================================================================
-# 函数名称: exec_docker
-# 功能描述: 执行 docker.sh 脚本，用于管理 Docker 相关操作。
-#           如果执行失败，则退出当前脚本。
-# 参数:
-#   $@: 传递给 docker.sh 脚本的参数
-# 返回值: 无 (docker.sh 的退出码即为当前函数的退出码)
-# 退出码: 如果 docker.sh 执行失败 (返回非 0)，则当前脚本也退出 (|| exit 1)
-# =============================================================================
 function exec_docker() {
-    # 执行 docker.sh 脚本，并传递所有参数
-    # 如果 docker.sh 返回非 0 状态码，则当前脚本也退出
     bash "${DOCKER_PATH}" "$@" || exit 1
 }
 
-# =============================================================================
-# 函数名称: exec_ssl
-# 功能描述: 执行 ssl.sh 脚本，用于管理 SSL 证书相关操作。
-# 参数:
-#   $@: 传递给 ssl.sh 脚本的参数
-# 返回值: ssl.sh 脚本的退出码 (通过 return $? 返回)
-# =============================================================================
 function exec_ssl() {
-    # 执行 ssl.sh 脚本，并传递所有参数
     bash "${SSL_PATH}" "$@"
     return $?
 }
 
-# =============================================================================
-# 函数名称: exec_check
-# 功能描述: 执行 check.sh 脚本，用于验证输入或配置的有效性。
-# 参数:
-#   $@: 传递给 check.sh 脚本的参数
-# 返回值: check.sh 脚本的退出码 (通过 return $? 返回)
-# =============================================================================
 function exec_check() {
-    # 执行 check.sh 脚本，并传递所有参数
     bash "${CHECK_PATH}" "$@"
-    # 返回 check.sh 脚本的退出码
     return $?
 }
 
-# =============================================================================
-# 函数名称: cmd_exists
-# 功能描述: 检查系统中是否存在指定的命令。
-# 参数:
-#   $1: 要检查的命令名称
-# 返回值: 无 (通过 return $rt 返回检查结果)
-# 退出码: 0 (命令存在), 非 0 (命令不存在)
-# =============================================================================
-function cmd_exists() {
-    local cmd="$1" # 获取要检查的命令名称
-    local rt=0     # 初始化返回码为 0 (表示存在)
-    # 尝试使用不同的方法检查命令是否存在
-    if eval type type >/dev/null 2>&1; then
-        # 使用 type 命令检查
-        eval type "$cmd" >/dev/null 2>&1
-    elif command >/dev/null 2>&1; then
-        # 使用 command -v 命令检查
-        command -v "$cmd" >/dev/null 2>&1
-    else
-        # 使用 which 命令检查
-        which "$cmd" >/dev/null 2>&1
-    fi
-    # 获取检查命令的退出码
-    rt=$?
-    # 返回检查结果
-    return ${rt}
-}
 
 # =============================================================================
 # 函数名称: exec_read
@@ -486,7 +368,7 @@ function handler_reset_script_config() {
         ;;
     esac
     # 将重置后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -611,7 +493,7 @@ function handler_script_config() {
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
     fi
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -642,7 +524,7 @@ function handler_x25519_config() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg publicKey "${PUBLIC_KEY}" '.xray.publicKey = $publicKey')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg hash32 "${HASH32}" '.xray.hash32 = $hash32')"
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -677,7 +559,7 @@ function handler_xray_config() {
     local XRAY_RULES_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')" # 获取规则状态
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"        # 获取 bt 规则状态
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"        # 获取 cn 规则状态
-    local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ip')"        # 获取 ad 规则状态
+    local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"        # 获取 ad 规则状态
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
@@ -782,7 +664,7 @@ function handler_xray_config() {
     # 更新脚本配置中的路由规则
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
     # 将更新后的脚本配置和 Xray 配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     echo "${XRAY_CONFIG}" >"${XRAY_CONFIG_PATH}" && sleep 2
 }
 
@@ -966,7 +848,7 @@ function handler_xray_version() {
     # 更新脚本配置中的 Xray 版本
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg xray "${CONFIG_DATA['version']}" '.xray.version = $xray')"
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -999,7 +881,7 @@ function handler_change_xray_port() {
     # 更新脚本配置中的 Xray 端口
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.xray.port = $port')"
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -1057,7 +939,7 @@ function handler_purge() {
     # 重置 xray 字段
     SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')
     # 将重置后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -1234,7 +1116,7 @@ function handler_warp() {
     # 更新脚本配置中的 WARP 状态
     SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg warp "${WARP_STATUS}" '.xray.warp = $warp')
     # 将更新后的脚本配置和 Xray 配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     echo "${XRAY_CONFIG}" >"${XRAY_CONFIG_PATH}" && sleep 2
 }
 
@@ -1292,7 +1174,7 @@ function handler_nginx_install() {
         # 更新脚本配置中的 Nginx 版本
         SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg version "${NGINX_VERSION}" '.nginx.version = $version')
         # 将更新后的脚本配置写入文件
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     fi
 }
 
@@ -1319,7 +1201,7 @@ function handler_nginx_purge() {
     # 重置 nginx 字段
     SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'nginx')
     # 将重置后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -1535,7 +1417,7 @@ function handler_change_domain() {
             exec_read 'email'
             CA_EMAIL="${CONFIG_DATA['email']}"
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
-            echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
         fi
         handler_ssl_install
         # 自动申请 SSL 证书
@@ -1575,7 +1457,7 @@ function handler_change_domain() {
         rm -rf ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf
     fi
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     # 如果仅更新域名
     if [[ "${CONFIG_DATA['only-change-domain'],,}" == "y" ]]; then
         # 恢复备份的 Nginx 配置文件
@@ -1731,7 +1613,7 @@ function handler_web() {
     # 更新脚本配置中的 Web 类型
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg web "${web}" '.nginx.web = $web')"
     # 将更新后的脚本配置写入文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================
@@ -1762,7 +1644,7 @@ function handler_quick_install() {
             SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-            echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
         fi
     fi
     # 生成 x25519 配置

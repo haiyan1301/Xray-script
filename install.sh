@@ -28,30 +28,69 @@
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-# 将常用路径添加到 PATH 环境变量，确保脚本能在不同环境中找到所需命令
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
 export PATH
 
-# 定义颜色代码，用于在终端输出带颜色的信息
-readonly GREEN='\033[32m'  # 绿色
-readonly YELLOW='\033[33m' # 黄色
-readonly RED='\033[31m'    # 红色
-readonly NC='\033[0m'      # 无颜色（重置）
-
 # 获取当前脚本的目录绝对路径和文件名
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
-readonly CUR_FILE="$(basename "$0")"                          # 当前脚本文件名
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+readonly CUR_FILE="$(basename "$0")"
 
 # 定义配置文件和相关目录的路径
-readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
+readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 
-# 发布本安装脚本时请改为你的 GitHub 用户名与仓库名，以便下载/更新都指向你的仓库
+# GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
+readonly SCRIPT_VERSION="v2026.01.23"
+
+# --- 引入公共库 ---
+# install.sh 可能在项目下载之前运行，因此需要内联后备函数
+if [[ -f "${CUR_DIR}/lib/common.sh" ]]; then
+    source "${CUR_DIR}/lib/common.sh"
+else
+    # 内联最小公共函数集（项目尚未下载时使用）
+    readonly GREEN='\033[32m'
+    readonly YELLOW='\033[33m'
+    readonly RED='\033[31m'
+    readonly NC='\033[0m'
+    function cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+    function _os() {
+        local os=""
+        if [[ -f "/etc/debian_version" ]]; then
+            source /etc/os-release && os="${ID}"
+            printf -- "%s" "${os}" && return
+        fi
+        if [[ -f "/etc/redhat-release" ]]; then
+            printf -- "centos" && return
+        fi
+    }
+    function _os_full() {
+        if [[ -f /etc/redhat-release ]]; then
+            awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
+        fi
+        if [[ -f /etc/os-release ]]; then
+            awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
+        fi
+        if [[ -f /etc/lsb-release ]]; then
+            awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
+        fi
+    }
+    function _os_ver() {
+        local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
+        printf -- "%s" "${main_ver%%.*}"
+    }
+    function write_config() {
+        echo "$1" >"$2"
+        chmod 600 "$2"
+        sync
+    }
+    function backup_config() {
+        [[ -f "$1" ]] && cp -f "$1" "$1.bak.$(date +%Y%m%d_%H%M%S)"
+    }
+fi
 
 # --- 全局变量声明 ---
-# 声明用于存储国际化数据、项目根目录和快速安装选项的全局变量
 declare -A I18N_DATA=(
     ['error']='错误'
     ['root']='请使用 root 权限运行该脚本'
@@ -67,102 +106,41 @@ declare -A I18N_DATA=(
     ['download']='正在下载'
     ['failed']='下载失败'
     ['downloaded']='文件已下载到'
-)                        # 默认的国际化数据 (中文)
-declare PROJECT_ROOT=''  # 项目安装根目录 (动态设置)
-declare I18N_DIR=''      # 国际化文件目录 (动态设置)
-declare CORE_DIR=''      # 核心脚本目录 (动态设置)
-declare SERVICE_DIR=''   # 服务配置目录 (动态设置)
-declare CONFIG_DIR=''    # 配置文件目录 (动态设置)
-declare TOOL_DIR=''      # 工具脚本目录 (动态设置)
-declare QUICK_INSTALL='' # 存储快速安装选项 (如 --vision, --xhttp)
-declare SCRIPT_CONFIG='' # 存储脚本配置内容
-declare LANG_PARAM=''    # 存储命令行指定的语言参数
+)
+declare PROJECT_ROOT=''
+declare I18N_DIR=''
+declare CORE_DIR=''
+declare SERVICE_DIR=''
+declare CONFIG_DIR=''
+declare TOOL_DIR=''
+declare QUICK_INSTALL=''
+declare SCRIPT_CONFIG=''
+declare LANG_PARAM=''
 
 # =============================================================================
-# 函数名称: _os
-# 功能描述: 检测当前操作系统的发行版名称。
-# 参数: 无
-# 返回值: 操作系统名称 (echo 输出: debian/ubuntu/centos/amazon/...)
+# 函数名称: show_help
+# 功能描述: 显示脚本帮助信息。
 # =============================================================================
-function _os() {
-    local os="" # 声明局部变量存储操作系统名称
+function show_help() {
+    cat <<EOF
+用法: bash $0 [选项]
 
-    # 检查 Debian/Ubuntu 系列
-    if [[ -f "/etc/debian_version" ]]; then
-        # 读取 /etc/os-release 文件并提取 ID 字段
-        source /etc/os-release && os="${ID}"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
+选项:
+  --vision       快速安装 Vision 配置
+  --xhttp        快速安装 XHTTP 配置
+  --fallback     快速安装 Fallback 配置
+  --lang=<code>  设置语言 (zh/en/auto)
+  -d <path>      自定义安装目录
+  --help         显示此帮助信息
+  --version      显示版本号
 
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f "/etc/redhat-release" ]]; then
-        os="centos"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_full
-# 功能描述: 获取当前操作系统的完整发行版信息。
-# 参数: 无
-# 返回值: 完整的操作系统版本信息 (echo 输出)
-# =============================================================================
-function _os_full() {
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f /etc/redhat-release ]]; then
-        # 从 /etc/redhat-release 文件中提取发行版名称和版本号
-        awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
-    fi
-
-    # 检查通用的 os-release 文件
-    if [[ -f /etc/os-release ]]; then
-        # 从 /etc/os-release 文件中提取 PRETTY_NAME 字段
-        awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
-    fi
-
-    # 检查 LSB (Linux Standard Base) 发布文件
-    if [[ -f /etc/lsb-release ]]; then
-        # 从 /etc/lsb-release 文件中提取 DESCRIPTION 字段
-        awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_ver
-# 功能描述: 获取当前操作系统的主版本号。
-# 参数: 无
-# 返回值: 操作系统的主版本号 (echo 输出)
-# =============================================================================
-function _os_ver() {
-    # 调用 _os_full 函数获取完整版本信息，然后提取其中的数字和点
-    local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
-    # 输出主版本号 (第一个点号前的部分)
-    printf -- "%s" "${main_ver%%.*}"
-}
-
-# =============================================================================
-# 函数名称: cmd_exists
-# 功能描述: 检查指定的命令是否存在于系统中。
-# 参数:
-#   $1: 要检查的命令名称
-# 返回值: 0-命令存在 1-命令不存在 (由命令检查工具的退出码决定)
-# =============================================================================
-function cmd_exists() {
-    local cmd="$1" # 获取命令名称参数
-
-    # 尝试使用不同的方法检查命令是否存在
-    if eval type type >/dev/null 2>&1; then
-        # 使用 type 命令检查
-        eval type "$cmd" >/dev/null 2>&1
-    elif command >/dev/null 2>&1; then
-        # 使用 command -v 命令检查
-        command -v "$cmd" >/dev/null 2>&1
-    else
-        # 使用 which 命令检查
-        which "$cmd" >/dev/null 2>&1
-    fi
+示例:
+  bash $0                    # 启动交互式菜单
+  bash $0 --vision           # 快速安装 Vision
+  bash $0 --lang=en          # 使用英文界面
+  bash $0 -d /opt/xray       # 安装到自定义目录
+EOF
+    exit 0
 }
 
 # =============================================================================
@@ -173,15 +151,20 @@ function cmd_exists() {
 # 返回值: 无 (直接修改全局变量 QUICK_INSTALL, PROJECT_ROOT, LANG_PARAM)
 # =============================================================================
 function parse_args() {
-    # 遍历所有命令行参数
     while [[ $# -gt 0 ]]; do
         case "$1" in
-        # 如果参数是语言设置
         --lang=*)
             LANG_PARAM="${1}"
             ;;
+        --help)
+            show_help
+            ;;
+        --version)
+            echo "Xray-script ${SCRIPT_VERSION}"
+            exit 0
+            ;;
         esac
-        shift # 移动到下一个参数
+        shift
     done
 }
 
@@ -498,17 +481,17 @@ function main() {
     # 检查依赖，如果缺失则安装
     if ! check_dependencies; then
         install_dependencies
-    fi
-
-    # 再次检查依赖 (安装后)
-    if ! check_dependencies; then
-        install_dependencies
+        # 安装后再次检查依赖是否全部就绪
+        if ! check_dependencies; then
+            _error "依赖安装失败，请检查网络连接或手动安装缺失的软件包"
+        fi
     fi
 
     # 检查脚本配置目录和配置文件是否存在，如果不存在则创建并下载默认配置
     if [[ ! -d "${SCRIPT_CONFIG_DIR}" && ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
         mkdir -p "${SCRIPT_CONFIG_DIR}"
         wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
+        chmod 600 "${SCRIPT_CONFIG_PATH}"
     fi
 
     # 处理命令行参数中的快速安装和自定义目录选项
@@ -531,18 +514,18 @@ function main() {
     local script_path="$(jq -r '.path' "${SCRIPT_CONFIG_PATH}")"
     # 如果配置文件中没有记录路径，且命令行也未指定，则使用默认路径
     if [[ -z "${script_path}" && -z "${PROJECT_ROOT}" ]]; then
-        PROJECT_ROOT='/usr/local/xray-script' # 设置默认项目根目录
-        # 将默认路径更新到脚本配置文件中
+        PROJECT_ROOT='/usr/local/xray-script'
         SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        backup_config "${SCRIPT_CONFIG_PATH}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     # 如果配置文件中已有记录的路径，则使用该路径
     elif [[ -n "${script_path}" ]]; then
         PROJECT_ROOT="${script_path}"
     # 如果配置文件中没有路径，但命令行指定了路径，则使用命令行指定的路径并更新配置文件
     elif [[ -n "${PROJECT_ROOT}" ]]; then
-        # 将命令行指定的路径更新到脚本配置文件中
         SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        backup_config "${SCRIPT_CONFIG_PATH}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     fi
 
     # 设置各个子目录的路径
@@ -570,13 +553,13 @@ function main() {
         2) LANG_PARAM="en" ;; # 选择英文
         *) LANG_PARAM="zh" ;; # 默认中文
         esac
-        # 更新配置文件中的语言设置
         SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")"
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        backup_config "${SCRIPT_CONFIG_PATH}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     elif [[ "${LANG_PARAM}" =~ ^--lang= ]]; then
-        # 如果通过命令行指定了语言，则更新配置文件
         SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM#*=}" '.language = $language' "${SCRIPT_CONFIG_PATH}")"
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+        backup_config "${SCRIPT_CONFIG_PATH}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     fi
 
     # 启动主脚本，并传递快速安装选项
