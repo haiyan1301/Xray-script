@@ -1408,7 +1408,8 @@ function handler_change_domain() {
         mkdir -p "${cert_dir}"
         cp -f "${user_fullchain}" "${cert_dir}/fullchain.pem" && cp -f "${user_privkey}" "${cert_dir}/privkey.pem" && cert_ok=true
         if [[ "${cert_ok}" == true ]]; then
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
+        fi
     fi
     if [[ "${cert_ok}" != true ]]; then
         local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
