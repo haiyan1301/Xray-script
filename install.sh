@@ -481,10 +481,6 @@ function main() {
     # 检查依赖，如果缺失则安装
     if ! check_dependencies; then
         install_dependencies
-        # 安装后再次检查依赖是否全部就绪
-        if ! check_dependencies; then
-            _error "依赖安装失败，请检查网络连接或手动安装缺失的软件包"
-        fi
     fi
 
     # 检查脚本配置目录和配置文件是否存在，如果不存在则创建并下载默认配置
