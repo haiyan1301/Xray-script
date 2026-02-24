@@ -1414,6 +1414,9 @@ function handler_change_domain() {
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
         fi
     fi
+    if [[ "${cert_source_reply}" == "2" && "${cert_ok}" != true ]]; then
+        _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")"
+    fi
     if [[ "${cert_ok}" != true ]]; then
         local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
         # 如果 CA 邮箱为空，则读取邮箱
