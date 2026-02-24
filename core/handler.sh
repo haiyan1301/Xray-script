@@ -487,6 +487,9 @@ function handler_script_config() {
     # 更新配置标签和端口
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg tag "${CONFIG_TAG}" '.xray.tag = $tag')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.xray.port = $port')"
+    if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
+    fi
     # 若启用了 VLESS enc，写入 decryption/encryption 到脚本配置
     if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
@@ -563,7 +566,7 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
-    local VLESS_ENC_ENABLE="${CONFIG_DATA['vless_enc_enable']:-}"
+    local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
         if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
             run_vlessenc_prompt 1
