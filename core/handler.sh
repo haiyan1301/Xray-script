@@ -1344,26 +1344,32 @@ function handler_change_domain() {
     else
         CONFIG_DATA["${target_domain}"]="${old_domain}"
     fi
-    # 备份旧域名的 Nginx 配置文件
-    [[ -e ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ]] && cp -f ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ${SCRIPT_CONFIG_DIR}/stream.conf
-    if [[ -e ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ]]; then
-        cp -f ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ${SCRIPT_CONFIG_DIR}/${old_domain}.conf
-        # 删除旧域名的 Nginx 配置文件
-        rm -rf ${NGINX_CONFIG_DIR}/sites-{available,enabled}/${old_domain}.conf
+    local site_conf="${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
+    local manage_site_conf="y"
+    if [[ -e "${site_conf}" ]]; then
+        manage_site_conf="n"
     fi
-    # 复制站点配置模板到 available 目录
-    cp -f "${CONFIG_DIR}/nginx/conf/sites-available/${target_domain}.example.com.conf" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 替换配置文件中的 example.com 为实际域名
-    sed -i "s|example.com|${CONFIG_DATA["${target_domain}"]}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    # 替换配置文件中的 /yourpath 为 xhttp path
-    sed -i "s|/yourpath|${XHTTP_PATH}|g" "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-    if [[ "${CONFIG_TAG,,}" == "cdn" && "${target_domain}" == "cdn" ]]; then
-        local site_conf="${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf"
-        sed -i $'s|listen .*cdn_to_nginx.sock.*|listen 443 ssl reuseport;\\\n    listen [::]:443 ssl reuseport;|g' "${site_conf}"
-        sed -i '/set_real_ip_from[[:space:]]\+unix:;/d' "${site_conf}"
-        sed -i '/real_ip_header[[:space:]]\+proxy_protocol;/d' "${site_conf}"
-        if ! grep -q "server_name" "${site_conf}"; then
-            sed -i "/listen \\[::\\]:443 ssl reuseport;/a\\    server_name               ${CONFIG_DATA["${target_domain}"]};" "${site_conf}"
+    if [[ "${manage_site_conf}" == "y" ]]; then
+        # 备份旧域名的 Nginx 配置文件
+        [[ -e ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ]] && cp -f ${NGINX_CONFIG_DIR}/modules-enabled/stream.conf ${SCRIPT_CONFIG_DIR}/stream.conf
+        if [[ -e ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ]]; then
+            cp -f ${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf ${SCRIPT_CONFIG_DIR}/${old_domain}.conf
+            # 删除旧域名的 Nginx 配置文件
+            rm -rf ${NGINX_CONFIG_DIR}/sites-{available,enabled}/${old_domain}.conf
+        fi
+        # 复制站点配置模板到 available 目录
+        cp -f "${CONFIG_DIR}/nginx/conf/sites-available/${target_domain}.example.com.conf" "${site_conf}"
+        # 替换配置文件中的 example.com 为实际域名
+        sed -i "s|example.com|${CONFIG_DATA["${target_domain}"]}|g" "${site_conf}"
+        # 替换配置文件中的 /yourpath 为 xhttp path
+        sed -i "s|/yourpath|${XHTTP_PATH}|g" "${site_conf}"
+        if [[ "${CONFIG_TAG,,}" == "cdn" && "${target_domain}" == "cdn" ]]; then
+            sed -i $'s|listen .*cdn_to_nginx.sock.*|listen 443 ssl reuseport;\\\n    listen [::]:443 ssl reuseport;|g' "${site_conf}"
+            sed -i '/set_real_ip_from[[:space:]]\+unix:;/d' "${site_conf}"
+            sed -i '/real_ip_header[[:space:]]\+proxy_protocol;/d' "${site_conf}"
+            if ! grep -q "server_name" "${site_conf}"; then
+                sed -i "/listen \\[::\\]:443 ssl reuseport;/a\\    server_name               ${CONFIG_DATA["${target_domain}"]};" "${site_conf}"
+            fi
         fi
     fi
     # 创建从 available 到 enabled 的软链接

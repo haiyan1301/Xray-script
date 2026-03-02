@@ -10,8 +10,11 @@
   * trojan (Trojan-XHTTP-REALITY)
   * Fallback (包含 VLESS-Vision-REALITY、VLESS-XHTTP-REALITY)
   * SNI (包含 Vision_REALITY、XHTTP_REALITY、XHTTP_TLS)
+* 支持 VLESS enc（ML-KEM-768 后量子）可选启用
 * SNI 配置由 Nginx 实现 SNI 分流，适合过 CDN、上下行分离、多网站共存等需求
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
+* SNI 支持证书来源选择（自动申请 / 自行填写证书路径）
+* Nginx 模板默认启用 limit.conf 基础防护（常见扫描与恶意 UA 拦截）
 * 规则配置与自填:
   * 禁止 bittorrent 流量(可选)
   * 禁止回国 ip 流量(可选)
@@ -48,9 +51,11 @@
 1. 如果安装成功，但无法使用，请检查服务器是否开启对应端口，可通过 `https://tcp.ping.pe/ip:port` 验证服务器端口是否开放。
 2. 使用 SNI 配置前，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放。
 3. 使用 SNI 配置前，请不要开启 CDN 保护，不然无法正常申请 SSL 证书。
-4. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
-5. 使用 SNI 获取证书时遇到 【Could not get nonce, let's try again】 请查看 [ZeroSSL 状态页](https://status.zerossl.com/)，大概率是 ZeroSSL 的【Free ACME Service】处于 【Service disruption】或【Service outage】状态。
-6. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
+4. 选择自行填写证书路径时，请确保 fullchain/privkey 文件存在可读，否则流程会中止且不会自动回退到 ACME 申请。
+5. SNI 变更域名时，若目标站点配置已存在将保留，不会覆盖已有配置。
+6. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
+7. 使用 SNI 获取证书时遇到 【Could not get nonce, let's try again】 请查看 [ZeroSSL 状态页](https://status.zerossl.com/)，大概率是 ZeroSSL 的【Free ACME Service】处于 【Service disruption】或【Service outage】状态。
+8. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
    1. 已启动 WARP 分流的用户可以在【管理配置】->【分流管理】中选择【重置 WARP Proxy】选项，该选项实现清空容器日志与重置 WARP Proxy。
    2. 已添加日志限制，如需使用 WARP 功能直接启用即可。
 
