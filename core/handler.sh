@@ -574,6 +574,33 @@ function handler_x25519_config() {
 }
 
 # =============================================================================
+# 函数名称: handler_mldsa65_config
+# 功能描述: 处理并更新脚本配置文件中的 ML-DSA-65 后量子密钥。
+#           1. 生成 ML-DSA-65 密钥对（Seed 和 Verify）。
+#           2. 将 ML-DSA-65 密钥对写入 SCRIPT_CONFIG_PATH 文件。
+# 参数: 无
+# 返回值: 无 (直接修改 SCRIPT_CONFIG 全局变量和 SCRIPT_CONFIG_PATH 文件)
+# =============================================================================
+function handler_mldsa65_config() {
+    # 打印绿色的配置更新提示
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} ML-DSA-65 post-quantum key generation" >&2
+    # 生成 ML-DSA-65 密钥对
+    local MLDSA65="$(exec_generate '--mldsa65')"
+    # 提取 Seed
+    local MLDSA65_SEED="$(echo "${MLDSA65}" | awk -F, '{print $1}')"
+    # 提取 Verify
+    local MLDSA65_VERIFY="$(echo "${MLDSA65}" | awk -F, '{print $2}')"
+    # 输出显示 ML-DSA-65 密钥对
+    echo -e "${GREEN}[ML-DSA-65 Seed]${NC} "${MLDSA65_SEED}"" >&2
+    echo -e "${GREEN}[ML-DSA-65 Verify]${NC} "${MLDSA65_VERIFY}"" >&2
+    # 更新脚本配置中的 ML-DSA-65 密钥
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg seed "${MLDSA65_SEED}" '.xray.mldsa65Seed = $seed')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg verify "${MLDSA65_VERIFY}" '.xray.mldsa65Verify = $verify')"
+    # 将更新后的脚本配置写入文件
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+}
+
+# =============================================================================
 # 函数名称: handler_xray_config
 # 功能描述: 处理并更新 Xray 核心配置文件 (/usr/local/etc/xray/config.json)。
 #           1. 打印配置更新提示。
@@ -600,6 +627,7 @@ function handler_xray_config() {
     local SERVER_NAMES="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.serverNames')"      # 获取服务器名称
     local PRIVATE_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.privateKey')"        # 获取私钥
     local SHORT_IDS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds')"            # 获取 Short IDs
+    local MLDSA65_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')" # 获取 ML-DSA-65 Seed
     local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path')"               # 获取路径
     local XHTTP_MODE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')"
     local XRAY_RULES_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')" # 获取规则状态
@@ -672,6 +700,10 @@ function handler_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson serverNames "${SERVER_NAMES}" '.inbounds[1].streamSettings.realitySettings.serverNames = $serverNames')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg privateKey "${PRIVATE_KEY}" '.inbounds[1].streamSettings.realitySettings.privateKey = $privateKey')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson shortIds "${SHORT_IDS}" '.inbounds[1].streamSettings.realitySettings.shortIds = $shortIds')"
+        # 写入 ML-DSA-65 Seed（如果已生成）
+        if [[ -n "${MLDSA65_SEED}" ]]; then
+            XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${MLDSA65_SEED}" '.inbounds[1].streamSettings.realitySettings.mldsa65Seed = $seed')"
+        fi
         ;;
     xhttp | trojan | fallback | sni)
         # 如果不是 sni 配置，更新 Reality 目标
@@ -682,6 +714,10 @@ function handler_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson serverNames "${SERVER_NAMES}" '.inbounds[1].streamSettings.realitySettings.serverNames = $serverNames')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg privateKey "${PRIVATE_KEY}" '.inbounds[1].streamSettings.realitySettings.privateKey = $privateKey')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson shortIds "${SHORT_IDS}" '.inbounds[1].streamSettings.realitySettings.shortIds = $shortIds')"
+        # 写入 ML-DSA-65 Seed（如果已生成）
+        if [[ -n "${MLDSA65_SEED}" ]]; then
+            XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${MLDSA65_SEED}" '.inbounds[1].streamSettings.realitySettings.mldsa65Seed = $seed')"
+        fi
         ;;
     esac
     # 根据配置标签更新特定字段 (第三部分)
@@ -1780,6 +1816,8 @@ function handler_quick_install() {
     fi
     # 生成 x25519 配置
     handler_x25519_config
+    # 生成 ML-DSA-65 后量子密钥
+    handler_mldsa65_config
     # 配置 Xray (生成并写入 config.json)
     handler_xray_config
     # 添加默认的阻止规则
@@ -1827,6 +1865,7 @@ function main() {
     --xray-config)
         handler_sni_config "$1" # 处理 SNI 配置
         handler_x25519_config   # 生成 x25519 配置
+        handler_mldsa65_config  # 生成 ML-DSA-65 后量子密钥
         handler_xray_config     # 更新 Xray 配置
         ;;
     --routing) handler_routing "$@" ;; # 处理路由规则

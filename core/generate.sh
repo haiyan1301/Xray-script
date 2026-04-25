@@ -201,6 +201,29 @@ function generate_x25519() {
 }
 
 # =============================================================================
+# 函数名称: generate_mldsa65
+# 功能描述: 使用 xray 命令生成一对 ML-DSA-65 密钥（Seed 和 Verify）。
+#           用于 REALITY 后量子签名验证。
+# 参数: 无
+# 返回值: 以逗号分隔的字符串 "Seed,Verify" (echo 输出)
+# 注意: 需要确保系统已安装 xray 命令（v26+）
+# =============================================================================
+function generate_mldsa65() {
+    # 调用 xray mldsa65 命令生成密钥对，输出通常为两行：
+    # Seed: <seed>
+    # Verify: <verify>
+    local MLDSA65_KEY=$(xray mldsa65)
+
+    # 使用 sed 提取第一行中的 Seed 部分
+    local SEED=$(echo "${MLDSA65_KEY}" | sed -ne '1s/.*:\s*//p')
+    # 使用 sed 提取第二行中的 Verify 部分
+    local VERIFY=$(echo "${MLDSA65_KEY}" | sed -ne '2s/.*:\s*//p')
+
+    # 将 Seed 和 Verify 用逗号连接后输出
+    echo "${SEED},${VERIFY}"
+}
+
+# =============================================================================
 # 函数名称: generate_short_id
 # 功能描述: 生成一个指定长度的 Short ID (十六进制字符串)。
 #           如果输入是 0-8 的数字，则生成对应长度的 ID；
@@ -313,6 +336,7 @@ function main() {
     --target) generate_target "$@" ;;             # 生成目标
     --server-names) generate_server_names "$@" ;; # 生成服务器名称列表
     --x25519) generate_x25519 ;;                  # 生成 X25519 密钥对
+    --mldsa65) generate_mldsa65 ;;                # 生成 ML-DSA-65 密钥对
     --short-id) generate_short_id "$@" ;;         # 生成单个 Short ID
     --short-ids) generate_short_ids "$@" ;;       # 生成多个 Short ID
     --path) generate_path ;;                      # 生成路径

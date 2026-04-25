@@ -207,6 +207,8 @@ function get_common_config() {
     CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.serverNames? | if . == null then empty else .[$random % length] end')"
     # 从 Xray 配置中随机获取一个 Reality 的 Short ID (shortIds)
     CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds? | if . == null then empty else .[$random % length] end')"
+    # 从脚本配置中获取 ML-DSA-65 Verify 公钥（后量子签名验证）
+    CLIENT_CONFIG[mldsa65_verify]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
 }
 
 # =============================================================================
@@ -330,6 +332,7 @@ Fingerprint      : chrome
 PublicKey        : ${CLIENT_CONFIG[public_key]}
 ShortId          : ${CLIENT_CONFIG[short_id]}
 SpiderX          : /
+ML-DSA-65 Verify : ${CLIENT_CONFIG[mldsa65_verify]}
 EOF
 }
 
@@ -351,6 +354,10 @@ function get_share_link_component() {
     SHARE_LINK_COMPONENT_TLS="&security=${CLIENT_CONFIG[security]}&sni=${CLIENT_CONFIG[server_name]}&alpn=h2&fp=chrome"
     # 生成 Reality 安全传输参数部分 (&security=reality&sni=...&pbk=...&sid=...&spx=%2F&fp=chrome)
     SHARE_LINK_COMPONENT_REALITY="&security=${CLIENT_CONFIG[security]}&sni=${CLIENT_CONFIG[server_name]}&pbk=${CLIENT_CONFIG[public_key]}&sid=${CLIENT_CONFIG[short_id]}&spx=%2F&fp=chrome"
+    # 如果已配置 ML-DSA-65 Verify，添加到 REALITY 参数中
+    if [[ -n "${CLIENT_CONFIG[mldsa65_verify]}" ]]; then
+        SHARE_LINK_COMPONENT_REALITY="${SHARE_LINK_COMPONENT_REALITY}&mldsa65Verify=${CLIENT_CONFIG[mldsa65_verify]}"
+    fi
     # 生成 XHTTP 网络传输路径参数部分 (&path=...), 注意去除路径开头的 '/'
     SHARE_LINK_COMPONENT_XHTTP="&path=%2F${CLIENT_CONFIG[path]#/}"
     # 生成 Flow 控制参数部分 (&flow=...)
