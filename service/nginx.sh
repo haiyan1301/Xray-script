@@ -703,12 +703,10 @@ Type=forking
 PIDFile=/run/nginx.pid
 # 清理并创建共享内存目录
 ExecStartPre=/bin/rm -rf /dev/shm/nginx
-ExecStartPre=/bin/mkdir -p /dev/shm/nginx
-ExecStartPre=/bin/chown nginx:xray-nginx /dev/shm/nginx
-ExecStartPre=/bin/chmod 770 /dev/shm/nginx
-ExecStartPre=/bin/mkdir -p /dev/shm/nginx/tcmalloc
-ExecStartPre=/bin/chown nginx:nginx /dev/shm/nginx/tcmalloc
-ExecStartPre=/bin/chmod 0700 /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/mkdir /dev/shm/nginx
+ExecStartPre=/bin/chmod 711 /dev/shm/nginx
+ExecStartPre=/bin/mkdir /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/chmod 0777 /dev/shm/nginx/tcmalloc
 # 测试配置文件
 ExecStartPre=/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'
 # 启动 Nginx

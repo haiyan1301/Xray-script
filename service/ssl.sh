@@ -234,7 +234,7 @@ function issue_certificate() {
 
     # 生成一个临时的 Nginx 配置文件，用于 ACME HTTP-01 验证
     cat >"${nginx_conf}" <<EOF
-user                 nginx;
+user                 root;
 pid                  /run/nginx.pid;
 worker_processes     1;
 events {
@@ -299,7 +299,11 @@ EOF
         --reloadcmd "nginx -t && systemctl reload nginx" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
 
     # 设置证书目录权限，确保 nginx worker 可读
-    chown -R nginx:xray-nginx "${cert_path}" 2>/dev/null || true
+    if getent group xray-nginx >/dev/null 2>&1; then
+        chown -R nginx:xray-nginx "${cert_path}" 2>/dev/null || true
+    else
+        chown -R nginx:nginx "${cert_path}" 2>/dev/null || true
+    fi
     chmod 750 "${cert_path}" 2>/dev/null || true
 }
 

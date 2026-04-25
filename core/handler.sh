@@ -975,6 +975,8 @@ function handler_change_xray_port() {
 # 返回值: 无 (通过调用外部脚本执行安装)
 # =============================================================================
 function handler_install() {
+    # 确保服务用户和共享组存在（Xray-install 的 -u xray 依赖用户已创建）
+    ensure_service_users
     local xray_version="$1"       # 获取版本参数
     local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
     # 如果提供了版本参数，则处理版本配置
@@ -1534,7 +1536,11 @@ function handler_change_domain() {
     if [[ "${cert_ok}" == true ]]; then
         # 设置证书目录权限，确保 nginx worker 可读
         local cert_dir="${NGINX_CONFIG_DIR}/certs/${CONFIG_DATA["${target_domain}"]}"
-        chown -R nginx:xray-nginx "${cert_dir}" 2>/dev/null || true
+        if getent group xray-nginx >/dev/null 2>&1; then
+            chown -R nginx:xray-nginx "${cert_dir}" 2>/dev/null || true
+        else
+            chown -R nginx:nginx "${cert_dir}" 2>/dev/null || true
+        fi
         chmod 750 "${cert_dir}" 2>/dev/null || true
         # 如果旧域名存在，停止其证书续签
         if [[ -n "${old_domain}" && "${stop_cert_service}" == "y" ]] && exec_ssl '--status' --domain=${old_domain}; then
