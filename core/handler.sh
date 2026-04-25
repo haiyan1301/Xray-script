@@ -92,6 +92,33 @@ function exec_check() {
     return $?
 }
 
+# =============================================================================
+# 函数名称: ensure_service_users
+# 功能描述: 确保 nginx 和 xray 服务用户及共享组存在。
+#           - 创建系统用户 nginx 和 xray（不可登录）
+#           - 创建共享组 xray-nginx 用于 Unix Socket 互通
+#           - 将 nginx 和 xray 都加入 xray-nginx 组
+# 参数: 无
+# 返回值: 无
+# =============================================================================
+function ensure_service_users() {
+    # 创建共享组 xray-nginx（如不存在）
+    if ! getent group xray-nginx >/dev/null 2>&1; then
+        groupadd -r xray-nginx
+    fi
+    # 创建 nginx 系统用户（如不存在）
+    if ! id -u nginx >/dev/null 2>&1; then
+        useradd -r -s /usr/sbin/nologin -d /var/cache/nginx -M nginx
+    fi
+    # 创建 xray 系统用户（如不存在）
+    if ! id -u xray >/dev/null 2>&1; then
+        useradd -r -s /usr/sbin/nologin -d /var/lib/xray -M xray
+    fi
+    # 将 nginx 和 xray 加入 xray-nginx 共享组
+    usermod -aG xray-nginx nginx 2>/dev/null || true
+    usermod -aG xray-nginx xray 2>/dev/null || true
+}
+
 
 # =============================================================================
 # 函数名称: exec_read
@@ -460,11 +487,27 @@ function handler_script_config() {
         [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${NGINX_DOMAIN}" '.nginx.domain = $domain')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        # 保存证书来源选择到配置文件
+        if [[ -n "${CONFIG_DATA['cert_source']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['cert_source']}" '.nginx.certSource = $cs')"
+        fi
+        if [[ -n "${CONFIG_DATA['cert_fullchain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['cert_fullchain']}" '.nginx.certFullchain = $cf')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['cert_privkey']}" '.nginx.certPrivkey = $ck')"
+        fi
         ;;
     cdn)
         [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${NGINX_DOMAIN}" '.nginx.domain = $domain')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        # 保存证书来源选择到配置文件
+        if [[ -n "${CONFIG_DATA['cert_source']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['cert_source']}" '.nginx.certSource = $cs')"
+        fi
+        if [[ -n "${CONFIG_DATA['cert_fullchain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['cert_fullchain']}" '.nginx.certFullchain = $cf')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['cert_privkey']}" '.nginx.certPrivkey = $ck')"
+        fi
         ;;
     esac
     # 根据配置标签更新特定字段 (第三部分)
@@ -788,6 +831,34 @@ function handler_read_xray_config() {
         exec_read 'xhttp-mode'
         ;;
     esac
+    # 对于 SNI/CDN 配置，提前询问证书来源
+    case "${CONFIG_TAG,,}" in
+    sni | cdn)
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.prompt")" >&2
+        local cert_source_reply
+        read -r cert_source_reply
+        cert_source_reply="${cert_source_reply:-1}"
+        CONFIG_DATA['cert_source']="${cert_source_reply}"
+        if [[ "${cert_source_reply}" == "2" ]]; then
+            # 读取用户提供的证书路径
+            local user_fullchain user_privkey
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.fullchain")" >&2
+                read -r user_fullchain
+                user_fullchain="$(echo "${user_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${user_fullchain}" ]] && break
+            done
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.privkey")" >&2
+                read -r user_privkey
+                user_privkey="$(echo "${user_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${user_privkey}" ]] && break
+            done
+            CONFIG_DATA['cert_fullchain']="${user_fullchain}"
+            CONFIG_DATA['cert_privkey']="${user_privkey}"
+        fi
+        ;;
+    esac
 }
 
 # =============================================================================
@@ -811,11 +882,16 @@ function handler_sni_config() {
         handler_cloudreve_v4 'stop'
         handler_nginx_stop
         ;;
-    sni | cdn)
-        # 为域名和 CDN 配置 Nginx 和 SSL
+    sni)
+        # SNI 需要同时配置 domain 和 CDN 两个域名及证书
         handler_change_domain 'domain' 'n'
         handler_change_domain 'cdn' 'n'
-        # 对于 SNI 配置，调用 handler_web 配置 Web 服务
+        # 调用 handler_web 配置 Web 服务
+        handler_web "${web}"
+        ;;
+    cdn)
+        # CDN 只需要配置 CDN 域名及证书，不需要 domain 证书
+        handler_change_domain 'cdn' 'n'
         handler_web "${web}"
         ;;
     esac
@@ -922,10 +998,10 @@ function handler_install() {
             script_content="$(curl -fsSL "${install_script_url}")" || _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.fetch_fail")"
             # 将脚本内 GitHub 地址改为经 gh-proxy 加速
             script_content="$(echo "${script_content}" | sed 's|https://api\.github\.com|https://gh-proxy.com/https://api.github.com|g; s|https://github\.com|https://gh-proxy.com/https://github.com|g')"
-            echo "${script_content}" | bash -s @ install -u root --version "${CONFIG_DATA['version']}"
+            echo "${script_content}" | bash -s @ install -u xray --version "${CONFIG_DATA['version']}"
         else
             # 直接使用 GitHub 原始链接
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --version "${CONFIG_DATA['version']}"
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u xray --version "${CONFIG_DATA['version']}"
         fi
     fi
 }
@@ -1164,12 +1240,18 @@ function handler_reset_warp() {
 # 返回值: 无 (通过调用其他脚本执行操作)
 # =============================================================================
 function handler_nginx_install() {
+    # 确保服务用户和共享组存在
+    ensure_service_users
     # 检查 nginx 命令是否存在
     if ! cmd_exists 'nginx'; then
         # 调用 nginx.sh 脚本安装 Nginx (带 Brotli 支持)
         bash "${NGINX_PATH}" --install --brotli
-        # 安装 SSL 证书管理工具
-        handler_ssl_install
+        # 检查证书来源，如果用户选择自己提供证书则跳过 acme.sh 安装
+        local CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certSource // ""')"
+        if [[ "${CERT_SOURCE}" != "2" ]]; then
+            # 安装 SSL 证书管理工具
+            handler_ssl_install
+        fi
         # 配置 Nginx
         handler_nginx_config
         # 获取 Nginx 版本
@@ -1375,6 +1457,10 @@ function handler_change_domain() {
     # 创建从 available 到 enabled 的软链接
     ln -sf "${NGINX_CONFIG_DIR}/sites-available/${CONFIG_DATA["${target_domain}"]}.conf" "${NGINX_CONFIG_DIR}/sites-enabled/${CONFIG_DATA["${target_domain}"]}.conf"
     local cert_source_reply="${CONFIG_DATA['cert_source']:-}"
+    # 如果 CONFIG_DATA 中没有，尝试从脚本配置文件中读取
+    if [[ -z "${cert_source_reply}" ]]; then
+        cert_source_reply="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certSource // ""')"
+    fi
     if [[ -z "${cert_source_reply}" ]]; then
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.prompt")" >&2
         read -r cert_source_reply
@@ -1385,6 +1471,13 @@ function handler_change_domain() {
     if [[ "${cert_source_reply}" == "2" ]]; then
         local cached_fullchain="${CONFIG_DATA['cert_fullchain']:-}"
         local cached_privkey="${CONFIG_DATA['cert_privkey']:-}"
+        # 如果 CONFIG_DATA 中没有，尝试从脚本配置文件中读取
+        if [[ -z "${cached_fullchain}" ]]; then
+            cached_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certFullchain // ""')"
+        fi
+        if [[ -z "${cached_privkey}" ]]; then
+            cached_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certPrivkey // ""')"
+        fi
         local cert_dir="${NGINX_CONFIG_DIR}/certs/${CONFIG_DATA["${target_domain}"]}"
         local user_fullchain="${cached_fullchain}"
         local user_privkey="${cached_privkey}"
@@ -1439,6 +1532,10 @@ function handler_change_domain() {
         fi
     fi
     if [[ "${cert_ok}" == true ]]; then
+        # 设置证书目录权限，确保 nginx worker 可读
+        local cert_dir="${NGINX_CONFIG_DIR}/certs/${CONFIG_DATA["${target_domain}"]}"
+        chown -R nginx:xray-nginx "${cert_dir}" 2>/dev/null || true
+        chmod 750 "${cert_dir}" 2>/dev/null || true
         # 如果旧域名存在，停止其证书续签
         if [[ -n "${old_domain}" && "${stop_cert_service}" == "y" ]] && exec_ssl '--status' --domain=${old_domain}; then
             exec_ssl '--stop-renew' --domain=${old_domain}

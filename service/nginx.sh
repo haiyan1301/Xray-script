@@ -432,11 +432,11 @@ function compile_dependencies() {
     # 打印安装依赖信息
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.install_deps')"
     # 安装基础工具和库
-    _install ca-certificates curl wget gcc make git openssl tzdata socat
+    _install ca-certificates curl wget gcc make git openssl tzdata socat cmake
     case "$(_os)" in
     centos)
         # 安装 CentOS 特定的工具和开发库
-        _install bind-utils gcc-c++ perl-IPC-Cmd perl-Getopt-Long perl-Data-Dumper perl-Time-Piece
+        _install bind-utils gcc-c++ perl-IPC-Cmd perl-Getopt-Long perl-Data-Dumper perl-Time-Piece golang ninja-build
         _install pcre2-devel zlib-devel libxml2-devel libxslt-devel gd-devel geoip-devel perl-ExtUtils-Embed gperftools-devel perl-devel brotli-devel
         # 检查并安装 Perl 模块 FindBin
         if ! perl -e "use FindBin" &>/dev/null; then
@@ -445,7 +445,7 @@ function compile_dependencies() {
         ;;
     debian | ubuntu)
         # 安装 Debian/Ubuntu 特定的工具和开发库
-        _install dnsutils g++ perl-base perl
+        _install dnsutils g++ perl-base perl golang-go ninja-build
         _install libpcre2-dev zlib1g-dev libxml2-dev libxslt1-dev libgd-dev libgeoip-dev libgoogle-perftools-dev libperl-dev libbrotli-dev
         ;;
     esac
@@ -530,8 +530,6 @@ function source_compile() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions')"
     # 从 GitHub API 获取最新的 Nginx release 标签名
     local nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
-    # 获取最新的 OpenSSL 标签名 (格式为 openssl-x.y.z)
-    local openssl_version="openssl-$(wget -qO- --no-check-certificate https://api.github.com/repos/openssl/openssl/tags | grep 'name' | cut -d\" -f4 | grep -Eoi '^openssl-([0-9]\.?){3}$' | head -1)"
 
     # 生成编译器优化标志
     gen_cflags
@@ -542,11 +540,22 @@ function source_compile() {
     # 解压 Nginx 源码
     tar -zxf "${nginx_version}.tar.gz"
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_openssl')"
-    # 下载 OpenSSL 源码包 (注意 URL 结构)
-    _error_detect "curl -fsSL -o ${openssl_version}.tar.gz https://github.com/openssl/openssl/archive/${openssl_version#*-}.tar.gz"
-    # 解压 OpenSSL 源码
-    tar -zxf "${openssl_version}.tar.gz"
+    # 下载并编译 BoringSSL
+    print_info "Downloading and building BoringSSL..."
+    _error_detect "git clone --depth=1 https://github.com/google/boringssl"
+    mkdir -p boringssl/build
+    cd boringssl/build
+    _error_detect "cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 .."
+    _error_detect "ninja -j$(nproc)"
+    cd "${TMPFILE_DIR}"
+
+    # 创建 BoringSSL 兼容目录结构，让 Nginx 的 --with-openssl 能识别
+    mkdir -p boringssl/.openssl/lib
+    ln -sf "${TMPFILE_DIR}/boringssl/include" boringssl/.openssl/include
+    cp boringssl/build/ssl/libssl.a boringssl/.openssl/lib/
+    cp boringssl/build/crypto/libcrypto.a boringssl/.openssl/lib/
+    # Nginx configure 会检查这个文件是否存在
+    touch boringssl/.openssl/include/openssl/ssl.h
 
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
@@ -563,14 +572,22 @@ function source_compile() {
     sed -i 's/NGX_PERL_CFLAGS="$CFLAGS `$NGX_PERL -MExtUtils::Embed -e ccopts`"/NGX_PERL_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
     sed -i 's/NGX_PM_CFLAGS=`$NGX_PERL -MExtUtils::Embed -e ccopts`/NGX_PM_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
 
-    # 执行 Nginx 的 configure 脚本，设置各种编译选项和模块
+    # 跳过 Nginx configure 对 OpenSSL 的自动编译（BoringSSL 已预编译）
+    # 通过在 openssl 目录下创建空的 Makefile 和 config 脚本来实现
+    touch "${TMPFILE_DIR}/boringssl/.openssl/Makefile"
+    cat > "${TMPFILE_DIR}/boringssl/.openssl/config" << 'BSSL_EOF'
+#!/bin/sh
+BSSL_EOF
+    chmod +x "${TMPFILE_DIR}/boringssl/.openssl/config"
+
+    # 执行 Nginx 的 configure 脚本，使用 BoringSSL
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.configure')"
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
         # 如果启用 Brotli，则添加 --add-module 选项
-        ./configure --prefix="${NGINX_PATH}" --user=root --group=root --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
+        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include" --with-ld-opt="-L${TMPFILE_DIR}/boringssl/build/ssl -L${TMPFILE_DIR}/boringssl/build/crypto" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl"
     else
         # 不启用 Brotli
-        ./configure --prefix="${NGINX_PATH}" --user=root --group=root --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
+        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include" --with-ld-opt="-L${TMPFILE_DIR}/boringssl/build/ssl -L${TMPFILE_DIR}/boringssl/build/crypto" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl"
     fi
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
@@ -593,6 +610,7 @@ function source_install() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
     make install                                      # 执行安装 (将文件复制到 --prefix 指定的目录)
     mkdir -p /var/log/nginx                           # 创建日志目录
+    chown -R nginx:nginx /var/log/nginx               # 设置日志目录归属 nginx 用户
     ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx # 创建软链接以便全局使用 nginx 命令
 }
 
@@ -604,18 +622,16 @@ function source_install() {
 # =============================================================================
 function source_update() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.fetch_versions')"
-    # 获取最新的版本号
+    # 获取最新的 Nginx 版本号
     local latest_nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
-    local latest_openssl_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/openssl/openssl/tags | grep 'name' | cut -d\" -f4 | grep -Eoi '^openssl-([0-9]\.?){3}$' | head -1)"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.read_current_versions')"
-    # 获取当前安装的 Nginx 和 OpenSSL 版本
+    # 获取当前安装的 Nginx 版本
     local current_version_nginx="$(nginx -V 2>&1 | grep "^nginx version:.*" | cut -d / -f 2)"
-    local current_version_openssl="$(nginx -V 2>&1 | grep "^built with OpenSSL" | awk '{print $4}')"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.check_update')"
-    # 使用 _version_ge 函数比较版本，如果任一组件有新版本则进行更新
-    if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}" || _version_ge "${latest_openssl_version#*-}" "${current_version_openssl}"; then
+    # 比较 Nginx 版本，如果有新版本则更新（BoringSSL 总是使用最新 main 分支）
+    if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}"; then
         source_compile # 重新编译新版本
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.start_update')"
         # 备份旧的 nginx 二进制文件
@@ -685,12 +701,14 @@ Wants=network-online.target
 [Service]
 Type=forking
 PIDFile=/run/nginx.pid
-# 清理并创建共享内存目录用于 tcmalloc
+# 清理并创建共享内存目录
 ExecStartPre=/bin/rm -rf /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx
-ExecStartPre=/bin/chmod 711 /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx/tcmalloc
-ExecStartPre=/bin/chmod 0777 /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/mkdir -p /dev/shm/nginx
+ExecStartPre=/bin/chown nginx:xray-nginx /dev/shm/nginx
+ExecStartPre=/bin/chmod 770 /dev/shm/nginx
+ExecStartPre=/bin/mkdir -p /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/chown nginx:nginx /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/chmod 0700 /dev/shm/nginx/tcmalloc
 # 测试配置文件
 ExecStartPre=/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'
 # 启动 Nginx
