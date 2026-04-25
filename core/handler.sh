@@ -658,7 +658,22 @@ function handler_xray_config() {
         # 更新 mKCP Seed
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.kcpSettings.seed = $seed')"
         ;;
-    vision | xhttp | trojan | fallback | sni)
+    vision)
+        # Vision 防偷模式：通过 dokodemo-door 中转，不直接暴露 target
+        # 更新 anti-steal-in dokodemo-door 的目标地址
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg addr "${TARGET_DOMAIN}" '
+            (.inbounds[] | select(.tag == "anti-steal-in")).settings.address = $addr
+        ')"
+        # 更新 anti-steal-allow 路由规则的域名列表（与 serverNames 保持一致）
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson domains "${SERVER_NAMES}" '
+            (.routing.rules[] | select(.ruleTag == "anti-steal-allow")).domain = $domains
+        ')"
+        # 更新 Reality 服务器名称、私钥和 Short IDs
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson serverNames "${SERVER_NAMES}" '.inbounds[1].streamSettings.realitySettings.serverNames = $serverNames')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg privateKey "${PRIVATE_KEY}" '.inbounds[1].streamSettings.realitySettings.privateKey = $privateKey')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson shortIds "${SHORT_IDS}" '.inbounds[1].streamSettings.realitySettings.shortIds = $shortIds')"
+        ;;
+    xhttp | trojan | fallback | sni)
         # 如果不是 sni 配置，更新 Reality 目标
         if [[ "${CONFIG_TAG,,}" != 'sni' ]]; then
             XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg target "${TARGET_DOMAIN}:443" '.inbounds[1].streamSettings.realitySettings.target = $target')"
