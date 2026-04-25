@@ -582,6 +582,13 @@ function handler_x25519_config() {
 # 返回值: 无 (直接修改 SCRIPT_CONFIG 全局变量和 SCRIPT_CONFIG_PATH 文件)
 # =============================================================================
 function handler_mldsa65_config() {
+    local enable="${1:-n}"
+    if [[ "${enable,,}" != "y" ]]; then
+        # 禁用 ML-DSA-65，清除已有密钥
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.mldsa65Seed = "" | .xray.mldsa65Verify = ""')"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        return 0
+    fi
     # 打印绿色的配置更新提示
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} ML-DSA-65 post-quantum key generation" >&2
     # 生成 ML-DSA-65 密钥对
@@ -1816,8 +1823,12 @@ function handler_quick_install() {
     fi
     # 生成 x25519 配置
     handler_x25519_config
-    # 生成 ML-DSA-65 后量子密钥
-    handler_mldsa65_config
+    # 询问是否启用 ML-DSA-65 后量子密钥（默认禁用，大多数客户端尚不支持）
+    local mldsa65_reply
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} 是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)" >&2
+    read -r mldsa65_reply
+    mldsa65_reply="${mldsa65_reply:-n}"
+    handler_mldsa65_config "${mldsa65_reply}"
     # 配置 Xray (生成并写入 config.json)
     handler_xray_config
     # 添加默认的阻止规则
@@ -1865,7 +1876,12 @@ function main() {
     --xray-config)
         handler_sni_config "$1" # 处理 SNI 配置
         handler_x25519_config   # 生成 x25519 配置
-        handler_mldsa65_config  # 生成 ML-DSA-65 后量子密钥
+        # 询问是否启用 ML-DSA-65 后量子密钥
+        local mldsa65_reply
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} 是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)" >&2
+        read -r mldsa65_reply
+        mldsa65_reply="${mldsa65_reply:-n}"
+        handler_mldsa65_config "${mldsa65_reply}"
         handler_xray_config     # 更新 Xray 配置
         ;;
     --routing) handler_routing "$@" ;; # 处理路由规则
