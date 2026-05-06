@@ -28,7 +28,12 @@
     ],
     "shortIds": [
       ""
-    ]
+    ],
+    "hy2auth": "",
+    "hy2CertDomain": "",
+    "hy2CertSource": "",
+    "hy2CertFullchain": "",
+    "hy2CertPrivkey": ""
   },
   "nginx": {
     "version": "",

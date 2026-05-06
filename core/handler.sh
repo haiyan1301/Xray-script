@@ -165,8 +165,8 @@ function exec_read() {
             # 验证 UUID (fallback 也使用 uuid 验证)
             exec_check '--uuid' "${result}"
             ;;
-        seed | password)
-            # 验证密码或种子
+        seed | password | hy2-auth)
+            # 验证密码或种子或 HY2 auth
             exec_check '--password' "${result}" || continue
             ;;
         target)
@@ -464,6 +464,12 @@ function handler_script_config() {
         # 更新 Trojan 密码
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg password "${TROJAN_PASSWORD}" '.xray.trojan = $password')"
         ;;
+    hy2)
+        # 获取或生成 HY2 auth 密码
+        local HY2_AUTH="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--password')}"
+        # 更新 HY2 auth 密码
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.xray.hy2auth = $auth')"
+        ;;
     mkcp | vision | xhttp | fallback | sni | cdn)
         # 更新 UUID
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.xray.uuid = $uuid')"
@@ -479,6 +485,22 @@ function handler_script_config() {
         # 为 mKCP 生成随机端口并更新 Seed
         XRAY_PORT="$(exec_generate '--port')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg seed "${KCP_SEED}" '.xray.kcp = $seed')"
+        ;;
+    hy2)
+        # HY2 保存证书来源和证书路径到配置
+        if [[ -n "${CONFIG_DATA['hy2_cert_source']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['hy2_cert_source']}" '.xray.hy2CertSource = $cs')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_domain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cd "${CONFIG_DATA['hy2_cert_domain']}" '.xray.hy2CertDomain = $cd')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_email']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ce "${CONFIG_DATA['hy2_cert_email']}" '.nginx.ca = $ce')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_fullchain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['hy2_cert_fullchain']}" '.xray.hy2CertFullchain = $cf')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['hy2_cert_privkey']}" '.xray.hy2CertPrivkey = $ck')"
+        fi
         ;;
     sni)
         # 更新 Fallback UUID
@@ -627,6 +649,7 @@ function handler_xray_config() {
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"                # 获取配置标签
     local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"                # 获取端口
     local XRAY_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.uuid')"                # 获取 UUID
+    local HY2_AUTH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2auth // ""')"        # 获取 HY2 auth
     local FALLBACK_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.fallback')"        # 获取 Fallback UUID
     local TROJAN_PASSWORD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.trojan')"        # 获取 Trojan 密码
     local KCP_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.kcp')"                  # 获取 mKCP Seed
@@ -645,7 +668,7 @@ function handler_xray_config() {
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
-    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${skip_vlessenc}" != "1" ]]; then
+    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' && "${skip_vlessenc}" != "1" ]]; then
         if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
             run_vlessenc_prompt 1
             if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
@@ -685,6 +708,22 @@ function handler_xray_config() {
     trojan)
         # 更新 Trojan 客户端密码
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg password "${TROJAN_PASSWORD}" '.inbounds[1].settings.clients[0].password = $password')"
+        ;;
+    hy2)
+        # 更新 HY2 auth 密码
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.users[0].auth = $auth')"
+        # 更新 HY2 TLS 证书路径
+        local HY2_CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')"
+        local HY2_FULLCHAIN HY2_PRIVKEY
+        if [[ "${HY2_CERT_SOURCE}" == "3" ]]; then
+            HY2_FULLCHAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertFullchain')"
+            HY2_PRIVKEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertPrivkey')"
+        else
+            HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
+            HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"
+        fi
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg cert "${HY2_FULLCHAIN}" '.inbounds[1].streamSettings.tlsSettings.certificates[0].certificateFile = $cert')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg key "${HY2_PRIVKEY}" '.inbounds[1].streamSettings.tlsSettings.certificates[0].keyFile = $key')"
         ;;
     esac
     # 根据配置标签更新特定字段 (第二部分)
@@ -841,7 +880,7 @@ function handler_read_xray_config() {
     fi
     # 将配置标签存储到 CONFIG_DATA
     CONFIG_DATA['tag']="${CONFIG_TAG}"
-    if [[ "${CONFIG_TAG,,}" != 'trojan' ]]; then
+    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' ]]; then
         run_vlessenc_choice
     fi
     # 检查脚本配置中的规则状态，如果是 current 或 reset 则读取规则输入
@@ -859,6 +898,7 @@ function handler_read_xray_config() {
     # 根据配置标签读取特定参数 (第一部分)
     case "${CONFIG_TAG,,}" in
     trojan) exec_read 'password' ;;                             # 读取 Trojan 密码
+    hy2) exec_read 'hy2-auth' ;;                                # 读取 HY2 auth 密码
     mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' ;; # 读取 UUID
     esac
     # 根据配置标签读取特定参数 (第二部分)
@@ -916,6 +956,169 @@ function handler_read_xray_config() {
             CONFIG_DATA['cert_privkey']="${user_privkey}"
         fi
         ;;
+    hy2)
+        # HY2 证书来源选择: 1=acme域名证书 2=acme IP证书 3=自定义证书路径
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
+        local hy2_cert_source_reply
+        read -r hy2_cert_source_reply
+        hy2_cert_source_reply="${hy2_cert_source_reply:-1}"
+        CONFIG_DATA['hy2_cert_source']="${hy2_cert_source_reply}"
+        case "${hy2_cert_source_reply}" in
+        1)
+            # acme.sh 申请域名证书
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.domain_prompt")" >&2
+            local hy2_domain
+            read -r hy2_domain
+            CONFIG_DATA['hy2_cert_domain']="${hy2_domain}"
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_prompt")" >&2
+            local hy2_email
+            read -r hy2_email
+            CONFIG_DATA['hy2_cert_email']="${hy2_email}"
+            ;;
+        2)
+            # acme.sh 申请 IP 证书
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
+            local server_ip
+            server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me)
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
+            CONFIG_DATA['hy2_cert_domain']="${server_ip}"
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_prompt")" >&2
+            local hy2_ip_email
+            read -r hy2_ip_email
+            CONFIG_DATA['hy2_cert_email']="${hy2_ip_email}"
+            ;;
+        3)
+            # 自定义证书路径
+            local hy2_fullchain hy2_privkey
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
+                read -r hy2_fullchain
+                hy2_fullchain="$(echo "${hy2_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${hy2_fullchain}" ]] && break
+            done
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
+                read -r hy2_privkey
+                hy2_privkey="$(echo "${hy2_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${hy2_privkey}" ]] && break
+            done
+            CONFIG_DATA['hy2_cert_fullchain']="${hy2_fullchain}"
+            CONFIG_DATA['hy2_cert_privkey']="${hy2_privkey}"
+            ;;
+        esac
+        ;;
+    esac
+}
+
+# =============================================================================
+# 函数名称: handler_hy2_cert
+# 功能描述: 处理 HY2 协议的证书申请/安装和防火墙配置。
+#           1. 根据证书来源 (acme域名/acme IP/自定义路径) 申请或安装证书。
+#           2. 使用 acme.sh standalone 模式 (临时监听80端口) 申请证书。
+#           3. 配置证书自动续签 (域名90天/IP 5天)。
+#           4. 自动开放 UDP 端口防火墙规则。
+# 参数: 无
+# 返回值: 无 (直接操作文件系统和防火墙)
+# =============================================================================
+function handler_hy2_cert() {
+    local CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')"
+    local CERT_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')"
+    local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"
+    local ACCOUNT_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca // ""')"
+    local CERT_DIR="/usr/local/etc/xray/certs"
+
+    # 1. 开放 UDP 端口防火墙规则
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${XRAY_PORT}/udp" >&2
+    if command -v ufw &>/dev/null; then
+        ufw allow "${XRAY_PORT}"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --permanent --add-port="${XRAY_PORT}"/udp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    else
+        iptables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+        ip6tables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+    fi
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
+
+    # 2. 处理证书
+    case "${CERT_SOURCE}" in
+    1|2)
+        # acme.sh 申请证书 (standalone 模式)
+        # 确保 acme.sh 已安装
+        if [[ ! -e "${HOME}/.acme.sh/acme.sh" ]]; then
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} Installing acme.sh..." >&2
+            curl https://get.acme.sh | sh -s email="${ACCOUNT_EMAIL}" || {
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                return 1
+            }
+            "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade
+            "${HOME}/.acme.sh/acme.sh" --set-default-ca --server zerossl
+        fi
+
+        # 创建证书存储目录
+        mkdir -p "${CERT_DIR}"
+
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.applying")" >&2
+
+        if [[ "${CERT_SOURCE}" == "1" ]]; then
+            # 域名证书: 使用 standalone 模式 (临时监听80端口)
+            "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
+                --standalone \
+                --keylength ec-256 \
+                --accountkeylength ec-256 \
+                --server zerossl \
+                --ocsp || {
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                return 1
+            }
+        else
+            # IP 证书: 使用 standalone 模式
+            "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
+                --standalone \
+                --keylength ec-256 \
+                --accountkeylength ec-256 \
+                --server zerossl \
+                --ocsp || {
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                return 1
+            }
+        fi
+
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_ok")" >&2
+
+        # 安装证书到 Xray 目录
+        "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d "${CERT_DOMAIN}" \
+            --key-file "${CERT_DIR}/privkey.pem" \
+            --fullchain-file "${CERT_DIR}/fullchain.pem" \
+            --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true"
+
+        # 设置证书目录权限
+        if getent group xray-nginx >/dev/null 2>&1; then
+            chown -R xray:xray-nginx "${CERT_DIR}" 2>/dev/null || true
+        elif id -u xray >/dev/null 2>&1; then
+            chown -R xray:xray "${CERT_DIR}" 2>/dev/null || true
+        fi
+        chmod 750 "${CERT_DIR}" 2>/dev/null || true
+
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
+
+        # 设置自动续签
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_setup")" >&2
+        if [[ "${CERT_SOURCE}" == "2" ]]; then
+            # IP 证书: 5天续签一次 (acme.sh 内置 cron 默认60天检测，IP证书有效期短)
+            # 添加 crontab 每5天执行续签
+            local cron_cmd="${HOME}/.acme.sh/acme.sh --cron --force --home ${HOME}/.acme.sh"
+            (crontab -l 2>/dev/null | grep -v "acme.sh.*--cron.*--force" ; echo "0 0 */5 * * ${cron_cmd} >/dev/null 2>&1") | crontab -
+        fi
+        # 域名证书: acme.sh 自带的 cron 会在到期前自动续签 (默认60天检查)
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_ok")" >&2
+        ;;
+    3)
+        # 自定义证书: 不需要 acme.sh
+        local CUSTOM_FULLCHAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertFullchain')"
+        local CUSTOM_PRIVKEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertPrivkey')"
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
+        ;;
     esac
 }
 
@@ -934,7 +1137,7 @@ function handler_sni_config() {
     local web="${1}" # 获取 Web 服务类型参数
     # 根据当前配置标签执行不同操作
     case "${CONFIG_TAG,,}" in
-    mkcp | vision | xhttp | trojan | fallback)
+    mkcp | vision | xhttp | trojan | fallback | hy2)
         # 对于非 SNI 配置，停止 Cloudreve 和 Nginx 服务
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'stop'
@@ -1875,14 +2078,22 @@ function main() {
         ;;
     --xray-config)
         handler_sni_config "$1" # 处理 SNI 配置
-        handler_x25519_config   # 生成 x25519 配置
-        # 询问是否启用 ML-DSA-65 后量子密钥
-        local mldsa65_reply
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} 是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)" >&2
-        read -r mldsa65_reply
-        mldsa65_reply="${mldsa65_reply:-n}"
-        handler_mldsa65_config "${mldsa65_reply}"
-        handler_xray_config     # 更新 Xray 配置
+        # 获取当前配置标签
+        local current_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
+        if [[ "${current_tag,,}" == 'hy2' ]]; then
+            # HY2 不需要 x25519 和 mldsa65，但需要处理证书和防火墙
+            handler_hy2_cert
+            handler_xray_config 1  # 跳过 vlessenc
+        else
+            handler_x25519_config   # 生成 x25519 配置
+            # 询问是否启用 ML-DSA-65 后量子密钥
+            local mldsa65_reply
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} 是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)" >&2
+            read -r mldsa65_reply
+            mldsa65_reply="${mldsa65_reply:-n}"
+            handler_mldsa65_config "${mldsa65_reply}"
+            handler_xray_config     # 更新 Xray 配置
+        fi
         ;;
     --routing) handler_routing "$@" ;; # 处理路由规则
     --change-domain)

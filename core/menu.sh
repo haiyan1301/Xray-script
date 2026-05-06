@@ -167,6 +167,8 @@ function menu_xray_config() {
     echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option6")"
     # 打印选项 7
     echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option7")"
+    # 打印选项 8
+    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option8")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
@@ -188,6 +190,8 @@ function menu_xray_config() {
     echo -e "6. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info6")"
     # 打印选项 7 的说明信息
     echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info7")"
+    # 打印选项 8 的说明信息
+    echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info8")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }

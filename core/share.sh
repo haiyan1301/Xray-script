@@ -209,6 +209,10 @@ function get_common_config() {
     CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds? | if . == null then empty else .[$random % length] end')"
     # 从脚本配置中获取 ML-DSA-65 Verify 公钥（后量子签名验证）
     CLIENT_CONFIG[mldsa65_verify]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
+    # 从 Xray 配置中获取 HY2 auth 密码
+    CLIENT_CONFIG[hy2_auth]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.users[0].auth? | if . == null then empty else . end')"
+    # 从脚本配置中获取 HY2 证书域名/IP
+    CLIENT_CONFIG[hy2_cert_domain]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')"
 }
 
 # =============================================================================
@@ -314,26 +318,32 @@ EOF
 # 返回值: 无 (直接打印到标准输出)
 # =============================================================================
 function show_client_config() {
+    local tag="${CLIENT_CONFIG[tag]}"
     # 使用 Here Document 打印客户端配置的标题和各项参数
-    cat <<EOF
------------------- $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.client")(${CLIENT_CONFIG[tag]}) ------------------
-address          : ${CLIENT_CONFIG[remote_host]}
-port             : ${CLIENT_CONFIG[port]}
-protocol         : ${CLIENT_CONFIG[protocol]}
-uuid             : ${CLIENT_CONFIG[uuid]}
-password(trojan) : ${CLIENT_CONFIG[password]}
-seed(mKCP)       : ${CLIENT_CONFIG[seed]}
-flow             : ${CLIENT_CONFIG[flow]}
-network          : ${CLIENT_CONFIG[type]}
-security         : ${CLIENT_CONFIG[security]}
-ServerName       : ${CLIENT_CONFIG[server_name]}
-path             : ${CLIENT_CONFIG[path]}
-Fingerprint      : chrome
-PublicKey        : ${CLIENT_CONFIG[public_key]}
-ShortId          : ${CLIENT_CONFIG[short_id]}
-SpiderX          : /
-ML-DSA-65 Verify : ${CLIENT_CONFIG[mldsa65_verify]}
-EOF
+    echo "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.client")(${tag}) ------------------"
+    echo "address          : ${CLIENT_CONFIG[remote_host]}"
+    echo "port             : ${CLIENT_CONFIG[port]}"
+    echo "protocol         : ${CLIENT_CONFIG[protocol]}"
+    if [[ "${tag,,}" == 'hy2' || "${tag,,}" == 'hysteria2' ]]; then
+        echo "auth             : ${CLIENT_CONFIG[hy2_auth]}"
+        echo "network          : ${CLIENT_CONFIG[type]}"
+        echo "security         : ${CLIENT_CONFIG[security]}"
+        [[ -n "${CLIENT_CONFIG[hy2_cert_domain]}" ]] && echo "SNI              : ${CLIENT_CONFIG[hy2_cert_domain]}"
+    else
+        echo "uuid             : ${CLIENT_CONFIG[uuid]}"
+        echo "password(trojan) : ${CLIENT_CONFIG[password]}"
+        echo "seed(mKCP)       : ${CLIENT_CONFIG[seed]}"
+        echo "flow             : ${CLIENT_CONFIG[flow]}"
+        echo "network          : ${CLIENT_CONFIG[type]}"
+        echo "security         : ${CLIENT_CONFIG[security]}"
+        echo "ServerName       : ${CLIENT_CONFIG[server_name]}"
+        echo "path             : ${CLIENT_CONFIG[path]}"
+        echo "Fingerprint      : chrome"
+        echo "PublicKey        : ${CLIENT_CONFIG[public_key]}"
+        echo "ShortId          : ${CLIENT_CONFIG[short_id]}"
+        echo "SpiderX          : /"
+        echo "ML-DSA-65 Verify : ${CLIENT_CONFIG[mldsa65_verify]}"
+    fi
 }
 
 # =============================================================================
@@ -446,6 +456,26 @@ function get_trojan_share_link() {
     get_share_link_component
     # 将 Trojan 基础部分、Reality 安全参数和 XHTTP 路径参数拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}"
+}
+
+# =============================================================================
+# 函数名称: get_hy2_share_link
+# 功能描述: 为 Hysteria2 协议生成标准分享链接。
+#           格式: hysteria2://auth@host:port/?insecure=0&sni=xxx#tag
+# 参数: 无 (直接使用全局变量 CLIENT_CONFIG)
+# 返回值: 无 (直接修改全局变量 SHARE_LINK)
+# =============================================================================
+function get_hy2_share_link() {
+    local auth="${CLIENT_CONFIG[hy2_auth]}"
+    local host="${CLIENT_CONFIG[remote_host]}"
+    local port="${CLIENT_CONFIG[port]}"
+    local sni="${CLIENT_CONFIG[hy2_cert_domain]}"
+
+    # 标准 hysteria2 分享链接格式
+    SHARE_LINK="hysteria2://${auth}@${host}:${port}/?insecure=0"
+    if [[ -n "${sni}" ]]; then
+        SHARE_LINK="${SHARE_LINK}&sni=${sni}"
+    fi
 }
 
 # =============================================================================
@@ -658,6 +688,7 @@ function main() {
     fallback) show_fallback_config ;; # Fallback 模式
     sni) show_sni_config ;;           # SNI 模式
     cdn) get_cdn_share_link ;;        # CDN 模式
+    hy2) get_hy2_share_link ;;        # Hysteria2 模式
     *) get_vision_share_link ;;       # 默认为 Vision 模式
     esac
 

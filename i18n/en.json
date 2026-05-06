@@ -64,6 +64,7 @@
       "option5": "Dual Protocol Composite",
       "option6": "SNI Split Composite",
       "option7": "CDN Standalone",
+      "option8": "Hysteria2 (HY2)",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
       "info3": "XHTTP supports all scenarios",
@@ -72,7 +73,8 @@
       "info4": "Replace VLESS with Trojan",
       "info5": "Use VLESS+Vision+REALITY fallback to VLESS+XHTTP on port 443",
       "info6": "SNI-based split through Nginx on port 443, supports CDN and direct connection",
-      "info7": "CDN only (XHTTP over TLS), no REALITY direct link"
+      "info7": "CDN only (XHTTP over TLS), no REALITY direct link",
+      "info8": "Hysteria2 based on QUIC(UDP), high performance low latency, requires TLS certificate (domain/IP)"
     },
     "web_config": {
       "title": "Web Config",
@@ -161,6 +163,23 @@
       "privkey": "Enter private key (privkey) file path: ",
       "path_invalid": "File not found or not readable",
       "install_ok": "Using your provided certificate"
+    },
+    "hy2_cert": {
+      "prompt": "Certificate source [1. acme.sh domain cert / 2. acme.sh IP cert / 3. Custom cert path] (default 1): ",
+      "domain_prompt": "Enter domain for certificate: ",
+      "ip_prompt": "Will use this server's public IP for certificate",
+      "email_prompt": "Enter email for certificate registration: ",
+      "applying": "Applying for certificate...",
+      "apply_ok": "Certificate applied successfully",
+      "apply_fail": "Certificate application failed",
+      "install_ok": "Certificate installed",
+      "fullchain": "Enter fullchain certificate file path: ",
+      "privkey": "Enter private key file path: ",
+      "path_invalid": "File not found or not readable",
+      "firewall_open": "Opening UDP port in firewall",
+      "firewall_ok": "UDP port opened in firewall",
+      "cron_setup": "Setting up certificate auto-renewal cron job",
+      "cron_ok": "Certificate auto-renewal configured"
     }
   },
   "read": {
@@ -185,6 +204,8 @@
     "path": "Enter path (default auto-generated): ",
     "xhttp_mode": "Enter XHTTP mode (default auto): ",
     "xhttp_mode_tip": "Common modes: auto, stream, packet. Leave empty for auto.",
+    "hy2_auth": "Enter HY2 auth password (default auto-generated): ",
+    "hy2_cert_domain": "Enter domain or IP for certificate: ",
     "warp_ip": "Enter IP to route to WARP",
     "warp_domain": "Enter domain to route to WARP",
     "block_ip": "Enter IP to route to block",

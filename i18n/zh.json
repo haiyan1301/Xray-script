@@ -64,6 +64,7 @@
       "option5": "双协议复合配置",
       "option6": "SNI分流复合配置",
       "option7": "CDN 独立配置",
+      "option8": "Hysteria2 (HY2)",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
       "info3": "XHTTP 全场景通吃的时代正式到来(详情: https://github.com/XTLS/Xray-core/discussions/4113    )",
@@ -72,7 +73,8 @@
       "info4": "VLESS 替换为 Trojan",
       "info5": "利用 VLESS+Vision+REALITY 回落 VLESS+XHTTP 共用 443 端口",
       "info6": "通过 Nginx 的 SNI 分流共用 443 端口，实现 REALITY 直连与过 CDN 共存",
-      "info7": "仅启用 CDN（XHTTP over TLS），不包含 REALITY 直连"
+      "info7": "仅启用 CDN（XHTTP over TLS），不包含 REALITY 直连",
+      "info8": "Hysteria2 基于 QUIC(UDP) 协议，高性能低延迟，需要 TLS 证书(域名/IP)"
     },
     "web_config": {
       "title": "Web 配置",
@@ -161,6 +163,23 @@
       "privkey": "请输入私钥(privkey)文件路径: ",
       "path_invalid": "文件不存在或不可读，请重新输入",
       "install_ok": "已使用您提供的证书"
+    },
+    "hy2_cert": {
+      "prompt": "证书来源 [1. acme.sh 申请域名证书 / 2. acme.sh 申请 IP 证书 / 3. 自定义证书路径] (默认 1): ",
+      "domain_prompt": "请输入用于申请证书的域名: ",
+      "ip_prompt": "将使用本机公网 IP 申请证书",
+      "email_prompt": "请输入用于注册证书的邮箱: ",
+      "applying": "正在申请证书...",
+      "apply_ok": "证书申请成功",
+      "apply_fail": "证书申请失败",
+      "install_ok": "证书已安装",
+      "fullchain": "请输入证书(fullchain)文件路径: ",
+      "privkey": "请输入私钥(privkey)文件路径: ",
+      "path_invalid": "文件不存在或不可读，请重新输入",
+      "firewall_open": "正在开放 UDP 端口",
+      "firewall_ok": "UDP 端口已开放",
+      "cron_setup": "正在设置证书自动续签定时任务",
+      "cron_ok": "证书自动续签已配置"
     }
   },
   "read": {
@@ -185,6 +204,8 @@
     "path": "请输入 path (默认自动生成): ",
     "xhttp_mode": "请输入 XHTTP 传输模式 (默认 auto): ",
     "xhttp_mode_tip": "常用模式: auto(自动选择), stream(流式), packet(包式)。留空默认 auto",
+    "hy2_auth": "请输入 HY2 认证密码 auth (默认自动生成): ",
+    "hy2_cert_domain": "请输入用于申请证书的域名或 IP: ",
     "warp_ip": "请输入分流到 WARP 的 ip",
     "warp_domain": "请输入分流到 WARP 的 domain",
     "block_ip": "请输入分流到 block 的 ip",
