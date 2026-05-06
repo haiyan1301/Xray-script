@@ -1061,7 +1061,7 @@ function handler_hy2_cert() {
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.applying")" >&2
 
         if [[ "${CERT_SOURCE}" == "1" ]]; then
-            # 域名证书: 使用 standalone 模式 (临时监听80端口)
+            # 域名证书: 使用 standalone 模式 (临时监听80端口), ZeroSSL
             "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
                 --standalone \
                 --keylength ec-256 \
@@ -1072,12 +1072,12 @@ function handler_hy2_cert() {
                 return 1
             }
         else
-            # IP 证书: 使用 standalone 模式
+            # IP 证书: 使用 standalone 模式, Let's Encrypt (ZeroSSL 不支持 IP 证书)
             "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
                 --standalone \
                 --keylength ec-256 \
                 --accountkeylength ec-256 \
-                --server zerossl \
+                --server letsencrypt \
                 --ocsp || {
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
@@ -2082,7 +2082,7 @@ function main() {
         local current_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
         if [[ "${current_tag,,}" == 'hy2' ]]; then
             # HY2 不需要 x25519 和 mldsa65，但需要处理证书和防火墙
-            handler_hy2_cert
+            handler_hy2_cert || return 1
             handler_xray_config 1  # 跳过 vlessenc
         else
             handler_x25519_config   # 生成 x25519 配置
