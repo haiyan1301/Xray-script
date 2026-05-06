@@ -1073,14 +1073,13 @@ function handler_hy2_cert() {
             }
         else
             # IP 证书: Let's Encrypt + shortlived profile (仅此 profile 支持 IP 标识符)
-            # 证书有效期约 6.6 天，--days 3 设置每 3 天自动续签
+            # 证书有效期约 6.6 天，--days 6 设置续签检查周期
             "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
                 --standalone \
-                --keylength ec-256 \
-                --accountkeylength ec-256 \
                 --server letsencrypt \
-                --cert-profile shortlived \
-                --days 3 || {
+                --certificate-profile shortlived \
+                --days 6 \
+                --httpport 80 || {
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             }
