@@ -1072,13 +1072,15 @@ function handler_hy2_cert() {
                 return 1
             }
         else
-            # IP 证书: 使用 standalone 模式, Let's Encrypt (ZeroSSL 不支持 IP 证书)
+            # IP 证书: Let's Encrypt + shortlived profile (仅此 profile 支持 IP 标识符)
+            # 证书有效期约 6.6 天，--days 3 设置每 3 天自动续签
             "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
                 --standalone \
                 --keylength ec-256 \
                 --accountkeylength ec-256 \
                 --server letsencrypt \
-                --ocsp || {
+                --cert-profile shortlived \
+                --days 3 || {
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             }
@@ -1105,10 +1107,9 @@ function handler_hy2_cert() {
         # 设置自动续签
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_setup")" >&2
         if [[ "${CERT_SOURCE}" == "2" ]]; then
-            # IP 证书: 5天续签一次 (acme.sh 内置 cron 默认60天检测，IP证书有效期短)
-            # 添加 crontab 每5天执行续签
+            # IP 证书 (shortlived): 有效期约 6.6 天，每 3 天强制续签确保不过期
             local cron_cmd="${HOME}/.acme.sh/acme.sh --cron --force --home ${HOME}/.acme.sh"
-            (crontab -l 2>/dev/null | grep -v "acme.sh.*--cron.*--force" ; echo "0 0 */5 * * ${cron_cmd} >/dev/null 2>&1") | crontab -
+            (crontab -l 2>/dev/null | grep -v "acme.sh.*--cron.*--force" ; echo "0 0 */3 * * ${cron_cmd} >/dev/null 2>&1") | crontab -
         fi
         # 域名证书: acme.sh 自带的 cron 会在到期前自动续签 (默认60天检查)
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_ok")" >&2
