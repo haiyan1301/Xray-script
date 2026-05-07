@@ -216,6 +216,51 @@ function get_common_config() {
 }
 
 # =============================================================================
+# 函数名称: build_xhttp_obfs_extra
+# 功能描述: 从 Xray 配置中提取 xPadding/session/seq 混淆参数，
+#           构造一个 JSON 对象用于分享链接的 extra 字段。
+# 参数:
+#   $1: inbound 索引 (默认 1)
+# 返回值: JSON 字符串 (echo 输出)，如无混淆参数则输出 {}
+# =============================================================================
+function build_xhttp_obfs_extra() {
+    local inbound_index=${1:-1}
+    echo "${XRAY_CONFIG}" | jq --argjson i "${inbound_index}" '
+        .inbounds[$i].streamSettings.xhttpSettings // {} |
+        {xPaddingObfsMode, xPaddingKey, xPaddingHeader, xPaddingPlacement,
+         xPaddingMethod, uplinkHTTPMethod, sessionPlacement, sessionKey,
+         seqPlacement, seqKey} |
+        with_entries(select(.value != null))
+    '
+}
+
+# =============================================================================
+# 函数名称: setup_xhttp_obfs_extra
+# 功能描述: 读取指定 inbound 的混淆参数，合并到 XHTTP_EXTRA 全局变量中，
+#           并更新 XHTTP_EXTRA_ENCODED。
+#           如果 XHTTP_EXTRA 已有内容 (如 downloadSettings)，则合并；
+#           否则直接设置。
+# 参数:
+#   $1: inbound 索引 (默认 1)
+# 返回值: 无 (直接修改全局变量 XHTTP_EXTRA 和 XHTTP_EXTRA_ENCODED)
+# =============================================================================
+function setup_xhttp_obfs_extra() {
+    local inbound_index=${1:-1}
+    local obfs_json="$(build_xhttp_obfs_extra ${inbound_index})"
+    # 如果没有混淆参数则跳过
+    if [[ "$(echo "${obfs_json}" | jq 'length')" -eq 0 ]]; then
+        return 0
+    fi
+    if [[ -n "${XHTTP_EXTRA}" ]]; then
+        # 合并到已有的 XHTTP_EXTRA (如包含 downloadSettings)
+        XHTTP_EXTRA="$(echo "${XHTTP_EXTRA}" | jq --argjson obfs "${obfs_json}" '. + $obfs')"
+    else
+        XHTTP_EXTRA="${obfs_json}"
+    fi
+    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode)
+}
+
+# =============================================================================
 # 函数名称: get_tls_down_json
 # 功能描述: 生成用于 TLS 下行模式的额外配置 JSON 字符串 (XHTTP_EXTRA)，
 #           通常用于 SNI + CDN 的场景。
@@ -378,8 +423,12 @@ function get_share_link_component() {
     else
         SHARE_LINK_COMPONENT_HOST=""
     fi
-    # 生成额外参数部分 (&extra=...), 使用之前编码好的 XHTTP_EXTRA_ENCODED
-    SHARE_LINK_COMPONENT_EXTRA="&extra=${XHTTP_EXTRA_ENCODED}"
+    # 生成额外参数部分 (&extra=...), 仅在有内容时生成
+    if [[ -n "${XHTTP_EXTRA_ENCODED}" ]]; then
+        SHARE_LINK_COMPONENT_EXTRA="&extra=${XHTTP_EXTRA_ENCODED}"
+    else
+        SHARE_LINK_COMPONENT_EXTRA=""
+    fi
     # 若启用了 VLESS enc，生成 encryption 参数部分
     local vless_enc_encryption
     vless_enc_encryption="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
@@ -425,8 +474,8 @@ function get_vision_share_link() {
 function get_xhttp_share_link() {
     # 获取分享链接的各个组件
     get_share_link_component
-    # 将 VLESS 基础部分、Reality 安全参数、XHTTP 路径参数和可选的 VLESS enc 拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
+    # 将 VLESS 基础部分、Reality 安全参数、XHTTP 路径参数、可选的 VLESS enc 和额外混淆参数拼接成完整链接
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -441,8 +490,9 @@ function get_cdn_share_link() {
     CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
     CLIENT_CONFIG[host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
 
+    setup_xhttp_obfs_extra 1
     get_share_link_component
-    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}"
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -452,10 +502,12 @@ function get_cdn_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_trojan_share_link() {
+    # 设置混淆额外参数
+    setup_xhttp_obfs_extra 1
     # 获取分享链接的各个组件
     get_share_link_component
-    # 将 Trojan 基础部分、Reality 安全参数和 XHTTP 路径参数拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}"
+    # 将 Trojan 基础部分、Reality 安全参数、XHTTP 路径参数和额外混淆参数拼接成完整链接
+    SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -495,6 +547,8 @@ function get_fallback_xhttp_share_link() {
     # 从 Xray 配置中重新随机读取 fallback inbound 的 Short ID
     CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds | .[$random % length?]')"
 
+    # 设置 XHTTP 混淆额外参数 (XHTTP inbound 是 index 2)
+    setup_xhttp_obfs_extra 2
     # 调用通用的 XHTTP 链接生成函数
     get_xhttp_share_link
 }
@@ -514,10 +568,12 @@ function get_sni_tls_share_link() {
     # 将远程主机地址也设置为 CDN 域名
     CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
 
+    # 设置 XHTTP 混淆额外参数 (XHTTP inbound 是 index 2)
+    setup_xhttp_obfs_extra 2
     # 获取分享链接的各个组件
     get_share_link_component
-    # 将 VLESS 基础部分、TLS 安全参数、XHTTP 路径参数和可选的 VLESS enc 拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
+    # 将 VLESS 基础部分、TLS 安全参数、XHTTP 路径参数、可选的 VLESS enc 和额外混淆参数拼接成完整链接
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -527,10 +583,8 @@ function get_sni_tls_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_sni_tls_down_share_link() {
-    # 首先获取 fallback 的 XHTTP 链接 (基础部分)
+    # 首先获取 fallback 的 XHTTP 链接 (基础部分，已包含 obfs extra)
     get_fallback_xhttp_share_link
-    # 在基础链接后追加额外的下行参数部分
-    SHARE_LINK="${SHARE_LINK}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -540,10 +594,8 @@ function get_sni_tls_down_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_sni_reality_down_share_link() {
-    # 首先获取 SNI + TLS 的链接 (基础部分)
+    # 首先获取 SNI + TLS 的链接 (基础部分，已包含 obfs extra)
     get_sni_tls_share_link
-    # 在基础链接后追加额外的下行参数部分
-    SHARE_LINK="${SHARE_LINK}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -643,6 +695,7 @@ function show_sni_config() {
     CLIENT_CONFIG[tag]='sni_xhttp_cdn'
     # 清空额外配置
     XHTTP_EXTRA=""
+    XHTTP_EXTRA_ENCODED=""
     # 生成 SNI TLS 分享链接
     get_sni_tls_share_link
     # 显示第四个配置
@@ -683,7 +736,7 @@ function main() {
     # 根据脚本配置中的 tag (转换为小写) 选择不同的处理分支
     case "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag | ascii_downcase')" in
     mkcp) get_mkcp_share_link ;;      # mKCP 模式
-    xhttp) get_xhttp_share_link ;;    # XHTTP 模式
+    xhttp) setup_xhttp_obfs_extra 1; get_xhttp_share_link ;;    # XHTTP 模式
     trojan) get_trojan_share_link ;;  # Trojan 模式
     fallback) show_fallback_config ;; # Fallback 模式
     sni) show_sni_config ;;           # SNI 模式
