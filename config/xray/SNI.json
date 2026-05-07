@@ -129,18 +129,16 @@
           "host": "",
           "path": "/yourpath",
           "mode": "auto",
-          "extra": {
-            "xPaddingObfsMode": true,
-            "xPaddingKey": "requestId",
-            "xPaddingHeader": "X-Request-ID",
-            "xPaddingPlacement": "queryInHeader",
-            "xPaddingMethod": "tokenish",
-            "uplinkHTTPMethod": "POST",
-            "sessionPlacement": "header",
-            "sessionKey": "X-Session-ID",
-            "seqPlacement": "header",
-            "seqKey": "X-Request-Seq"
-          }
+          "xPaddingObfsMode": true,
+          "xPaddingKey": "requestId",
+          "xPaddingHeader": "X-Request-ID",
+          "xPaddingPlacement": "queryInHeader",
+          "xPaddingMethod": "tokenish",
+          "uplinkHTTPMethod": "POST",
+          "sessionPlacement": "header",
+          "sessionKey": "X-Session-ID",
+          "seqPlacement": "header",
+          "seqKey": "X-Request-Seq"
         }
       },
       "sniffing": {

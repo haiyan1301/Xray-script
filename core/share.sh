@@ -226,7 +226,11 @@ function get_common_config() {
 function build_xhttp_obfs_extra() {
     local inbound_index=${1:-1}
     echo "${XRAY_CONFIG}" | jq --argjson i "${inbound_index}" '
-        .inbounds[$i].streamSettings.xhttpSettings.extra // {}
+        .inbounds[$i].streamSettings.xhttpSettings // {} |
+        {xPaddingObfsMode, xPaddingKey, xPaddingHeader, xPaddingPlacement,
+         xPaddingMethod, uplinkHTTPMethod, sessionPlacement, sessionKey,
+         seqPlacement, seqKey} |
+        with_entries(select(.value != null))
     '
 }
 
