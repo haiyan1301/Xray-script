@@ -126,16 +126,18 @@
           "host": "",
           "path": "/yourpath",
           "mode": "auto",
-          "xPaddingObfsMode": true,
-          "xPaddingKey": "requestId",
-          "xPaddingHeader": "X-Request-ID",
-          "xPaddingPlacement": "queryInHeader",
-          "xPaddingMethod": "tokenish",
-          "uplinkHTTPMethod": "POST",
-          "sessionPlacement": "header",
-          "sessionKey": "X-Session-ID",
-          "seqPlacement": "header",
-          "seqKey": "X-Request-Seq"
+          "extra": {
+            "xPaddingObfsMode": true,
+            "xPaddingKey": "requestId",
+            "xPaddingHeader": "X-Request-ID",
+            "xPaddingPlacement": "queryInHeader",
+            "xPaddingMethod": "tokenish",
+            "uplinkHTTPMethod": "POST",
+            "sessionPlacement": "header",
+            "sessionKey": "X-Session-ID",
+            "seqPlacement": "header",
+            "seqKey": "X-Request-Seq"
+          }
         },
         "sockopt": {
           "acceptProxyProtocol": true
