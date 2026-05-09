@@ -71,8 +71,14 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 
 * 获取
 
+  默认分支 (main)：
   ```sh
   wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
+  ```
+
+  BoringSSL 编译修复分支 (fix/nginx-boringssl-compile)：
+  ```sh
+  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/fix/nginx-boringssl-compile/install.sh
   ```
 
 * 使用
@@ -102,8 +108,14 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 
 * 快速启动(界面)
 
+  默认分支 (main)：
   ```sh
   wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  ```
+
+  BoringSSL 编译修复分支 (fix/nginx-boringssl-compile)：
+  ```sh
+  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/fix/nginx-boringssl-compile/install.sh && bash ${HOME}/Xray-script.sh
   ```
 
 ## 脚本界面

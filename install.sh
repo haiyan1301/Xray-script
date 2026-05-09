@@ -42,6 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
+readonly SCRIPT_BRANCH="fix/nginx-boringssl-compile"
 readonly SCRIPT_VERSION="v2026.01.23"
 
 # --- 引入公共库 ---
@@ -385,7 +386,7 @@ function download_github_files() {
 function download_xray_script_files() {
     local target_dir="$1" # 本地目标根目录
     # 定义 GitHub API 项目 URL（使用本仓库）
-    local script_github_api="https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/tarball/main"
+    local script_github_api="https://api.github.com/repos/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/tarball/${SCRIPT_BRANCH}"
 
     # 调用 download_github_files 下载项目
     download_github_files "${target_dir}" "${script_github_api}"
@@ -400,7 +401,7 @@ function download_xray_script_files() {
 # =============================================================================
 function check_xray_script_version() {
     # 定义 GitHub API URL 和本地版本文件路径（使用本仓库）
-    local script_config_github_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
+    local script_config_github_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_BRANCH}/config.json"
     local is_update='n' # 初始化更新标志为 'n' (不更新)
 
     # 读取本地版本号
@@ -486,7 +487,7 @@ function main() {
     # 检查脚本配置目录和配置文件是否存在，如果不存在则创建并下载默认配置
     if [[ ! -d "${SCRIPT_CONFIG_DIR}" && ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
         mkdir -p "${SCRIPT_CONFIG_DIR}"
-        wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
+        wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/${SCRIPT_BRANCH}/config.json"
         chmod 600 "${SCRIPT_CONFIG_PATH}"
     fi
 

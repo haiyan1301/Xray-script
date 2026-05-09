@@ -66,8 +66,15 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
 ## Usage
 
 * Download:
+
+  Default branch (main):
   ```sh
   wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
+  ```
+
+  BoringSSL compile fix branch (fix/nginx-boringssl-compile):
+  ```sh
+  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/fix/nginx-boringssl-compile/install.sh
   ```
   
 * Usage
@@ -96,8 +103,15 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
     ```
 
 * Quick start (with interface)
+
+  Default branch (main):
   ```sh
   wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  ```
+
+  BoringSSL compile fix branch (fix/nginx-boringssl-compile):
+  ```sh
+  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/fix/nginx-boringssl-compile/install.sh && bash ${HOME}/Xray-script.sh
   ```
 
 ## Script Interface
