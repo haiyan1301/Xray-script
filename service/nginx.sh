@@ -540,12 +540,12 @@ function source_compile() {
     # 解压 Nginx 源码
     tar -zxf "${nginx_version}.tar.gz"
 
-    # 下载并编译 BoringSSL
+    # 下载并编译 BoringSSL（master 分支即为最新稳定版本）
     print_info "Downloading and building BoringSSL..."
     _error_detect "git clone --depth=1 https://github.com/google/boringssl"
     mkdir -p boringssl/build
     cd boringssl/build
-    _error_detect "cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 .."
+    _error_detect "cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=0 .."
     _error_detect "ninja -j$(nproc)"
     cd "${TMPFILE_DIR}"
 
