@@ -552,8 +552,15 @@ function source_compile() {
     # 创建 BoringSSL 兼容目录结构，让 Nginx 的 --with-openssl 能识别
     mkdir -p boringssl/.openssl/lib
     ln -sf "${TMPFILE_DIR}/boringssl/include" boringssl/.openssl/include
-    cp boringssl/build/ssl/libssl.a boringssl/.openssl/lib/
-    cp boringssl/build/crypto/libcrypto.a boringssl/.openssl/lib/
+
+    # 查找并复制 BoringSSL 库文件（兼容不同版本的输出路径）
+    local libssl_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libssl.a' -print -quit 2>/dev/null)"
+    local libcrypto_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libcrypto.a' -print -quit 2>/dev/null)"
+    if [[ -z "${libssl_path}" || -z "${libcrypto_path}" ]]; then
+        print_error "BoringSSL build failed: libssl.a or libcrypto.a not found in build directory"
+    fi
+    cp "${libssl_path}" boringssl/.openssl/lib/
+    cp "${libcrypto_path}" boringssl/.openssl/lib/
     # Nginx configure 会检查这个文件是否存在
     touch boringssl/.openssl/include/openssl/ssl.h
 
@@ -573,8 +580,14 @@ function source_compile() {
     sed -i 's/NGX_PM_CFLAGS=`$NGX_PERL -MExtUtils::Embed -e ccopts`/NGX_PM_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
 
     # 跳过 Nginx configure 对 OpenSSL 的自动编译（BoringSSL 已预编译）
-    # 通过在 openssl 目录下创建空的 Makefile 和 config 脚本来实现
-    touch "${TMPFILE_DIR}/boringssl/.openssl/Makefile"
+    # 创建带有 dummy targets 的 Makefile（Nginx make 会调用 clean/install_sw）
+    cat > "${TMPFILE_DIR}/boringssl/.openssl/Makefile" << 'MEOF'
+.PHONY: all clean install install_sw
+all:
+clean:
+install:
+install_sw:
+MEOF
     cat > "${TMPFILE_DIR}/boringssl/.openssl/config" << 'BSSL_EOF'
 #!/bin/sh
 BSSL_EOF
