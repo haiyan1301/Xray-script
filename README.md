@@ -8,9 +8,11 @@
   * Vision (VLESS-Vision-REALITY)
   * XHTTP (VLESS-XHTTP-REALITY)
   * trojan (Trojan-XHTTP-REALITY)
+  * Hysteria 2 (HY2)
   * Fallback (包含 VLESS-Vision-REALITY、VLESS-XHTTP-REALITY)
   * SNI (包含 Vision_REALITY、XHTTP_REALITY、XHTTP_TLS)
-* 支持 VLESS enc（ML-KEM-768 后量子）可选启用
+* 支持 VLESS enc（ML-KEM-768 后量子）及 ML-DSA-65 后量子密钥（可选启用）
+* XHTTP 支持 xPadding 混淆，兼容 Xray-core PR #5414
 * SNI 配置由 Nginx 实现 SNI 分流，适合过 CDN、上下行分离、多网站共存等需求
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
 * SNI 支持证书来源选择（自动申请 / 自行填写证书路径）
@@ -231,7 +233,10 @@ SNI 配置适合安装一次后长期使用，不适合反复重置系统安装�
 |                                 | curl                                 | curl                |
 |                                 | openssl                              | openssl             |
 |                                 | cron                                 | crontabs            |
-| **编译openssl：**               |                                      |                     |
+| **编译BoringSSL：**             |                                      |                     |
+|                                 | cmake                                | cmake               |
+|                                 | ninja-build                          | ninja-build         |
+|                                 | golang-go                            | golang              |
 |                                 | perl-base(包含于libperl-dev)         | perl-IPC-Cmd        |
 |                                 | perl-modules-5.32(包含于libperl-dev) | perl-Getopt-Long    |
 |                                 | libperl5.32(包含于libperl-dev)       | perl-Data-Dumper    |

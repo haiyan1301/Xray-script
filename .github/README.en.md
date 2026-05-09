@@ -8,8 +8,11 @@
   * Vision (VLESS-Vision-REALITY)
   * XHTTP (VLESS-XHTTP-REALITY)
   * trojan (Trojan-XHTTP-REALITY)
+  * Hysteria 2 (HY2)
   * Fallback (includes VLESS-Vision-REALITY, VLESS-XHTTP-REALITY)
   * SNI (includes Vision_REALITY, XHTTP_REALITY, XHTTP_TLS)
+* Supports VLESS enc (ML-KEM-768 post-quantum) and ML-DSA-65 post-quantum keys (optional)
+* XHTTP supports xPadding obfuscation, compatible with Xray-core PR #5414
 * SNI configuration uses Nginx for SNI traffic splitting, ideal for CDN traversal, upstream/downstream separation, and multi-site coexistence
 * SNI share links implement bidirectional separation (upstream: xhttp+TLS+CDN | downstream: xhttp+Reality, upstream: xhttp+Reality | downstream: xhttp+TLS+CDN)
 * Rule configurations and custom entries:
@@ -219,7 +222,10 @@ SNI configuration may install these dependencies:
 |                                                   | curl                                        | curl                  |
 |                                                   | openssl                                     | openssl               |
 |                                                   | cron                                        | crontabs              |
-| **Compile openssl:**                              |                                             |                       |
+| **Compile BoringSSL:**                            |                                             |                       |
+|                                                   | cmake                                       | cmake                 |
+|                                                   | ninja-build                                 | ninja-build           |
+|                                                   | golang-go                                   | golang                |
 |                                                   | perl-base (included in libperl-dev)         | perl-IPC-Cmd          |
 |                                                   | perl-modules-5.32 (included in libperl-dev) | perl-Getopt-Long      |
 |                                                   | libperl5.32 (included in libperl-dev)       | perl-Data-Dumper      |
