@@ -79,7 +79,7 @@
           "congestion": true,
           "readBufferSize": 5,
           "writeBufferSize": 5,
-          "seed": "{{ speed }}"
+          "seed": "{{ seed }}"
         }
       },
       "sniffing": {

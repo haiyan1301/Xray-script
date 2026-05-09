@@ -403,8 +403,8 @@ function get_share_link_component() {
     SHARE_LINK_COMPONENT_VLESS="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[uuid]}@${CLIENT_CONFIG[remote_host]}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
     # 生成 Trojan 协议基础链接部分 (协议://密码@地址:端口?网络类型=...)
     SHARE_LINK_COMPONENT_TROJAN="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[password]}@${CLIENT_CONFIG[remote_host]}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
-    # 生成 mKCP 网络传输参数部分 (&seed=...)
-    SHARE_LINK_COMPONENT_MKCP="&seed=${CLIENT_CONFIG[seed]}"
+    # 生成 mKCP 网络传输参数部分 (&seed=...&headerType=none)
+    SHARE_LINK_COMPONENT_MKCP="&seed=${CLIENT_CONFIG[seed]}&headerType=none"
     # 生成 TLS 安全传输参数部分 (&security=tls&sni=...&alpn=h2&fp=chrome)
     SHARE_LINK_COMPONENT_TLS="&security=${CLIENT_CONFIG[security]}&sni=${CLIENT_CONFIG[server_name]}&alpn=h2&fp=chrome"
     # 生成 Reality 安全传输参数部分 (&security=reality&sni=...&pbk=...&sid=...&spx=%2F&fp=chrome)

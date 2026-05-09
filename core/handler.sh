@@ -482,8 +482,12 @@ function handler_script_config() {
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${FALLBACK_UUID}" '.xray.fallback = $uuid')"
         ;;
     mkcp)
-        # 为 mKCP 生成随机端口并更新 Seed
-        XRAY_PORT="$(exec_generate '--port')"
+        # 为 mKCP 生成随机端口并更新 Seed，若用户指定了端口则使用指定的
+        if [[ -z "${CONFIG_DATA['port']}" ]]; then
+            XRAY_PORT="$(exec_generate '--port')"
+        else
+            XRAY_PORT="${CONFIG_DATA['port']}"
+        fi
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg seed "${KCP_SEED}" '.xray.kcp = $seed')"
         ;;
     hy2)
@@ -809,6 +813,21 @@ function handler_xray_config() {
     # 将更新后的脚本配置和 Xray 配置写入文件
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
     echo "${XRAY_CONFIG}" >"${XRAY_CONFIG_PATH}" && sleep 2
+
+    # mKCP 防火墙规则：放行随机/指定的 UDP 端口
+    if [[ "${CONFIG_TAG,,}" == 'mkcp' ]]; then
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${XRAY_PORT}/udp" >&2
+        if command -v ufw &>/dev/null; then
+            ufw allow "${XRAY_PORT}"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd &>/dev/null; then
+            firewall-cmd --permanent --add-port="${XRAY_PORT}"/udp >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+        else
+            iptables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+            ip6tables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+        fi
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
+    fi
 }
 
 # =============================================================================
