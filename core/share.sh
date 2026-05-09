@@ -201,8 +201,9 @@ function get_common_config() {
     CLIENT_CONFIG[flow]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.clients[0].flow? | if . == null then empty else . end')"
     # 从 Xray 配置中获取安全传输类型 (如 none, tls, reality)
     CLIENT_CONFIG[security]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.security? | if . == null then empty else . end')"
-    # 从 Xray 配置中获取 XHTTP 的路径 (path)
+    # 从 Xray 配置中获取 XHTTP 的路径 (path) 和模式 (mode)
     CLIENT_CONFIG[path]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.path? | if . == null then empty else . end')"
+    CLIENT_CONFIG[mode]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.mode? | if . == null then empty else . end')"
     # 从 Xray 配置中随机获取一个 Reality 的服务器名称 (serverNames)
     CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.serverNames? | if . == null then empty else .[$random % length] end')"
     # 从 Xray 配置中随机获取一个 Reality 的 Short ID (shortIds)
@@ -257,7 +258,7 @@ function setup_xhttp_obfs_extra() {
     else
         XHTTP_EXTRA="${obfs_json}"
     fi
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode)
+    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode)
 }
 
 # =============================================================================
@@ -413,8 +414,11 @@ function get_share_link_component() {
     if [[ -n "${CLIENT_CONFIG[mldsa65_verify]}" ]]; then
         SHARE_LINK_COMPONENT_REALITY="${SHARE_LINK_COMPONENT_REALITY}&mldsa65Verify=${CLIENT_CONFIG[mldsa65_verify]}"
     fi
-    # 生成 XHTTP 网络传输路径参数部分 (&path=...), 注意去除路径开头的 '/'
+    # 生成 XHTTP 网络传输路径参数部分 (&path=...&mode=...), 注意去除路径开头的 '/'
     SHARE_LINK_COMPONENT_XHTTP="&path=%2F${CLIENT_CONFIG[path]#/}"
+    if [[ -n "${CLIENT_CONFIG[mode]}" ]]; then
+        SHARE_LINK_COMPONENT_XHTTP="${SHARE_LINK_COMPONENT_XHTTP}&mode=${CLIENT_CONFIG[mode]}"
+    fi
     # 生成 Flow 控制参数部分 (&flow=...)
     SHARE_LINK_COMPONENT_FLOW="&flow=${CLIENT_CONFIG[flow]}"
     # 生成 XHTTP Host 参数部分 (&host=...), 仅在设置了 host 时输出
@@ -475,7 +479,7 @@ function get_xhttp_share_link() {
     # 获取分享链接的各个组件
     get_share_link_component
     # 将 VLESS 基础部分、Reality 安全参数、XHTTP 路径参数、可选的 VLESS enc 和额外混淆参数拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
@@ -507,7 +511,7 @@ function get_trojan_share_link() {
     # 获取分享链接的各个组件
     get_share_link_component
     # 将 Trojan 基础部分、Reality 安全参数、XHTTP 路径参数和额外混淆参数拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_EXTRA}"
+    SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
 # =============================================================================
