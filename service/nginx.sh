@@ -550,8 +550,8 @@ function source_compile() {
     cd "${TMPFILE_DIR}"
 
     # 创建 BoringSSL 兼容目录结构，让 Nginx 的 --with-openssl 能识别
-    mkdir -p boringssl/.openssl/lib
-    ln -sf "${TMPFILE_DIR}/boringssl/include" boringssl/.openssl/include
+    mkdir -p boringssl/.openssl-dummy/.openssl/lib
+    ln -sf "${TMPFILE_DIR}/boringssl/include" boringssl/.openssl-dummy/.openssl/include
 
     # 查找并复制 BoringSSL 库文件（兼容不同版本的输出路径）
     local libssl_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libssl.a' -print -quit 2>/dev/null)"
@@ -559,10 +559,10 @@ function source_compile() {
     if [[ -z "${libssl_path}" || -z "${libcrypto_path}" ]]; then
         print_error "BoringSSL build failed: libssl.a or libcrypto.a not found in build directory"
     fi
-    cp "${libssl_path}" boringssl/.openssl/lib/
-    cp "${libcrypto_path}" boringssl/.openssl/lib/
+    cp "${libssl_path}" boringssl/.openssl-dummy/.openssl/lib/
+    cp "${libcrypto_path}" boringssl/.openssl-dummy/.openssl/lib/
     # Nginx configure 会检查这个文件是否存在
-    touch boringssl/.openssl/include/openssl/ssl.h
+    touch boringssl/.openssl-dummy/.openssl/include/openssl/ssl.h
 
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
@@ -581,26 +581,26 @@ function source_compile() {
 
     # 跳过 Nginx configure 对 OpenSSL 的自动编译（BoringSSL 已预编译）
     # 创建带有 dummy targets 的 Makefile（Nginx make 会调用 clean/install_sw）
-    cat > "${TMPFILE_DIR}/boringssl/.openssl/Makefile" << 'MEOF'
+    cat > "${TMPFILE_DIR}/boringssl/.openssl-dummy/Makefile" << 'MEOF'
 .PHONY: all clean install install_sw
 all:
 clean:
 install:
 install_sw:
 MEOF
-    cat > "${TMPFILE_DIR}/boringssl/.openssl/config" << 'BSSL_EOF'
+    cat > "${TMPFILE_DIR}/boringssl/.openssl-dummy/config" << 'BSSL_EOF'
 #!/bin/sh
 BSSL_EOF
-    chmod +x "${TMPFILE_DIR}/boringssl/.openssl/config"
+    chmod +x "${TMPFILE_DIR}/boringssl/.openssl-dummy/config"
 
     # 执行 Nginx 的 configure 脚本，使用 BoringSSL
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.configure')"
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
         # 如果启用 Brotli，则添加 --add-module 选项
-        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include" --with-ld-opt="-L${TMPFILE_DIR}/boringssl/build/ssl -L${TMPFILE_DIR}/boringssl/build/crypto" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl"
+        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl-dummy"
     else
         # 不启用 Brotli
-        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include" --with-ld-opt="-L${TMPFILE_DIR}/boringssl/build/ssl -L${TMPFILE_DIR}/boringssl/build/crypto" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl"
+        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl-dummy"
     fi
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
