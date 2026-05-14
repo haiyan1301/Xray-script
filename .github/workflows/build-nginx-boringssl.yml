@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build:
     name: Build and publish Nginx/BoringSSL binary
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     env:
@@ -34,13 +34,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: Install build dependencies
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             ca-certificates curl wget gcc g++ make git openssl tzdata socat cmake \
-            dnsutils perl-base perl golang-go ninja-build pkg-config \
+            dnsutils perl-base perl ninja-build pkg-config \
             libpcre2-dev zlib1g-dev libxml2-dev libxslt1-dev libgd-dev libgeoip-dev \
             libgoogle-perftools-dev libperl-dev libbrotli-dev
 
@@ -85,6 +91,22 @@ jobs:
           test -f "$(find "${BUILD_ROOT}/boringssl/build" -name libssl.a -print -quit)"
           test -f "$(find "${BUILD_ROOT}/boringssl/build" -name libcrypto.a -print -quit)"
 
+      - name: Prepare BoringSSL shim for Nginx
+        run: |
+          set -euxo pipefail
+          # Nginx's auto/lib/openssl/conf probes: $OPENSSL/.openssl/include/openssl/ssl.h
+          # So --with-openssl must point to boringssl root, and the shim goes inside .openssl/
+          shim="${BUILD_ROOT}/boringssl/.openssl"
+          mkdir -p "${shim}/include" "${shim}/lib"
+          ln -sf "${BUILD_ROOT}/boringssl/include/openssl" "${shim}/include/openssl"
+          libssl_path="$(find "${BUILD_ROOT}/boringssl/build" -name libssl.a -print -quit)"
+          libcrypto_path="$(find "${BUILD_ROOT}/boringssl/build" -name libcrypto.a -print -quit)"
+          cp "${libssl_path}" "${shim}/lib/"
+          cp "${libcrypto_path}" "${shim}/lib/"
+          # Dummy Makefile at boringssl root — Nginx runs 'cd $OPENSSL && make'
+          # This prevents it from trying to run ./config and rebuild
+          printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${BUILD_ROOT}/boringssl/Makefile"
+
       - name: Configure and compile Nginx
         run: |
           set -euxo pipefail
@@ -108,6 +130,7 @@ jobs:
             --prefix="${NGINX_PREFIX}" \
             --user=nginx \
             --group=nginx \
+            --with-openssl="${BUILD_ROOT}/boringssl" \
             --with-threads \
             --with-file-aio \
             --with-pcre-jit \
@@ -142,6 +165,9 @@ jobs:
             --with-cc-opt="-g0 -O3 -I${BUILD_ROOT}/boringssl/include" \
             --with-ld-opt="${ld_opts}"
 
+          # Touch ssl.h so make won't re-trigger the OpenSSL build recipe
+          # (the Makefile rule depends on objs/Makefile which is always newer)
+          touch "${BUILD_ROOT}/boringssl/.openssl/include/openssl/ssl.h"
           make -j"$(nproc)"
           objs/nginx -V
 
@@ -149,21 +175,25 @@ jobs:
         id: package
         run: |
           set -euxo pipefail
+          # Ensure nginx user exists so the binary can validate its config
+          if ! id -u nginx &>/dev/null; then
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin nginx || true
+          fi
           release_time="$(date -u +%Y%m%d-%H%M%S)"
           release_name="${release_time}-nginx-${{ steps.nginx.outputs.nginx_semver }}-boringssl-${{ steps.boringssl.outputs.boringssl_version }}"
           package_dir="${BUILD_ROOT}/${release_name}"
           mkdir -p "${package_dir}/sbin" "${package_dir}/modules" "${package_dir}/logs"
           cp "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs/nginx" "${package_dir}/sbin/nginx"
-          find "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs" -maxdepth 1 -name '*.so' -exec cp {} "${package_dir}/modules/" \;
-          cat > "${package_dir}/BUILD_INFO.txt" <<INFO
-          Release: ${release_name}
-          Built at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-          Nginx version: ${{ steps.nginx.outputs.nginx_semver }}
-          Nginx source: https://nginx.org/download/${{ steps.nginx.outputs.nginx_version }}.tar.gz
-          BoringSSL version: ${{ steps.boringssl.outputs.boringssl_version }}
-          BoringSSL source: https://github.com/google/boringssl
-          Prefix: ${NGINX_PREFIX}
-          INFO
+          find "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs" -maxdepth 1 -name '*.so' -exec cp {} "${package_dir}/modules/" \; 2>/dev/null || true
+          cat > "${package_dir}/BUILD_INFO.txt" <<EOF
+Release: ${release_name}
+Built at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Nginx version: ${{ steps.nginx.outputs.nginx_semver }}
+Nginx source: https://nginx.org/download/${{ steps.nginx.outputs.nginx_version }}.tar.gz
+BoringSSL version: ${{ steps.boringssl.outputs.boringssl_version }}
+BoringSSL source: https://github.com/google/boringssl
+Prefix: ${NGINX_PREFIX}
+EOF
           "${package_dir}/sbin/nginx" -V > "${package_dir}/NGINX_VERSION.txt" 2>&1
           tar -C "${BUILD_ROOT}" -czf "${BUILD_ROOT}/${release_name}.tar.gz" "${release_name}"
           sha256sum "${BUILD_ROOT}/${release_name}.tar.gz" > "${BUILD_ROOT}/${release_name}.tar.gz.sha256"

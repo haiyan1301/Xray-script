@@ -337,7 +337,7 @@ function _install() {
             # 遍历并安装每个包（如果尚未安装）
             for package_name in ${packages_name}; do
                 if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
-                    _error_detect "dnf install -y "${package_name}""
+                    _error_detect "dnf install -y '${package_name}'"
                 fi
             done
         else
@@ -347,7 +347,7 @@ function _install() {
             yum update -y
             for package_name in ${packages_name}; do
                 if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
-                    _error_detect "yum install -y "${package_name}""
+                    _error_detect "yum install -y '${package_name}'"
                 fi
             done
         fi
@@ -358,7 +358,7 @@ function _install() {
         installed_packages="$(apt list --installed 2>/dev/null)" # 获取已安装包列表
         for package_name in ${packages_name}; do
             if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
-                _error_detect "apt install -y "${package_name}""
+                _error_detect "apt install -y '${package_name}'"
             fi
         done
         ;;
@@ -446,7 +446,7 @@ function compile_dependencies() {
     # 打印安装依赖信息
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.install_deps')"
     # 安装基础工具和库
-    _install ca-certificates curl wget gcc make git openssl tzdata socat cmake
+    _install ca-certificates curl wget gcc make git openssl tzdata socat cmake pkg-config
     case "$(_os)" in
     centos)
         # 安装 CentOS 特定的工具和开发库
@@ -572,6 +572,17 @@ function source_compile() {
         print_error "BoringSSL build failed: libssl.a or libcrypto.a not found in build directory"
     fi
 
+    # 创建 .openssl shim 目录，让 Nginx 的 configure 通过标准 OpenSSL 探测路径
+    # ($OPENSSL/.openssl/include/openssl/ssl.h) 找到 BoringSSL 的头文件和库文件。
+    local shim_dir="${TMPFILE_DIR}/boringssl/.openssl"
+    mkdir -p "${shim_dir}/include" "${shim_dir}/lib"
+    ln -sf "${TMPFILE_DIR}/boringssl/include/openssl" "${shim_dir}/include/openssl"
+    cp "${libssl_path}" "${shim_dir}/lib/"
+    cp "${libcrypto_path}" "${shim_dir}/lib/"
+    # Dummy Makefile 放在 boringssl 根目录，因为 Nginx 执行 'cd $OPENSSL && make'
+    # 这里同时提供 clean 目标，防止 Nginx 的 make 规则调用 'make clean' 时出错
+    printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${TMPFILE_DIR}/boringssl/Makefile"
+
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_brotli')"
@@ -602,6 +613,7 @@ function source_compile() {
         --prefix="${NGINX_PATH}"
         --user=nginx
         --group=nginx
+        --with-openssl="${TMPFILE_DIR}/boringssl"
         --with-threads
         --with-file-aio
         --with-pcre-jit
@@ -644,6 +656,9 @@ function source_compile() {
         print_error "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fail_exec_cmd' | sed 's|${cmd}|./configure|')"
     fi
 
+    # Touch ssl.h 使其时间戳新于 objs/Makefile，防止 make 重新触发 OpenSSL 构建规则
+    touch "${TMPFILE_DIR}/boringssl/.openssl/include/openssl/ssl.h"
+
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
     # 创建并启用 512MB swap 空间以辅助编译
     swap_on 512
@@ -662,6 +677,10 @@ function source_compile() {
 function source_install() {
     source_compile # 先执行编译
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
+    # 确保 nginx 用户和组存在
+    if ! id -u nginx &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin nginx
+    fi
     make install                                      # 执行安装 (将文件复制到 --prefix 指定的目录)
     mkdir -p /var/log/nginx                           # 创建日志目录
     chown -R nginx:nginx /var/log/nginx               # 设置日志目录归属 nginx 用户
@@ -695,7 +714,7 @@ function source_update() {
         backup_files "${NGINX_PATH}/modules"
         # 复制新编译的 nginx 二进制文件和动态模块
         cp objs/nginx "${NGINX_PATH}/sbin/"
-        cp objs/*.so "${NGINX_PATH}/modules/"
+        find objs -maxdepth 1 -name '*.so' -exec cp {} "${NGINX_PATH}/modules/" \; 2>/dev/null || true
         # 更新软链接
         ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
 
@@ -708,9 +727,7 @@ function source_update() {
             if [[ -e "/run/nginx.pid.oldbin" ]]; then
                 # 优雅地关闭旧工作进程
                 kill -WINCH $(cat /run/nginx.pid.oldbin)
-                # 重新打开日志文件
-                kill -HUP $(cat /run/nginx.pid.oldbin)
-                # 优雅地退出旧主进程
+                # 等待旧 worker 处理完现有请求后优雅退出旧主进程
                 kill -QUIT $(cat /run/nginx.pid.oldbin)
             else
                 print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.no_old_process')"
