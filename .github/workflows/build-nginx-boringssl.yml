@@ -119,11 +119,14 @@ jobs:
           libcrypto_path="$(find "${BUILD_ROOT}/boringssl/build" -name libcrypto.a -print -quit)"
           ssl_lib_dir="$(dirname "${libssl_path}")"
           crypto_lib_dir="$(dirname "${libcrypto_path}")"
+          # NOTE: -lstdc++ must come AFTER libcrypto.a in the final link command.
+          # --with-openssl causes Nginx to append .a paths AFTER --with-ld-opt flags,
+          # so -lstdc++ here would precede libcrypto.a and cause undefined symbol errors.
+          # We patch objs/Makefile after configure to fix the order instead.
           ld_opts="-L${ssl_lib_dir}"
           if [ "${crypto_lib_dir}" != "${ssl_lib_dir}" ]; then
             ld_opts="${ld_opts} -L${crypto_lib_dir}"
           fi
-          ld_opts="${ld_opts} -lstdc++"
 
           ./configure \
             --prefix="${NGINX_PREFIX}" \
@@ -165,8 +168,10 @@ jobs:
             --with-ld-opt="${ld_opts}"
 
           # Touch ssl.h so make won't re-trigger the OpenSSL build recipe
-          # (the Makefile rule depends on objs/Makefile which is always newer)
           touch "${BUILD_ROOT}/boringssl/.openssl/include/openssl/ssl.h"
+          # Fix link order: -lstdc++ must follow libcrypto.a (not precede it).
+          # Patch the generated objs/Makefile to insert -lstdc++ right after libcrypto.a.
+          sed -i 's|libcrypto\.a|libcrypto.a -lstdc++|g' objs/Makefile
           make -j"$(nproc)"
           objs/nginx -V
 

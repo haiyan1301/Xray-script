@@ -607,8 +607,10 @@ function source_compile() {
     if [[ "${crypto_lib_dir}" != "${ssl_lib_dir}" ]]; then
         ld_opts="${ld_opts} -L${crypto_lib_dir}"
     fi
-    # Nginx 自身会追加 -lssl -lcrypto；这里按官方 BoringSSL 示例只提供库搜索路径和 C++ 运行库。
-    ld_opts="${ld_opts} -lstdc++"
+    # NOTE: -lstdc++ must come AFTER libcrypto.a in the final link command.
+    # --with-openssl causes Nginx to append .a paths AFTER --with-ld-opt flags,
+    # so we patch objs/Makefile after configure instead of putting -lstdc++ here.
+    ld_opts="${ld_opts}"
     local configure_args=(
         --prefix="${NGINX_PATH}"
         --user=nginx
@@ -658,6 +660,10 @@ function source_compile() {
 
     # Touch ssl.h 使其时间戳新于 objs/Makefile，防止 make 重新触发 OpenSSL 构建规则
     touch "${TMPFILE_DIR}/boringssl/.openssl/include/openssl/ssl.h"
+
+    # 修复链接顺序：-lstdc++ 必须在 libcrypto.a 之后，否则会出现 undefined reference 错误。
+    # 直接修补 configure 生成的 objs/Makefile 来插入 -lstdc++。
+    sed -i 's|libcrypto\.a|libcrypto.a -lstdc++|g' objs/Makefile
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
     # 创建并启用 512MB swap 空间以辅助编译
