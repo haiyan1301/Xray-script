@@ -4,7 +4,7 @@
 # 脚本名称: nginx.sh
 # 脚本仓库: https://github.com/zxcvos/Xray-script
 # 功能描述: 用于从源代码编译、安装、更新和卸载 Nginx 的脚本。
-#           支持集成最新版 OpenSSL 和可选的 Brotli 压缩模块。
+#           支持集成最新版 BoringSSL 和可选的 Brotli 压缩模块。
 #           负责管理 Nginx 的 systemd 服务配置。
 # 作者: zxcvos
 # 时间: 2025-07-25
@@ -278,6 +278,20 @@ function _version_ge() {
 }
 
 # =============================================================================
+# 函数名称: fetch_latest_nginx_version
+# 功能描述: 从官方源码目录解析最新 Nginx 版本号。
+# 参数: 无
+# 返回值: 最新版本源码目录名 (例如 nginx-1.29.3)
+# =============================================================================
+function fetch_latest_nginx_version() {
+    curl -fsSL https://nginx.org/download/ 2>/dev/null \
+        | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' \
+        | sed 's/\.tar\.gz$//' \
+        | sort -V \
+        | tail -n 1
+}
+
+# =============================================================================
 # 函数名称: _install
 # 功能描述: 根据操作系统类型安装指定的软件包。
 # 参数:
@@ -528,8 +542,9 @@ function gen_cflags() {
 function source_compile() {
     cd "${TMPFILE_DIR}" # 切换到临时目录
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions')"
-    # 从 GitHub API 获取最新的 Nginx release 标签名
-    local nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
+    # 从官方下载页获取最新的 Nginx 源码版本，BoringSSL 使用 main 分支源码。
+    local nginx_version="$(fetch_latest_nginx_version)"
+    [[ -z "${nginx_version}" ]] && print_error "Failed to fetch latest Nginx version"
 
     # 生成编译器优化标志
     gen_cflags
@@ -538,10 +553,11 @@ function source_compile() {
     # 下载 Nginx 源码包
     _error_detect "curl -fsSL -o ${nginx_version}.tar.gz https://nginx.org/download/${nginx_version}.tar.gz"
     # 解压 Nginx 源码
-    tar -zxf "${nginx_version}.tar.gz"
+    _error_detect "tar -zxf ${nginx_version}.tar.gz"
 
-    # 下载并编译 BoringSSL
-    print_info "Downloading and building BoringSSL..."
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_boringssl')"
+    # 下载并编译 BoringSSL。Nginx 直接通过 include/lib 链接到已构建的 BoringSSL，
+    # 不使用 --with-openssl，因为该参数要求 OpenSSL 源码树并会尝试执行 Configure/make。
     _error_detect "git clone --depth=1 https://github.com/google/boringssl"
     mkdir -p boringssl/build
     cd boringssl/build
@@ -549,25 +565,17 @@ function source_compile() {
     _error_detect "ninja -j$(nproc)"
     cd "${TMPFILE_DIR}"
 
-    # 创建 BoringSSL 兼容目录结构，让 Nginx 的 --with-openssl 能识别
-    mkdir -p boringssl/.openssl-dummy/.openssl/lib
-    ln -sf "${TMPFILE_DIR}/boringssl/include" boringssl/.openssl-dummy/.openssl/include
-
-    # 查找并复制 BoringSSL 库文件（兼容不同版本的输出路径）
+    # 查找 BoringSSL 静态库（兼容不同版本/生成器的输出路径）。
     local libssl_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libssl.a' -print -quit 2>/dev/null)"
     local libcrypto_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libcrypto.a' -print -quit 2>/dev/null)"
     if [[ -z "${libssl_path}" || -z "${libcrypto_path}" ]]; then
         print_error "BoringSSL build failed: libssl.a or libcrypto.a not found in build directory"
     fi
-    cp "${libssl_path}" boringssl/.openssl-dummy/.openssl/lib/
-    cp "${libcrypto_path}" boringssl/.openssl-dummy/.openssl/lib/
-    # Nginx configure 会检查这个文件是否存在
-    touch boringssl/.openssl-dummy/.openssl/include/openssl/ssl.h
 
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
-    if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
+    if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_brotli')"
-        _error_detect "git clone https://github.com/google/ngx_brotli && cd ngx_brotli && git submodule update --init"
+        _error_detect "git clone --recursive https://github.com/google/ngx_brotli"
         cd "${TMPFILE_DIR}" # 返回临时目录
     fi
 
@@ -579,28 +587,61 @@ function source_compile() {
     sed -i 's/NGX_PERL_CFLAGS="$CFLAGS `$NGX_PERL -MExtUtils::Embed -e ccopts`"/NGX_PERL_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
     sed -i 's/NGX_PM_CFLAGS=`$NGX_PERL -MExtUtils::Embed -e ccopts`/NGX_PM_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
 
-    # 跳过 Nginx configure 对 OpenSSL 的自动编译（BoringSSL 已预编译）
-    # 创建带有 dummy targets 的 Makefile（Nginx make 会调用 clean/install_sw）
-    cat > "${TMPFILE_DIR}/boringssl/.openssl-dummy/Makefile" << 'MEOF'
-.PHONY: all clean install install_sw
-all:
-clean:
-install:
-install_sw:
-MEOF
-    cat > "${TMPFILE_DIR}/boringssl/.openssl-dummy/config" << 'BSSL_EOF'
-#!/bin/sh
-BSSL_EOF
-    chmod +x "${TMPFILE_DIR}/boringssl/.openssl-dummy/config"
-
-    # 执行 Nginx 的 configure 脚本，使用 BoringSSL
+    # 执行 Nginx 的 configure 脚本，使用 BoringSSL 头文件和静态库。
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.configure')"
-    if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
+    local cc_opts="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include"
+    local ssl_lib_dir="$(dirname "${libssl_path}")"
+    local crypto_lib_dir="$(dirname "${libcrypto_path}")"
+    local ld_opts="-L${ssl_lib_dir}"
+    if [[ "${crypto_lib_dir}" != "${ssl_lib_dir}" ]]; then
+        ld_opts="${ld_opts} -L${crypto_lib_dir}"
+    fi
+    # Nginx 自身会追加 -lssl -lcrypto；这里按官方 BoringSSL 示例只提供库搜索路径和 C++ 运行库。
+    ld_opts="${ld_opts} -lstdc++"
+    local configure_args=(
+        --prefix="${NGINX_PATH}"
+        --user=nginx
+        --group=nginx
+        --with-threads
+        --with-file-aio
+        --with-pcre-jit
+        --with-http_ssl_module
+        --with-http_v2_module
+        --with-http_v3_module
+        --with-http_realip_module
+        --with-http_addition_module
+        --with-http_xslt_module=dynamic
+        --with-http_image_filter_module=dynamic
+        --with-http_geoip_module=dynamic
+        --with-http_sub_module
+        --with-http_dav_module
+        --with-http_gunzip_module
+        --with-http_gzip_static_module
+        --with-http_auth_request_module
+        --with-http_random_index_module
+        --with-http_secure_link_module
+        --with-http_degradation_module
+        --with-http_slice_module
+        --with-http_stub_status_module
+        --with-http_perl_module=dynamic
+        --with-mail=dynamic
+        --with-mail_ssl_module
+        --with-stream
+        --with-stream_ssl_module
+        --with-stream_realip_module
+        --with-stream_geoip_module=dynamic
+        --with-stream_ssl_preread_module
+        --with-google_perftools_module
+        --with-compat
+        --with-cc-opt="${cc_opts}"
+        --with-ld-opt="${ld_opts}"
+    )
+    if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
         # 如果启用 Brotli，则添加 --add-module 选项
-        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl-dummy"
-    else
-        # 不启用 Brotli
-        ./configure --prefix="${NGINX_PATH}" --user=nginx --group=nginx --with-threads --with-file-aio --with-pcre-jit --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="${TMPFILE_DIR}/boringssl/.openssl-dummy"
+        configure_args+=(--add-module="../ngx_brotli")
+    fi
+    if ! ./configure "${configure_args[@]}"; then
+        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fail_exec_cmd' | sed 's|${cmd}|./configure|')"
     fi
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
@@ -636,14 +677,15 @@ function source_install() {
 function source_update() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.fetch_versions')"
     # 获取最新的 Nginx 版本号
-    local latest_nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
+    local latest_nginx_version="$(fetch_latest_nginx_version)"
+    [[ -z "${latest_nginx_version}" ]] && print_error "Failed to fetch latest Nginx version"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.read_current_versions')"
     # 获取当前安装的 Nginx 版本
     local current_version_nginx="$(nginx -V 2>&1 | grep "^nginx version:.*" | cut -d / -f 2)"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.check_update')"
-    # 比较 Nginx 版本，如果有新版本则更新（BoringSSL 总是使用最新 main 分支）
+    # 比较 Nginx 版本；版本相同也会重编译，以刷新 BoringSSL main 分支。
     if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}"; then
         source_compile # 重新编译新版本
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.start_update')"
@@ -800,7 +842,7 @@ function main() {
             ;;
         # 处理 Brotli 选项
         --brotli)
-            is_enable_brotli='Y' # 设置启用 Brotli 的标志
+            IS_ENABLE_BROTLI='Y' # 设置启用 Brotli 的标志
             ;;
         # 处理帮助选项
         --help)

@@ -415,22 +415,22 @@
   "nginx": {
     "compile": {
       "install_deps": "正在安装编译依赖项...",
-      "fetch_versions": "检索 Nginx 和 OpenSSL 的最新版本。",
+      "fetch_versions": "检索 Nginx 最新版本，BoringSSL 使用 main 分支。",
       "download_nginx": "下载最新版本的 Nginx。",
-      "download_openssl": "下载最新版本的 OpenSSL。",
       "fetch_brotli": "检索 ngx_brotli 并构建依赖项。",
       "configure": "配置 Nginx 编译选项。",
       "swap": "申请 512MB 虚拟内存。",
       "start_compile": "编译 Nginx。",
       "executing": "正在执行命令: ${cmd}",
-      "fail_exec_cmd": "执行命令 (${cmd}) 失败，请检查并重试。"
+      "fail_exec_cmd": "执行命令 (${cmd}) 失败，请检查并重试。",
+      "download_boringssl": "下载并编译 BoringSSL。"
     },
     "install": {
       "start_install": "安装 Nginx。"
     },
     "update": {
-      "fetch_versions": "检索 Nginx 和 OpenSSL 的最新版本。",
-      "read_current_versions": "读取 Nginx 和 OpenSSL 的当前版本。",
+      "fetch_versions": "检索 Nginx 最新版本。",
+      "read_current_versions": "读取 Nginx 当前版本。",
       "check_update": "判断是否需要更新。",
       "start_update": "更新 Nginx。",
       "smooth_upgrade": "正在平滑升级 Nginx...",

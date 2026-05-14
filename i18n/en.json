@@ -415,22 +415,22 @@
   "nginx": {
     "compile": {
       "install_deps": "Installing compilation dependencies...",
-      "fetch_versions": "Fetching the latest versions of Nginx and OpenSSL.",
+      "fetch_versions": "Fetching the latest Nginx version; BoringSSL uses the main branch.",
       "download_nginx": "Downloading the latest version of Nginx.",
-      "download_openssl": "Downloading the latest version of OpenSSL.",
       "fetch_brotli": "Fetching ngx_brotli and building dependencies.",
       "configure": "Configuring Nginx compilation options.",
       "swap": "Allocating 512MB of virtual memory.",
       "start_compile": "Compiling Nginx.",
       "executing": "Executing command: ${cmd}",
-      "fail_exec_cmd": "Failed to execute command (${cmd}), please check and retry."
+      "fail_exec_cmd": "Failed to execute command (${cmd}), please check and retry.",
+      "download_boringssl": "Downloading and building BoringSSL."
     },
     "install": {
       "start_install": "Installing Nginx."
     },
     "update": {
-      "fetch_versions": "Fetching the latest versions of Nginx and OpenSSL.",
-      "read_current_versions": "Reading the current versions of Nginx and OpenSSL.",
+      "fetch_versions": "Fetching the latest Nginx version.",
+      "read_current_versions": "Reading the current Nginx version.",
       "check_update": "Checking if an update is needed.",
       "start_update": "Updating Nginx.",
       "smooth_upgrade": "Performing a smooth upgrade of Nginx...",
