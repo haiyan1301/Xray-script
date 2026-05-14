@@ -185,15 +185,8 @@ jobs:
           mkdir -p "${package_dir}/sbin" "${package_dir}/modules" "${package_dir}/logs"
           cp "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs/nginx" "${package_dir}/sbin/nginx"
           find "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs" -maxdepth 1 -name '*.so' -exec cp {} "${package_dir}/modules/" \; 2>/dev/null || true
-          cat > "${package_dir}/BUILD_INFO.txt" <<EOF
-Release: ${release_name}
-Built at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-Nginx version: ${{ steps.nginx.outputs.nginx_semver }}
-Nginx source: https://nginx.org/download/${{ steps.nginx.outputs.nginx_version }}.tar.gz
-BoringSSL version: ${{ steps.boringssl.outputs.boringssl_version }}
-BoringSSL source: https://github.com/google/boringssl
-Prefix: ${NGINX_PREFIX}
-EOF
+          printf 'Release: %s\nBuilt at: %s\nNginx version: %s\nNginx source: https://nginx.org/download/%s.tar.gz\nBoringSSL version: %s\nBoringSSL source: https://github.com/google/boringssl\nPrefix: %s\n' \
+            "${release_name}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ steps.nginx.outputs.nginx_semver }}" "${{ steps.nginx.outputs.nginx_version }}" "${{ steps.boringssl.outputs.boringssl_version }}" "${NGINX_PREFIX}" > "${package_dir}/BUILD_INFO.txt"
           "${package_dir}/sbin/nginx" -V > "${package_dir}/NGINX_VERSION.txt" 2>&1
           tar -C "${BUILD_ROOT}" -czf "${BUILD_ROOT}/${release_name}.tar.gz" "${release_name}"
           sha256sum "${BUILD_ROOT}/${release_name}.tar.gz" > "${BUILD_ROOT}/${release_name}.tar.gz.sha256"
