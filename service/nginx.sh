@@ -580,8 +580,10 @@ function source_compile() {
     cp "${libssl_path}" "${shim_dir}/lib/"
     cp "${libcrypto_path}" "${shim_dir}/lib/"
     # Dummy Makefile 放在 boringssl 根目录，因为 Nginx 执行 'cd $OPENSSL && make'
-    # 这里同时提供 clean 目标，防止 Nginx 的 make 规则调用 'make clean' 时出错
-    printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${TMPFILE_DIR}/boringssl/Makefile"
+    printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\ninstall_sw:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${TMPFILE_DIR}/boringssl/Makefile"
+    # Dummy config 脚本——安全兆底，以防 Makefile 规则被触发时调用 ./config
+    printf '#!/bin/sh\nexit 0\n' > "${TMPFILE_DIR}/boringssl/config"
+    chmod +x "${TMPFILE_DIR}/boringssl/config"
 
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
@@ -658,12 +660,13 @@ function source_compile() {
         print_error "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fail_exec_cmd' | sed 's|${cmd}|./configure|')"
     fi
 
-    # Touch ssl.h 使其时间戳新于 objs/Makefile，防止 make 重新触发 OpenSSL 构建规则
-    touch "${TMPFILE_DIR}/boringssl/.openssl/include/openssl/ssl.h"
-
-    # 修复链接顺序：-lstdc++ 必须在 libcrypto.a 之后，否则会出现 undefined reference 错误。
-    # 直接修补 configure 生成的 objs/Makefile 来插入 -lstdc++。
+    # 修复链接顺序：-lstdc++ 必须在 libcrypto.a 之后。
     sed -i 's|libcrypto\.a|libcrypto.a -lstdc++|g' objs/Makefile
+
+    # Touch ssl.h 必须在 sed 之后——sed -i 会更新 objs/Makefile 的时间戳，
+    # 所以 ssl.h 必须最后触发 touch 来保证比 objs/Makefile 更新，
+    # 防止 make 重新触发 OpenSSL 构建规则。
+    touch "${TMPFILE_DIR}/boringssl/.openssl/include/openssl/ssl.h"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
     # 创建并启用 512MB swap 空间以辅助编译

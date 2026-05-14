@@ -38,6 +38,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22.x'
+          cache: false
 
       - name: Install build dependencies
         run: |
@@ -103,8 +104,10 @@ jobs:
           cp "${libssl_path}" "${shim}/lib/"
           cp "${libcrypto_path}" "${shim}/lib/"
           # Dummy Makefile at boringssl root — Nginx runs 'cd $OPENSSL && make'
-          # This prevents it from trying to run ./config and rebuild
-          printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${BUILD_ROOT}/boringssl/Makefile"
+          printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\ninstall_sw:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${BUILD_ROOT}/boringssl/Makefile"
+          # Dummy config script — safety net in case the Makefile recipe fires
+          printf '#!/bin/sh\nexit 0\n' > "${BUILD_ROOT}/boringssl/config"
+          chmod +x "${BUILD_ROOT}/boringssl/config"
 
       - name: Configure and compile Nginx
         run: |
@@ -167,11 +170,13 @@ jobs:
             --with-cc-opt="-g0 -O3 -I${BUILD_ROOT}/boringssl/include" \
             --with-ld-opt="${ld_opts}"
 
-          # Touch ssl.h so make won't re-trigger the OpenSSL build recipe
-          touch "${BUILD_ROOT}/boringssl/.openssl/include/openssl/ssl.h"
           # Fix link order: -lstdc++ must follow libcrypto.a (not precede it).
           # Patch the generated objs/Makefile to insert -lstdc++ right after libcrypto.a.
           sed -i 's|libcrypto\.a|libcrypto.a -lstdc++|g' objs/Makefile
+          # Touch ssl.h AFTER sed — sed -i updates objs/Makefile mtime,
+          # so ssl.h must be touched last to stay newer and prevent the
+          # OpenSSL build recipe from re-triggering during make.
+          touch "${BUILD_ROOT}/boringssl/.openssl/include/openssl/ssl.h"
           make -j"$(nproc)"
           objs/nginx -V
 
