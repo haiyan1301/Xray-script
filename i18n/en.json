@@ -151,7 +151,10 @@
     },
     "nginx": {
       "close_cron": "Successfully stopped nginx auto-update task",
-      "open_cron": "Successfully started nginx auto-update task"
+      "open_cron": "Successfully started nginx auto-update task",
+      "install_mode_prompt": "Choose Nginx installation mode (default 1):",
+      "install_mode_prebuilt": "Download pre-compiled binary from GitHub Releases (fast, recommended)",
+      "install_mode_compile": "Compile from source locally (slow, requires build tools)"
     },
     "gh_proxy": {
       "prompt": "In mainland China, use GitHub proxy for download [y/N]: ",
@@ -428,6 +431,12 @@
     "install": {
       "start_install": "Installing Nginx."
     },
+    "prebuilt": {
+      "downloading": "Downloading pre-compiled Nginx+BoringSSL binary from GitHub Releases...",
+      "fetch_fail": "Failed to fetch release information from GitHub. Check network connectivity.",
+      "no_release": "No pre-compiled Nginx binary found in GitHub Releases. Please use source compilation instead.",
+      "install_ok": "Pre-compiled Nginx+BoringSSL binary installed successfully."
+    },
     "update": {
       "fetch_versions": "Fetching the latest Nginx version.",
       "read_current_versions": "Reading the current Nginx version.",
@@ -461,6 +470,7 @@
       "options_title": "Options",
       "opt_install": "Install Nginx",
       "opt_update": "Update Nginx",
+      "opt_prebuilt": "Use pre-compiled binary from GitHub Releases (use with --install or --update)",
       "opt_brotli": "Enable Brotli compression (use with --install or --update)",
       "opt_purge": "Uninstall Nginx",
       "opt_help": "Show this help message"

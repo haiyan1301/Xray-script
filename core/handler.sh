@@ -1525,8 +1525,20 @@ function handler_nginx_install() {
     ensure_service_users
     # 检查 nginx 命令是否存在
     if ! cmd_exists 'nginx'; then
-        # 调用 nginx.sh 脚本安装 Nginx (带 Brotli 支持)
-        bash "${NGINX_PATH}" --install --brotli
+        # 提示用户选择 Nginx 安装模式
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_prompt")" >&2
+        echo -e "  ${GREEN}1)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_prebuilt")" >&2
+        echo -e "  ${GREEN}2)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_compile")" >&2
+        read -r install_mode_reply
+        install_mode_reply="${install_mode_reply:-1}"
+
+        if [[ "${install_mode_reply}" == "1" ]]; then
+            # 使用预编译二进制
+            bash "${NGINX_PATH}" --install --prebuilt
+        else
+            # 自行编译（带 Brotli 支持）
+            bash "${NGINX_PATH}" --install --brotli
+        fi
         # 检查证书来源，如果用户选择自己提供证书则跳过 acme.sh 安装
         local CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certSource // ""')"
         if [[ "${CERT_SOURCE}" != "2" ]]; then

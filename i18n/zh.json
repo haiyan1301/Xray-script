@@ -151,7 +151,10 @@
     },
     "nginx": {
       "close_cron": "成功停止 nginx 自动更新任务",
-      "open_cron": "成功开启 nginx 自动更新任务"
+      "open_cron": "成功开启 nginx 自动更新任务",
+      "install_mode_prompt": "请选择 Nginx 安装模式 (默认 1)：",
+      "install_mode_prebuilt": "从 GitHub Releases 下载预编译二进制 (快速，推荐)",
+      "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)"
     },
     "gh_proxy": {
       "prompt": "是否在中国大陆，使用 GitHub 加速下载 [y/N]: ",
@@ -428,6 +431,12 @@
     "install": {
       "start_install": "安装 Nginx。"
     },
+    "prebuilt": {
+      "downloading": "正在从 GitHub Releases 下载预编译的 Nginx+BoringSSL 二进制文件...",
+      "fetch_fail": "获取 GitHub Release 信息失败，请检查网络连接。",
+      "no_release": "GitHub Releases 中未找到预编译的 Nginx 二进制文件，请改用源码编译。",
+      "install_ok": "预编译 Nginx+BoringSSL 二进制文件安装成功。"
+    },
     "update": {
       "fetch_versions": "检索 Nginx 最新版本。",
       "read_current_versions": "读取 Nginx 当前版本。",
@@ -461,6 +470,7 @@
       "options_title": "选项",
       "opt_install": "安装 Nginx",
       "opt_update": "更新 Nginx",
+      "opt_prebuilt": "使用 GitHub Releases 预编译二进制 (与 --install 或 --update 一起使用)",
       "opt_brotli": "启用 Brotli 压缩 (与 --install 或 --update 一起使用)",
       "opt_purge": "卸载 Nginx",
       "opt_help": "显示帮助信息"

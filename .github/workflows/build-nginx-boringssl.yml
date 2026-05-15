@@ -10,7 +10,7 @@ on:
       - 'service/nginx.sh'
       - '.github/workflows/build-nginx-boringssl.yml'
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '17 3 * * 1'
 
 permissions:
   contents: write

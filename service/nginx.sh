@@ -64,6 +64,7 @@ readonly NGINX_LOG_PATH="/var/log/nginx" # Nginx 日志目录
 # --- 全局变量声明 ---
 # 声明用于存储是否启用 Brotli 模块选项、语言参数和国际化数据的全局变量
 declare IS_ENABLE_BROTLI="" # 存储用户是否选择启用 Brotli ('Y' 或 '')
+declare IS_PREBUILT=""      # 存储用户是否选择使用预编译版本 ('Y' 或 '')
 declare LANG_PARAM=''       # (未在脚本中实际使用，可能是预留)
 declare I18N_DATA=''        # 存储从 i18n JSON 文件中读取的全部数据
 # 声明用于存储编译器优化标志的全局数组
@@ -534,6 +535,84 @@ function gen_cflags() {
 }
 
 # =============================================================================
+# 函数名称: prebuilt_install
+# 功能描述: 从 GitHub Releases 下载预编译的 Nginx+BoringSSL 二进制文件并安装。
+#           不需要本地编译环境（Go、cmake、ninja 等）。
+# 参数: 无
+# 返回值: 无 (执行下载和安装过程)
+# =============================================================================
+function prebuilt_install() {
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading')"
+    # 获取当前仓库的 GitHub Releases 最新版本信息
+    local repo_owner="haiyan1301"
+    local repo_name="Xray-script"
+    local api_url="https://api.github.com/repos/${repo_owner}/${repo_name}/releases/latest"
+    local release_info
+    release_info="$(curl -fsSL "${api_url}" 2>/dev/null)" || print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.fetch_fail')"
+
+    # 从 release 信息中提取 tar.gz 下载 URL（排除 .sha256 文件）
+    local download_url
+    download_url="$(echo "${release_info}" | jq -r '.assets[] | select(.name | endswith(".tar.gz") and (endswith(".sha256") | not)) | .browser_download_url' | head -1)"
+    if [[ -z "${download_url}" ]]; then
+        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.no_release')"
+    fi
+
+    local archive_name
+    archive_name="$(basename "${download_url}")"
+    local release_dir="${archive_name%.tar.gz}"
+
+    cd "${TMPFILE_DIR}"
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading') ${archive_name}"
+    _error_detect "curl -fsSL -o ${archive_name} ${download_url}"
+    _error_detect "tar -zxf ${archive_name}"
+
+    # 确保 nginx 用户和组存在
+    if ! id -u nginx &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin nginx
+    fi
+
+    # 安装二进制文件到标准路径
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
+    mkdir -p "${NGINX_PATH}/sbin" "${NGINX_PATH}/modules" "${NGINX_PATH}/conf" "${NGINX_PATH}/logs" "${NGINX_PATH}/html"
+    cp "${release_dir}/sbin/nginx" "${NGINX_PATH}/sbin/nginx"
+    chmod +x "${NGINX_PATH}/sbin/nginx"
+    # 复制动态模块（如果存在）
+    find "${release_dir}/modules" -maxdepth 1 -name '*.so' -exec cp {} "${NGINX_PATH}/modules/" \; 2>/dev/null || true
+    # 如果是全新安装且 conf 目录为空，拷贝默认配置
+    if [[ ! -f "${NGINX_PATH}/conf/nginx.conf" ]]; then
+        # 从 release 中复制日志目录内容或创建默认配置
+        cat > "${NGINX_PATH}/conf/nginx.conf" <<'CONFEOF'
+worker_processes  auto;
+events {
+    worker_connections  1024;
+}
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout  65;
+    server {
+        listen       80;
+        server_name  localhost;
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+    }
+}
+CONFEOF
+    fi
+    # 创建 mime.types 如果不存在
+    if [[ ! -f "${NGINX_PATH}/conf/mime.types" ]]; then
+        curl -fsSL -o "${NGINX_PATH}/conf/mime.types" "https://raw.githubusercontent.com/nginx/nginx/master/conf/mime.types" 2>/dev/null || true
+    fi
+    mkdir -p "${NGINX_LOG_PATH}"
+    chown -R nginx:nginx "${NGINX_LOG_PATH}"
+    ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.install_ok')"
+}
+
+# =============================================================================
 # 函数名称: source_compile
 # 功能描述: 下载源码并编译 Nginx。
 # 参数: 无
@@ -821,6 +900,7 @@ function show_help() {
     local options_title="$(echo "$I18N_DATA" | jq -r '.nginx.help.options_title')"
     local opt_install="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_install')"
     local opt_update="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_update')"
+    local opt_prebuilt="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_prebuilt')"
     local opt_brotli="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_brotli')"
     local opt_purge="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_purge')"
     local opt_help="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_help')"
@@ -831,6 +911,7 @@ ${usage}
 ${options_title}:
   --install    ${opt_install}
   --update     ${opt_update}
+  --prebuilt   ${opt_prebuilt}
   --brotli     ${opt_brotli}
   --purge      ${opt_purge}
   --help       ${opt_help}
@@ -866,6 +947,10 @@ function main() {
         --install | --update | --purge)
             action="${1#--}" # 移除 '--' 前缀，获取操作名称 (install/update/purge)
             ;;
+        # 使用预编译二进制（从 GitHub Releases 下载）
+        --prebuilt)
+            IS_PREBUILT='Y'
+            ;;
         # 处理 Brotli 选项
         --brotli)
             IS_ENABLE_BROTLI='Y' # 设置启用 Brotli 的标志
@@ -885,13 +970,21 @@ function main() {
     # 根据解析出的 action 执行相应的操作
     case "${action}" in
     install)
-        compile_dependencies   # 安装依赖
-        source_install         # 编译并安装
+        if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
+            prebuilt_install       # 从 GitHub Releases 下载预编译版本
+        else
+            compile_dependencies   # 安装编译依赖
+            source_install         # 编译并安装
+        fi
         systemctl_config_nginx # 配置 systemd 服务
         ;;
     update)
-        compile_dependencies # 安装/更新依赖 (如果需要)
-        source_update        # 检查并更新
+        if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
+            prebuilt_install       # 从 GitHub Releases 下载最新预编译版本覆盖
+        else
+            compile_dependencies # 安装/更新依赖 (如果需要)
+            source_update        # 检查并更新
+        fi
         ;;
     purge)
         purge_nginx # 卸载
