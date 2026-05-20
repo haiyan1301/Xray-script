@@ -726,7 +726,7 @@ function handler_xray_config() {
         ;;
     hy2)
         # 更新 HY2 auth 密码
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.users[0].auth = $auth')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.clients[0].auth = $auth')"
         # 始终使用安全、拥有正确权限的证书路径进行配置，避免权限问题
         local HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
         local HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"

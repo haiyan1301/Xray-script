@@ -211,7 +211,7 @@ function get_common_config() {
     # 从脚本配置中获取 ML-DSA-65 Verify 公钥（后量子签名验证）
     CLIENT_CONFIG[mldsa65_verify]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
     # 从 Xray 配置中获取 HY2 auth 密码
-    CLIENT_CONFIG[hy2_auth]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.users[0].auth? | if . == null then empty else . end')"
+    CLIENT_CONFIG[hy2_auth]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.clients[0].auth? | if . == null then empty else . end')"
     # 从脚本配置中获取 HY2 证书域名/IP
     CLIENT_CONFIG[hy2_cert_domain]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')"
     # 从 Xray 配置中获取 Shadowsocks 2022 密码与加密方式
