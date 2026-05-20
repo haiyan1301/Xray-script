@@ -109,6 +109,12 @@ jobs:
           printf '#!/bin/sh\nexit 0\n' > "${BUILD_ROOT}/boringssl/config"
           chmod +x "${BUILD_ROOT}/boringssl/config"
 
+      - name: Clone ngx_brotli module
+        run: |
+          set -euxo pipefail
+          cd "${BUILD_ROOT}"
+          git clone --recursive --depth=1 https://github.com/google/ngx_brotli
+
       - name: Configure and compile Nginx
         run: |
           set -euxo pipefail
@@ -136,6 +142,7 @@ jobs:
             --user=nginx \
             --group=nginx \
             --with-openssl="${BUILD_ROOT}/boringssl" \
+            --add-module="${BUILD_ROOT}/ngx_brotli" \
             --with-threads \
             --with-file-aio \
             --with-pcre-jit \
