@@ -65,6 +65,7 @@
       "option6": "SNI Split Composite",
       "option7": "CDN Standalone",
       "option8": "Hysteria2 (HY2)",
+      "option9": "Shadowsocks 2022 (SS2022)",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
       "info3": "XHTTP supports all scenarios",
@@ -74,7 +75,8 @@
       "info5": "Use VLESS+Vision+REALITY fallback to VLESS+XHTTP on port 443",
       "info6": "SNI-based split through Nginx on port 443, supports CDN and direct connection",
       "info7": "CDN only (XHTTP over TLS), no REALITY direct link",
-      "info8": "Hysteria2 based on QUIC(UDP), high performance low latency, requires TLS certificate (domain/IP)"
+      "info8": "Hysteria2 based on QUIC(UDP), high performance low latency, requires TLS certificate (domain/IP)",
+      "info9": "Shadowsocks 2022 is the classic next-gen Shadowsocks protocol, highly secure, using a Pre-Shared Key (PSK)"
     },
     "web_config": {
       "title": "Web Config",
@@ -209,6 +211,7 @@
     "xhttp_mode_tip": "Common modes: auto, stream, packet. Leave empty for auto.",
     "hy2_auth": "Enter HY2 auth password (default auto-generated): ",
     "hy2_cert_domain": "Enter domain or IP for certificate: ",
+    "ss2022_password": "Please enter SS2022 pre-shared key (PSK, 32-byte Base64 format, default auto-generated): ",
     "warp_ip": "Enter IP to route to WARP",
     "warp_domain": "Enter domain to route to WARP",
     "block_ip": "Enter IP to route to block",

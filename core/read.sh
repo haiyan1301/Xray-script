@@ -149,6 +149,7 @@ declare -A param_map=(
     ["--block-domain"]="rule,block_domain"
     ["--hy2-auth"]="config,hy2_auth"
     ["--hy2-cert-domain"]="config,hy2_cert_domain"
+    ["--ss2022-password"]="config,ss2022_password"
 )
 
 # =============================================================================

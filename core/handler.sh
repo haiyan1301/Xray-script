@@ -165,8 +165,8 @@ function exec_read() {
             # 验证 UUID (fallback 也使用 uuid 验证)
             exec_check '--uuid' "${result}"
             ;;
-        seed | password | hy2-auth)
-            # 验证密码或种子或 HY2 auth
+        seed | password | hy2-auth | ss2022-password)
+            # 验证密码或种子或 HY2 auth 或 SS2022 预共享密钥
             exec_check '--password' "${result}" || continue
             ;;
         target)
@@ -470,6 +470,12 @@ function handler_script_config() {
         # 更新 HY2 auth 密码
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.xray.hy2auth = $auth')"
         ;;
+    ss2022)
+        # 获取或生成 SS2022 pre-shared key (32字节Base64格式)
+        local SS2022_KEY="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}"
+        # 更新 SS2022 pre-shared key
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${SS2022_KEY}" '.xray.ss2022Key = $key')"
+        ;;
     mkcp | vision | xhttp | fallback | sni | cdn)
         # 更新 UUID
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.xray.uuid = $uuid')"
@@ -713,19 +719,17 @@ function handler_xray_config() {
         # 更新 Trojan 客户端密码
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg password "${TROJAN_PASSWORD}" '.inbounds[1].settings.clients[0].password = $password')"
         ;;
+    ss2022)
+        # 更新 SS2022 pre-shared key (从 SCRIPT_CONFIG 中获取)
+        local SS2022_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.ss2022Key')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg key "${SS2022_KEY}" '.inbounds[1].settings.password = $key')"
+        ;;
     hy2)
         # 更新 HY2 auth 密码
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.users[0].auth = $auth')"
-        # 更新 HY2 TLS 证书路径
-        local HY2_CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')"
-        local HY2_FULLCHAIN HY2_PRIVKEY
-        if [[ "${HY2_CERT_SOURCE}" == "3" ]]; then
-            HY2_FULLCHAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertFullchain')"
-            HY2_PRIVKEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertPrivkey')"
-        else
-            HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
-            HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"
-        fi
+        # 始终使用安全、拥有正确权限的证书路径进行配置，避免权限问题
+        local HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
+        local HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg cert "${HY2_FULLCHAIN}" '.inbounds[1].streamSettings.tlsSettings.certificates[0].certificateFile = $cert')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg key "${HY2_PRIVKEY}" '.inbounds[1].streamSettings.tlsSettings.certificates[0].keyFile = $key')"
         ;;
@@ -828,6 +832,25 @@ function handler_xray_config() {
         fi
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
     fi
+
+    # SS2022 防火墙规则：放行指定的 TCP/UDP 端口
+    if [[ "${CONFIG_TAG,,}" == 'ss2022' ]]; then
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${XRAY_PORT}/tcp,udp" >&2
+        if command -v ufw &>/dev/null; then
+            ufw allow "${XRAY_PORT}"/tcp >/dev/null 2>&1
+            ufw allow "${XRAY_PORT}"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd &>/dev/null; then
+            firewall-cmd --permanent --add-port="${XRAY_PORT}"/tcp >/dev/null 2>&1
+            firewall-cmd --permanent --add-port="${XRAY_PORT}"/udp >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+        else
+            iptables -I INPUT -p tcp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+            iptables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+            ip6tables -I INPUT -p tcp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+            ip6tables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+        fi
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
+    fi
 }
 
 # =============================================================================
@@ -899,7 +922,7 @@ function handler_read_xray_config() {
     fi
     # 将配置标签存储到 CONFIG_DATA
     CONFIG_DATA['tag']="${CONFIG_TAG}"
-    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' ]]; then
+    if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' && "${CONFIG_TAG,,}" != 'ss2022' ]]; then
         run_vlessenc_choice
     fi
     # 检查脚本配置中的规则状态，如果是 current 或 reset 则读取规则输入
@@ -918,6 +941,7 @@ function handler_read_xray_config() {
     case "${CONFIG_TAG,,}" in
     trojan) exec_read 'password' ;;                             # 读取 Trojan 密码
     hy2) exec_read 'hy2-auth' ;;                                # 读取 HY2 auth 密码
+    ss2022) exec_read 'ss2022-password' ;;                      # 读取 SS2022 PSK
     mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' ;; # 读取 UUID
     esac
     # 根据配置标签读取特定参数 (第二部分)
@@ -985,14 +1009,10 @@ function handler_read_xray_config() {
         case "${hy2_cert_source_reply}" in
         1)
             # acme.sh 申请域名证书
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.domain_prompt")" >&2
-            local hy2_domain
-            read -r hy2_domain
-            CONFIG_DATA['hy2_cert_domain']="${hy2_domain}"
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_prompt")" >&2
-            local hy2_email
-            read -r hy2_email
-            CONFIG_DATA['hy2_cert_email']="${hy2_email}"
+            exec_read 'hy2-cert-domain'
+            CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
+            exec_read 'email'
+            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
             ;;
         2)
             # acme.sh 申请 IP 证书
@@ -1001,10 +1021,8 @@ function handler_read_xray_config() {
             server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me)
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
             CONFIG_DATA['hy2_cert_domain']="${server_ip}"
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_prompt")" >&2
-            local hy2_ip_email
-            read -r hy2_ip_email
-            CONFIG_DATA['hy2_cert_email']="${hy2_ip_email}"
+            exec_read 'email'
+            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
             ;;
         3)
             # 自定义证书路径
@@ -1135,6 +1153,20 @@ function handler_hy2_cert() {
         # 自定义证书: 不需要 acme.sh
         local CUSTOM_FULLCHAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertFullchain')"
         local CUSTOM_PRIVKEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertPrivkey')"
+
+        # 创建证书存储目录并复制自定义证书，防止非 root 运行的 xray 服务因权限不足报错
+        mkdir -p "${CERT_DIR}"
+        cp -f "${CUSTOM_FULLCHAIN}" "${CERT_DIR}/fullchain.pem" 2>/dev/null || true
+        cp -f "${CUSTOM_PRIVKEY}" "${CERT_DIR}/privkey.pem" 2>/dev/null || true
+
+        # 设置证书目录权限，确保 xray user 可读
+        if getent group xray-nginx >/dev/null 2>&1; then
+            chown -R xray:xray-nginx "${CERT_DIR}" 2>/dev/null || true
+        elif id -u xray >/dev/null 2>&1; then
+            chown -R xray:xray "${CERT_DIR}" 2>/dev/null || true
+        fi
+        chmod 750 "${CERT_DIR}" 2>/dev/null || true
+
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
         ;;
     esac
@@ -1153,9 +1185,8 @@ function handler_sni_config() {
     # 从脚本配置中读取当前配置标签
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
     local web="${1}" # 获取 Web 服务类型参数
-    # 根据当前配置标签执行不同操作
     case "${CONFIG_TAG,,}" in
-    mkcp | vision | xhttp | trojan | fallback | hy2)
+    mkcp | vision | xhttp | trojan | fallback | hy2 | ss2022)
         # 对于非 SNI 配置，停止 Cloudreve 和 Nginx 服务
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'stop'
@@ -2114,6 +2145,9 @@ function main() {
             # HY2 不需要 x25519 和 mldsa65，但需要处理证书和防火墙
             handler_hy2_cert || return 1
             handler_xray_config 1  # 跳过 vlessenc
+        elif [[ "${current_tag,,}" == 'ss2022' ]]; then
+            # SS2022 不需要 x25519、mldsa65、证书，直接生成/更新 Xray 配置并跳过 vlessenc
+            handler_xray_config 1
         else
             handler_x25519_config   # 生成 x25519 配置
             # 询问是否启用 ML-DSA-65 后量子密钥

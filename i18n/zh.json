@@ -65,6 +65,7 @@
       "option6": "SNI分流复合配置",
       "option7": "CDN 独立配置",
       "option8": "Hysteria2 (HY2)",
+      "option9": "Shadowsocks 2022 (SS2022)",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
       "info3": "XHTTP 全场景通吃的时代正式到来(详情: https://github.com/XTLS/Xray-core/discussions/4113    )",
@@ -74,7 +75,8 @@
       "info5": "利用 VLESS+Vision+REALITY 回落 VLESS+XHTTP 共用 443 端口",
       "info6": "通过 Nginx 的 SNI 分流共用 443 端口，实现 REALITY 直连与过 CDN 共存",
       "info7": "仅启用 CDN（XHTTP over TLS），不包含 REALITY 直连",
-      "info8": "Hysteria2 基于 QUIC(UDP) 协议，高性能低延迟，需要 TLS 证书(域名/IP)"
+      "info8": "Hysteria2 基于 QUIC(UDP) 协议，高性能低延迟，需要 TLS 证书(域名/IP)",
+      "info9": "Shadowsocks 2022 是最经典的新一代 Shadowsocks 协议，高安全性，使用预共享密钥 (PSK)"
     },
     "web_config": {
       "title": "Web 配置",
@@ -209,6 +211,7 @@
     "xhttp_mode_tip": "常用模式: auto(自动选择), stream(流式), packet(包式)。留空默认 auto",
     "hy2_auth": "请输入 HY2 认证密码 auth (默认自动生成): ",
     "hy2_cert_domain": "请输入用于申请证书的域名或 IP: ",
+    "ss2022_password": "请输入 SS2022 pre-shared key (PSK, 32字节Base64格式，默认自动生成): ",
     "warp_ip": "请输入分流到 WARP 的 ip",
     "warp_domain": "请输入分流到 WARP 的 domain",
     "block_ip": "请输入分流到 block 的 ip",

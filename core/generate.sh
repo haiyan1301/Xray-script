@@ -340,7 +340,18 @@ function main() {
     --short-id) generate_short_id "$@" ;;         # 生成单个 Short ID
     --short-ids) generate_short_ids "$@" ;;       # 生成多个 Short ID
     --path) generate_path ;;                      # 生成路径
+    --ss2022-key) generate_ss2022_key ;;          # 生成 SS2022 预共享密钥
     esac
+}
+
+# =============================================================================
+# 函数名称: generate_ss2022_key
+# 功能描述: 生成一个 32 字节 Base64 编码的 Shadowsocks 2022 预共享密钥 (PSK)。
+# 参数: 无
+# 返回值: 32 字节 Base64 编码的 PSK 字符串 (echo 输出)
+# =============================================================================
+function generate_ss2022_key() {
+    openssl rand -base64 32
 }
 
 # --- 脚本执行入口 ---

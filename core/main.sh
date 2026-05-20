@@ -159,6 +159,7 @@ function processes_xray_config() {
     6) XTLS_CONFIG='SNI' ;;      # 选择 6 对应 SNI
     7) XTLS_CONFIG='CDN' ;;      # 选择 7 对应 CDN
     8) XTLS_CONFIG='hy2' ;;      # 选择 8 对应 Hysteria2
+    9) XTLS_CONFIG='ss2022' ;;   # 选择 9 对应 Shadowsocks 2022
     *) XTLS_CONFIG='Vision' ;;   # 其他情况 (包括 2 和默认) 对应 Vision
     esac
     # 如果选择了 SNI 配置

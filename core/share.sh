@@ -214,6 +214,9 @@ function get_common_config() {
     CLIENT_CONFIG[hy2_auth]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.users[0].auth? | if . == null then empty else . end')"
     # 从脚本配置中获取 HY2 证书域名/IP
     CLIENT_CONFIG[hy2_cert_domain]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')"
+    # 从 Xray 配置中获取 Shadowsocks 2022 密码与加密方式
+    CLIENT_CONFIG[ss2022_password]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.password? | if . == null then empty else . end')"
+    CLIENT_CONFIG[ss2022_method]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.method? | if . == null then empty else . end')"
 }
 
 # =============================================================================
@@ -375,6 +378,10 @@ function show_client_config() {
         echo "network          : ${CLIENT_CONFIG[type]}"
         echo "security         : ${CLIENT_CONFIG[security]}"
         [[ -n "${CLIENT_CONFIG[hy2_cert_domain]}" ]] && echo "SNI              : ${CLIENT_CONFIG[hy2_cert_domain]}"
+    elif [[ "${tag,,}" == 'ss2022' ]]; then
+        echo "method           : ${CLIENT_CONFIG[ss2022_method]}"
+        echo "password (PSK)   : ${CLIENT_CONFIG[ss2022_password]}"
+        echo "network          : ${CLIENT_CONFIG[type]}"
     else
         echo "uuid             : ${CLIENT_CONFIG[uuid]}"
         echo "password(trojan) : ${CLIENT_CONFIG[password]}"
@@ -452,8 +459,8 @@ function get_share_link_component() {
 function get_mkcp_share_link() {
     # 获取分享链接的各个组件
     get_share_link_component
-    # 将 VLESS 基础部分、mKCP 参数部分和可选的 VLESS enc 拼接成完整链接
-    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_MKCP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
+    # 将 VLESS 基础部分、mKCP 参数部分和可选的 VLESS enc 拼接成完整链接，并显式指定 security=none 确保客户端解析兼容性
+    SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}&security=none${SHARE_LINK_COMPONENT_MKCP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
 }
 
 # =============================================================================
@@ -532,6 +539,25 @@ function get_hy2_share_link() {
     if [[ -n "${sni}" ]]; then
         SHARE_LINK="${SHARE_LINK}&sni=${sni}"
     fi
+}
+
+# =============================================================================
+# 函数名称: get_ss2022_share_link
+# 功能描述: 为 Shadowsocks-2022 生成标准 SIP002 分享链接。
+# 参数: 无
+# 返回值: 无 (直接修改全局变量 SHARE_LINK)
+# =============================================================================
+function get_ss2022_share_link() {
+    local method="${CLIENT_CONFIG[ss2022_method]}"
+    local password="${CLIENT_CONFIG[ss2022_password]}"
+    local host="${CLIENT_CONFIG[remote_host]}"
+    local port="${CLIENT_CONFIG[port]}"
+
+    # 对 method:password 进行 URL-safe Base64 编码并移除换行与 Padding (=)
+    local userinfo
+    userinfo="$(echo -n "${method}:${password}" | openssl base64 -e | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
+
+    SHARE_LINK="ss://${userinfo}@${host}:${port}"
 }
 
 # =============================================================================
@@ -737,7 +763,6 @@ function main() {
     # 获取第一个 inbound (index 1) 的通用配置
     get_common_config 1
 
-    # 根据脚本配置中的 tag (转换为小写) 选择不同的处理分支
     case "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag | ascii_downcase')" in
     mkcp) get_mkcp_share_link ;;      # mKCP 模式
     xhttp) setup_xhttp_obfs_extra 1; get_xhttp_share_link ;;    # XHTTP 模式
@@ -746,6 +771,7 @@ function main() {
     sni) show_sni_config ;;           # SNI 模式
     cdn) get_cdn_share_link ;;        # CDN 模式
     hy2) get_hy2_share_link ;;        # Hysteria2 模式
+    ss2022) get_ss2022_share_link ;;  # Shadowsocks-2022 模式
     *) get_vision_share_link ;;       # 默认为 Vision 模式
     esac
 
