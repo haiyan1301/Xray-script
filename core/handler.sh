@@ -1693,6 +1693,13 @@ function handler_nginx_stop() {
 # 返回值: 无 (通过 systemctl 命令执行操作)
 # =============================================================================
 function handler_nginx_restart() {
+    # 动态检测 nginx 二进制是否包含 brotli 压缩模块，如果不包含，则自动注释 general.conf 中的 brotli 配置，以防 Nginx 启动/重载报错
+    if cmd_exists 'nginx' && ! nginx -V 2>&1 | grep -qi 'brotli'; then
+        if [[ -f "${NGINX_CONFIG_DIR}/nginxconfig.io/general.conf" ]]; then
+            sed -i 's|^\([[:space:]]*\)brotli|\1#brotli|g' "${NGINX_CONFIG_DIR}/nginxconfig.io/general.conf"
+        fi
+    fi
+
     # 检查 nginx 服务是否活跃，如果活跃则重启，否则启动
     systemctl -q is-active nginx && systemctl -q restart nginx || systemctl -q start nginx
     # 检查 nginx 服务是否已启用，如果未启用则启用
@@ -1949,6 +1956,13 @@ function handler_nginx_config() {
     mv "${NGINX_CONFIG_DIR}/nginx.conf" "${NGINX_CONFIG_DIR}/default.conf.bak"
     # 复制项目中的 Nginx 配置文件到目标目录
     cp -af ${CONFIG_DIR}/nginx/conf/* ${NGINX_CONFIG_DIR}
+
+    # 动态检测 nginx 二进制是否包含 brotli 压缩模块，如果不包含，则自动注释 general.conf 中的 brotli 配置，以防 Nginx 启动/重载报错
+    if cmd_exists 'nginx' && ! nginx -V 2>&1 | grep -qi 'brotli'; then
+        if [[ -f "${NGINX_CONFIG_DIR}/nginxconfig.io/general.conf" ]]; then
+            sed -i 's|^\([[:space:]]*\)brotli|\1#brotli|g' "${NGINX_CONFIG_DIR}/nginxconfig.io/general.conf"
+        fi
+    fi
 }
 
 # =============================================================================
