@@ -63,7 +63,7 @@ readonly NGINX_LOG_PATH="/var/log/nginx" # Nginx 日志目录
 
 # --- 全局变量声明 ---
 # 声明用于存储是否启用 Brotli 模块选项、语言参数和国际化数据的全局变量
-declare IS_ENABLE_BROTLI="" # 存储用户是否选择启用 Brotli ('Y' 或 '')
+declare IS_ENABLE_BROTLI="Y" # 存储用户是否选择启用 Brotli ('Y' 或 '')，默认启用
 declare IS_PREBUILT=""      # 存储用户是否选择使用预编译版本 ('Y' 或 '')
 declare LANG_PARAM=''       # (未在脚本中实际使用，可能是预留)
 declare I18N_DATA=''        # 存储从 i18n JSON 文件中读取的全部数据
