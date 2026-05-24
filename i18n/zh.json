@@ -185,6 +185,14 @@
       "firewall_ok": "UDP 端口已开放",
       "cron_setup": "正在设置证书自动续签定时任务",
       "cron_ok": "证书自动续签已配置"
+    },
+    "cert_reuse": {
+      "prompt": "检测到系统中存在已有的 SSL 证书，请选择:",
+      "option_new": "重新申请新证书",
+      "option_existing": "使用已有证书: ",
+      "expires": "过期时间",
+      "reusing": "复用已有证书",
+      "reuse_ok": "已成功复用证书"
     }
   },
   "read": {

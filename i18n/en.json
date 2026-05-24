@@ -185,6 +185,14 @@
       "firewall_ok": "UDP port opened in firewall",
       "cron_setup": "Setting up certificate auto-renewal cron job",
       "cron_ok": "Certificate auto-renewal configured"
+    },
+    "cert_reuse": {
+      "prompt": "Existing SSL certificates detected. Please choose:",
+      "option_new": "Apply for a new certificate",
+      "option_existing": "Use existing certificate: ",
+      "expires": "Expires",
+      "reusing": "Reusing existing certificate",
+      "reuse_ok": "Certificate reused successfully"
     }
   },
   "read": {

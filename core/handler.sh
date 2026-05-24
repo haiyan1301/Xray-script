@@ -93,6 +93,126 @@ function exec_check() {
 }
 
 # =============================================================================
+# 函数名称: list_existing_certs
+# 功能描述: 扫描系统中已有的 SSL 证书。
+#           1. 扫描 Nginx 证书目录 (/usr/local/nginx/conf/certs/)
+#           2. 扫描 Xray 证书目录 (/usr/local/etc/xray/certs/)
+#           3. 扫描 acme.sh 管理的证书列表
+#           4. 去重后输出证书域名列表（一行一个）
+# 参数:
+#   $1: cert_type - 证书类型 ("nginx" 或 "xray")，默认为 "nginx"
+# 返回值: 证书域名列表 (echo 输出，一行一个)
+# =============================================================================
+function list_existing_certs() {
+    local cert_type="${1:-nginx}"  # "nginx" 或 "xray"(HY2用)
+    local certs=()
+    local d domain cert_domain c found acme_list
+
+    if [[ "${cert_type}" == "nginx" ]]; then
+        # 扫描 Nginx 证书目录
+        local cert_base="/usr/local/nginx/conf/certs"
+        if [[ -d "${cert_base}" ]]; then
+            for d in "${cert_base}"/*/; do
+                [[ -d "${d}" ]] || continue
+                domain="$(basename "$d")"
+                if [[ -f "${d}fullchain.pem" && -f "${d}privkey.pem" ]]; then
+                    certs+=("${domain}")
+                fi
+            done
+        fi
+    elif [[ "${cert_type}" == "xray" ]]; then
+        # 扫描 Xray 证书目录 (HY2)
+        local cert_dir="/usr/local/etc/xray/certs"
+        if [[ -d "${cert_dir}" && -f "${cert_dir}/fullchain.pem" && -f "${cert_dir}/privkey.pem" ]]; then
+            certs+=("xray-certs")
+        fi
+    fi
+
+    # 同时扫描 acme.sh 管理的证书
+    if [[ -e "${HOME}/.acme.sh/acme.sh" ]]; then
+        acme_list=$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null | tail -n +2 | awk '{print $1}')
+        for cert_domain in ${acme_list}; do
+            # 去重：检查是否已存在于 certs 数组中
+            found=false
+            for c in "${certs[@]}"; do
+                [[ "${c}" == "${cert_domain}" ]] && found=true && break
+            done
+            [[ "${found}" == false ]] && certs+=("${cert_domain}")
+        done
+    fi
+
+    # 输出证书列表（一行一个）
+    printf '%s\n' "${certs[@]}"
+}
+
+# =============================================================================
+# 函数名称: prompt_cert_reuse
+# 功能描述: 在非首次安装时询问用户是否复用已有证书。
+#           1. 调用 list_existing_certs 获取已有证书列表。
+#           2. 如果没有已有证书，返回 "new" 表示需要新申请。
+#           3. 如果有已有证书，显示列表（含过期时间）供用户选择。
+#           4. 返回用户选择的证书域名或 "new"。
+# 参数:
+#   $1: target_domain - 当前要配置的域名
+#   $2: cert_type - 证书类型 ("nginx" 或 "xray")，默认为 "nginx"
+# 返回值: 选择的证书域名或 "new" (echo 输出)
+# =============================================================================
+function prompt_cert_reuse() {
+    local target_domain="$1"       # 当前要配置的域名
+    local cert_type="${2:-nginx}" # 证书类型
+    local line cert_domain
+
+    # 获取已有证书列表
+    local -a cert_list=()
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] && cert_list+=("${line}")
+    done < <(list_existing_certs "${cert_type}")
+
+    # 如果没有已有证书，直接返回 "new" 表示需要新申请
+    if [[ ${#cert_list[@]} -eq 0 ]]; then
+        echo "new"
+        return
+    fi
+
+    # 显示选择提示
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.prompt")" >&2
+    echo -e "  ${GREEN}1)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.option_new")" >&2
+
+    local idx=2
+    for cert_domain in "${cert_list[@]}"; do
+        # 获取证书过期时间（如果能获取到）
+        local expiry_info=""
+        local cert_file=""
+        if [[ "${cert_type}" == "nginx" ]]; then
+            cert_file="/usr/local/nginx/conf/certs/${cert_domain}/fullchain.pem"
+        elif [[ "${cert_type}" == "xray" && "${cert_domain}" == "xray-certs" ]]; then
+            cert_file="/usr/local/etc/xray/certs/fullchain.pem"
+        fi
+        if [[ -n "${cert_file}" && -f "${cert_file}" ]]; then
+            expiry_info=$(openssl x509 -enddate -noout -in "${cert_file}" 2>/dev/null | cut -d= -f2)
+            [[ -n "${expiry_info}" ]] && expiry_info=" ($(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.expires"): ${expiry_info})"
+        fi
+        echo -e "  ${GREEN}${idx})${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.option_existing") ${cert_domain}${expiry_info}" >&2
+        ((idx++))
+    done
+
+    local cert_choice
+    read -r cert_choice
+    cert_choice="${cert_choice:-1}"
+
+    if [[ "${cert_choice}" == "1" ]]; then
+        echo "new"
+    else
+        local selected_idx=$((cert_choice - 2))
+        if [[ ${selected_idx} -ge 0 && ${selected_idx} -lt ${#cert_list[@]} ]]; then
+            echo "${cert_list[${selected_idx}]}"
+        else
+            echo "new"
+        fi
+    fi
+}
+
+# =============================================================================
 # 函数名称: ensure_service_users
 # 功能描述: 确保 nginx 和 xray 服务用户及共享组存在。
 #           - 创建系统用户 nginx 和 xray（不可登录）
@@ -1081,6 +1201,27 @@ function handler_hy2_cert() {
     case "${CERT_SOURCE}" in
     1|2)
         # acme.sh 申请证书 (standalone 模式)
+        # 非首次安装时，检测已有证书并询问用户
+        local cert_reuse_choice
+        cert_reuse_choice="$(prompt_cert_reuse "${CERT_DOMAIN}" "xray")"
+
+        if [[ "${cert_reuse_choice}" != "new" ]]; then
+            # 用户选择复用已有证书
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing")" >&2
+            mkdir -p "${CERT_DIR}"
+            # xray-certs 表示使用已有的 Xray 证书目录，无需复制
+            if [[ "${cert_reuse_choice}" != "xray-certs" ]]; then
+                # 从 acme.sh 重新安装证书到 Xray 目录
+                if [[ -e "${HOME}/.acme.sh/acme.sh" ]] && exec_ssl '--status' --domain=${cert_reuse_choice}; then
+                    "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d ${cert_reuse_choice} \
+                        --key-file "${CERT_DIR}/privkey.pem" \
+                        --fullchain-file "${CERT_DIR}/fullchain.pem" \
+                        --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true" 2>/dev/null || true
+                fi
+            fi
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
+        else
+        # 用户选择重新申请证书
         # 确保 acme.sh 已安装
         if [[ ! -e "${HOME}/.acme.sh/acme.sh" ]]; then
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} Installing acme.sh..." >&2
@@ -1148,6 +1289,7 @@ function handler_hy2_cert() {
         fi
         # 域名证书: acme.sh 自带的 cron 会在到期前自动续签 (默认60天检查)
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_ok")" >&2
+        fi # 结束 cert_reuse_choice 判断
         ;;
     3)
         # 自定义证书: 不需要 acme.sh
@@ -1849,17 +1991,45 @@ function handler_change_domain() {
     fi
     if [[ "${cert_ok}" != true ]]; then
         local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
-        # 如果 CA 邮箱为空，则读取邮箱
-        if [[ -z "${CA_EMAIL}" ]]; then
-            exec_read 'email'
-            CA_EMAIL="${CONFIG_DATA['email']}"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
-            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-        fi
-        handler_ssl_install
-        # 自动申请 SSL 证书
-        if exec_ssl '--issue' --domain=${CONFIG_DATA["${target_domain}"]}; then
+        # 非首次安装时，检测已有证书并询问用户
+        local cert_reuse_choice
+        cert_reuse_choice="$(prompt_cert_reuse "${CONFIG_DATA["${target_domain}"]}" "nginx")"
+
+        if [[ "${cert_reuse_choice}" != "new" ]]; then
+            # 用户选择复用已有证书
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
+            local src_cert_dir="${NGINX_CONFIG_DIR}/certs/${cert_reuse_choice}"
+            local dst_cert_dir="${NGINX_CONFIG_DIR}/certs/${CONFIG_DATA["${target_domain}"]}"
+            if [[ "${cert_reuse_choice}" != "${CONFIG_DATA["${target_domain}"]}" ]]; then
+                mkdir -p "${dst_cert_dir}"
+                if [[ -f "${src_cert_dir}/fullchain.pem" && -f "${src_cert_dir}/privkey.pem" ]]; then
+                    cp -f "${src_cert_dir}/fullchain.pem" "${dst_cert_dir}/fullchain.pem"
+                    cp -f "${src_cert_dir}/privkey.pem" "${dst_cert_dir}/privkey.pem"
+                fi
+            fi
             cert_ok=true
+            # 如果 acme.sh 中有此证书的续签记录，重新安装到新路径
+            if exec_ssl '--status' --domain=${cert_reuse_choice}; then
+                "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d ${cert_reuse_choice} \
+                    --key-file "${dst_cert_dir}/privkey.pem" \
+                    --fullchain-file "${dst_cert_dir}/fullchain.pem" \
+                    --reloadcmd "nginx -t && systemctl reload nginx" 2>/dev/null || true
+            fi
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
+        else
+            # 用户选择重新申请证书
+            # 如果 CA 邮箱为空，则读取邮箱
+            if [[ -z "${CA_EMAIL}" ]]; then
+                exec_read 'email'
+                CA_EMAIL="${CONFIG_DATA['email']}"
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
+                write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+            fi
+            handler_ssl_install
+            # 自动申请 SSL 证书
+            if exec_ssl '--issue' --domain=${CONFIG_DATA["${target_domain}"]}; then
+                cert_ok=true
+            fi
         fi
     fi
     if [[ "${cert_ok}" == true ]]; then
