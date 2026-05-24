@@ -209,10 +209,23 @@ function generate_x25519() {
 # 注意: 需要确保系统已安装 xray 命令（v26+）
 # =============================================================================
 function generate_mldsa65() {
+    # 检查 xray 命令是否可用
+    if ! command -v xray &>/dev/null; then
+        echo ","
+        return 0
+    fi
+
     # 调用 xray mldsa65 命令生成密钥对，输出通常为两行：
     # Seed: <seed>
     # Verify: <verify>
-    local MLDSA65_KEY=$(xray mldsa65)
+    local MLDSA65_KEY
+    MLDSA65_KEY=$(xray mldsa65 2>/dev/null)
+
+    # 如果 xray 不支持该指令或执行失败，安全返回空
+    if [[ -z "${MLDSA65_KEY}" ]]; then
+        echo ","
+        return 0
+    fi
 
     # 使用 sed 提取第一行中的 Seed 部分
     local SEED=$(echo "${MLDSA65_KEY}" | sed -ne '1s/.*:\s*//p')

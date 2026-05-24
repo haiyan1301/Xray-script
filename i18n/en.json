@@ -193,6 +193,9 @@
       "expires": "Expires",
       "reusing": "Reusing existing certificate",
       "reuse_ok": "Certificate reused successfully"
+    },
+    "mldsa": {
+      "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)"
     }
   },
   "read": {

@@ -193,6 +193,9 @@
       "expires": "过期时间",
       "reusing": "复用已有证书",
       "reuse_ok": "已成功复用证书"
+    },
+    "mldsa": {
+      "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)"
     }
   },
   "read": {
