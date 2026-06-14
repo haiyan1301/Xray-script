@@ -861,15 +861,6 @@ function handler_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.kcpSettings.seed = $seed')"
         ;;
     vision)
-        # Vision 防偷模式：通过 dokodemo-door 中转，不直接暴露 target
-        # 更新 anti-steal-in dokodemo-door 的目标地址
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg addr "${TARGET_DOMAIN}" '
-            (.inbounds[] | select(.tag == "anti-steal-in")).settings.address = $addr
-        ')"
-        # 更新 anti-steal-allow 路由规则的域名列表（与 serverNames 保持一致）
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson domains "${SERVER_NAMES}" '
-            (.routing.rules[] | select(.ruleTag == "anti-steal-allow")).domain = $domains
-        ')"
         # 更新 Reality 服务器名称、私钥和 Short IDs
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson serverNames "${SERVER_NAMES}" '.inbounds[1].streamSettings.realitySettings.serverNames = $serverNames')"
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg privateKey "${PRIVATE_KEY}" '.inbounds[1].streamSettings.realitySettings.privateKey = $privateKey')"
@@ -921,6 +912,18 @@ function handler_xray_config() {
         [[ "${XRAY_RULES_AD}" -eq 1 ]] && add_rule "ad-domain" "domain" "geosite:category-ads-all" "block"
         ;;
     esac
+    # Vision 防偷模式：在路由规则替换之后更新 anti-steal 相关配置
+    # 确保 anti-steal-allow 的域名始终与当前 target/serverNames 一致
+    if [[ "${CONFIG_TAG,,}" == 'vision' ]]; then
+        # 更新 anti-steal-in dokodemo-door 的目标地址
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg addr "${TARGET_DOMAIN}" '
+            (.inbounds[] | select(.tag == "anti-steal-in")).settings.address = $addr
+        ')"
+        # 更新 anti-steal-allow 路由规则的域名列表（与 serverNames 保持一致）
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson domains "${SERVER_NAMES}" '
+            (.routing.rules[] | select(.ruleTag == "anti-steal-allow")).domain = $domains
+        ')"
+    fi
     # 处理 WARP 状态
     if [[ ${WARP_STATUS} -eq 1 ]]; then
         # 获取 WARP 容器 IP
