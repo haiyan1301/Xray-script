@@ -79,6 +79,11 @@ function load_i18n() {
         lang=$(echo "$LANG" | cut -d'_' -f1)
     fi
 
+    # 如果语言为空或为 "null"，则默认使用中文
+    if [[ -z "$lang" || "$lang" == "null" ]]; then
+        lang="zh"
+    fi
+
     # 构造 i18n 文件的完整路径
     local i18n_file="${I18N_DIR}/${lang}.json"
 

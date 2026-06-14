@@ -95,6 +95,10 @@ function load_i18n() {
     if [[ "$lang" == "auto" ]]; then
         lang=$(echo "$LANG" | cut -d'_' -f1)
     fi
+    # 如果语言为空或为 "null"，则默认使用中文
+    if [[ -z "$lang" || "$lang" == "null" ]]; then
+        lang="zh"
+    fi
     local i18n_file="${I18N_DIR}/${lang}.json"
     if [[ ! -f "${i18n_file}" ]]; then
         if [[ "$lang" == "zh" ]]; then
