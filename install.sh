@@ -81,6 +81,11 @@ else
         printf -- "%s" "${main_ver%%.*}"
     }
     function write_config() {
+        # 防止写入空内容导致配置文件损坏
+        if [[ -z "$1" ]]; then
+            echo -e "${RED}[错误]${NC} 拒绝写入空内容到 $2" >&2
+            return 1
+        fi
         echo "$1" >"$2"
         chmod 600 "$2"
         sync
@@ -486,9 +491,12 @@ function main() {
         install_dependencies
     fi
 
-    # 检查脚本配置目录和配置文件是否存在，如果不存在则创建并下载默认配置
-    if [[ ! -d "${SCRIPT_CONFIG_DIR}" && ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
+    # 检查脚本配置目录和配置文件是否存在，如果不存在或损坏则创建并下载默认配置
+    if [[ ! -d "${SCRIPT_CONFIG_DIR}" ]]; then
         mkdir -p "${SCRIPT_CONFIG_DIR}"
+    fi
+    # 如果配置文件不存在，或内容为空/不是有效 JSON，则重新下载
+    if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]] || [[ ! -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then
         wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
         chmod 600 "${SCRIPT_CONFIG_PATH}"
     fi

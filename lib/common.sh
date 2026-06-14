@@ -137,6 +137,11 @@ function backup_config() {
 function write_config() {
     local content="$1"
     local target="$2"
+    # 防止写入空内容导致配置文件损坏
+    if [[ -z "${content}" ]] || ! echo "${content}" | jq empty 2>/dev/null; then
+        echo -e "${RED}[错误]${NC} 拒绝写入空或无效的 JSON 内容到 ${target}" >&2
+        return 1
+    fi
     echo "${content}" >"${target}"
     chmod 600 "${target}"
     sync
