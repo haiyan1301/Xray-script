@@ -640,8 +640,8 @@ function clean_container_logs() {
 function obtain_container_ip() {
     # 获取容器名称
     local container_name="${1:-xray-script-warp}"
-	# 获取容器的 IP 地址
-	local container_ip=$(get_container_ip "${container_name}")
+    # 获取容器的 IP 地址
+    local container_ip=$(get_container_ip "${container_name}")
     if [[ -n "${container_ip}" ]]; then
         # 输出容器 IP 地址
         echo "${container_ip}"

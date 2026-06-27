@@ -182,11 +182,17 @@ function cache_json_data() {
 # =============================================================================
 function get_common_config() {
     local inbound_index=$1 # 获取 inbound 索引参数
+    local inbound_port
 
     # 获取服务器的公网 IPv4 地址作为远程主机地址
     CLIENT_CONFIG[remote_host]="$(curl -fsSL ipv4.icanhazip.com)"
-    # 从脚本配置中获取端口号
-    CLIENT_CONFIG[port]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.port")"
+    # 优先使用当前 inbound 的真实监听端口；无端口的内部监听回退到脚本主端口
+    inbound_port="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].port? // empty')"
+    if [[ -n "${inbound_port}" ]]; then
+        CLIENT_CONFIG[port]="${inbound_port}"
+    else
+        CLIENT_CONFIG[port]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.port")"
+    fi
     # 从脚本配置中获取 Reality 公钥
     CLIENT_CONFIG[public_key]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.publicKey")"
     # 从脚本配置中获取配置标签 (tag)
@@ -267,6 +273,22 @@ function setup_xhttp_obfs_extra() {
         XHTTP_EXTRA="${obfs_json}"
     fi
     XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode)
+}
+
+function reset_share_state() {
+    XHTTP_EXTRA=""
+    XHTTP_EXTRA_ENCODED=""
+    SHARE_LINK=""
+    SHARE_LINK_COMPONENT_VLESS=""
+    SHARE_LINK_COMPONENT_TROJAN=""
+    SHARE_LINK_COMPONENT_MKCP=""
+    SHARE_LINK_COMPONENT_TLS=""
+    SHARE_LINK_COMPONENT_REALITY=""
+    SHARE_LINK_COMPONENT_XHTTP=""
+    SHARE_LINK_COMPONENT_FLOW=""
+    SHARE_LINK_COMPONENT_HOST=""
+    SHARE_LINK_COMPONENT_EXTRA=""
+    SHARE_LINK_COMPONENT_VLESS_ENC=""
 }
 
 # =============================================================================
@@ -373,17 +395,18 @@ EOF
 # =============================================================================
 function show_client_config() {
     local tag="${CLIENT_CONFIG[tag]}"
+    local protocol_tag="${CLIENT_CONFIG[protocol_tag]:-${tag}}"
     # 使用 Here Document 打印客户端配置的标题和各项参数
     echo "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.client")(${tag}) ------------------"
     echo "address          : ${CLIENT_CONFIG[remote_host]}"
     echo "port             : ${CLIENT_CONFIG[port]}"
     echo "protocol         : ${CLIENT_CONFIG[protocol]}"
-    if [[ "${tag,,}" == 'hy2' || "${tag,,}" == 'hysteria2' ]]; then
+    if [[ "${protocol_tag,,}" == 'hy2' || "${protocol_tag,,}" == 'hysteria2' ]]; then
         echo "auth             : ${CLIENT_CONFIG[hy2_auth]}"
         echo "network          : ${CLIENT_CONFIG[type]}"
         echo "security         : ${CLIENT_CONFIG[security]}"
         [[ -n "${CLIENT_CONFIG[hy2_cert_domain]}" ]] && echo "SNI              : ${CLIENT_CONFIG[hy2_cert_domain]}"
-    elif [[ "${tag,,}" == 'ss2022' ]]; then
+    elif [[ "${protocol_tag,,}" == 'ss2022' ]]; then
         echo "method           : ${CLIENT_CONFIG[ss2022_method]}"
         echo "password (PSK)   : ${CLIENT_CONFIG[ss2022_password]}"
         echo "network          : ${CLIENT_CONFIG[type]}"
@@ -518,8 +541,9 @@ function get_cdn_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_trojan_share_link() {
+    local inbound_index="${1:-1}"
     # 设置混淆额外参数
-    setup_xhttp_obfs_extra 1
+    setup_xhttp_obfs_extra "${inbound_index}"
     # 获取分享链接的各个组件
     get_share_link_component
     # 将 Trojan 基础部分、Reality 安全参数、XHTTP 路径参数和额外混淆参数拼接成完整链接
@@ -573,7 +597,8 @@ function get_ss2022_share_link() {
 # 返回值: 无 (直接修改全局变量 CLIENT_CONFIG 和 SHARE_LINK)
 # =============================================================================
 function get_fallback_xhttp_share_link() {
-    local inbound_index=1 # 指定 fallback inbound 的索引
+    local inbound_index="${1:-1}"       # 指定 fallback public inbound 的索引
+    local xhttp_inbound_index="${2:-2}" # 指定 fallback XHTTP inbound 的索引
 
     # 从 Xray 配置中重新读取 fallback inbound 的安全类型
     CLIENT_CONFIG[security]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.security? | if . == null then empty else . end')"
@@ -583,9 +608,107 @@ function get_fallback_xhttp_share_link() {
     CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds | .[$random % length?]')"
 
     # 设置 XHTTP 混淆额外参数 (XHTTP inbound 是 index 2)
-    setup_xhttp_obfs_extra 2
+    setup_xhttp_obfs_extra "${xhttp_inbound_index}"
     # 调用通用的 XHTTP 链接生成函数
     get_xhttp_share_link
+}
+
+function build_multi_current_share_link() {
+    local node_tag="$1"
+    local inbound_index="$2"
+
+    case "${node_tag,,}" in
+    mkcp)
+        get_mkcp_share_link
+        ;;
+    xhttp)
+        setup_xhttp_obfs_extra "${inbound_index}"
+        get_xhttp_share_link
+        ;;
+    trojan)
+        get_trojan_share_link "${inbound_index}"
+        ;;
+    hy2)
+        get_hy2_share_link
+        ;;
+    ss2022)
+        get_ss2022_share_link
+        ;;
+    *)
+        get_vision_share_link
+        ;;
+    esac
+}
+
+function multi_inbound_span() {
+    case "${1,,}" in
+    vision | fallback) echo 2 ;;
+    *) echo 1 ;;
+    esac
+}
+
+function apply_multi_node_overrides() {
+    local node="$1"
+    local node_tag_lower="$2"
+    local node_name="$3"
+    local node_port="$4"
+
+    [[ -n "${node_port}" ]] && CLIENT_CONFIG[port]="${node_port}"
+    CLIENT_CONFIG[tag]="${node_name}"
+    CLIENT_CONFIG[protocol_tag]="${node_tag_lower}"
+
+    case "${node_tag_lower}" in
+    hy2)
+        CLIENT_CONFIG[hy2_auth]="$(echo "${node}" | jq -r '.hy2auth // ""')"
+        ;;
+    ss2022)
+        CLIENT_CONFIG[ss2022_password]="$(echo "${node}" | jq -r '.ss2022Key // ""')"
+        ;;
+    esac
+}
+
+function show_multi_config() {
+    local nodes="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.nodes // []')"
+    local node_count="$(echo "${nodes}" | jq 'length')"
+    local inbound_index=1
+    local i
+
+    if [[ "${node_count}" -eq 0 ]]; then
+        echo -e "${RED}[Error]${NC} Multi-node config has no nodes."
+        return 1
+    fi
+
+    for ((i = 0; i < node_count; i++)); do
+        local node="$(echo "${nodes}" | jq -c --argjson i "${i}" '.[$i]')"
+        local node_tag="$(echo "${node}" | jq -r '.tag')"
+        local node_tag_lower="${node_tag,,}"
+        local node_name="$(echo "${node}" | jq -r --arg fallback "${node_tag}-$((i + 1))" '.name // $fallback')"
+        local node_port="$(echo "${node}" | jq -r '.port // empty')"
+        local span
+        span="$(multi_inbound_span "${node_tag_lower}")"
+
+        reset_share_state
+        get_common_config "${inbound_index}"
+        apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}" "${node_port}"
+
+        if [[ "${node_tag_lower}" == "fallback" ]]; then
+            get_vision_share_link
+            show_config
+
+            reset_share_state
+            get_common_config "$((inbound_index + 1))"
+            apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}-xhttp" "${node_port}"
+            get_fallback_xhttp_share_link "${inbound_index}" "$((inbound_index + 1))"
+            show_config
+
+            inbound_index=$((inbound_index + span))
+            continue
+        fi
+
+        build_multi_current_share_link "${node_tag_lower}" "${inbound_index}"
+        show_config
+        inbound_index=$((inbound_index + span))
+    done
 }
 
 # =============================================================================
@@ -777,6 +900,7 @@ function main() {
     cdn) get_cdn_share_link ;;        # CDN 模式
     hy2) get_hy2_share_link ;;        # Hysteria2 模式
     ss2022) get_ss2022_share_link ;;  # Shadowsocks-2022 模式
+    multi) show_multi_config >&2; return 0 ;;
     *) get_vision_share_link ;;       # 默认为 Vision 模式
     esac
 

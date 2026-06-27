@@ -160,6 +160,7 @@ function processes_xray_config() {
     7) XTLS_CONFIG='CDN' ;;      # 选择 7 对应 CDN
     8) XTLS_CONFIG='hy2' ;;      # 选择 8 对应 Hysteria2
     9) XTLS_CONFIG='ss2022' ;;   # 选择 9 对应 Shadowsocks 2022
+    10) XTLS_CONFIG='multi' ;;   # 选择 10 对应多节点配置
     *) XTLS_CONFIG='Vision' ;;   # 其他情况 (包括 2 和默认) 对应 Vision
     esac
     # 如果选择了 SNI 配置
@@ -336,6 +337,27 @@ function processes_language() {
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 
+# =============================================================================
+# 函数名称: processes_reverse
+# 功能描述: 处理反向代理配置流程。
+# 参数: 无
+# 返回值: 无
+# =============================================================================
+function processes_reverse() {
+    exec_menu '--reverse'
+    local choose=$(echo $?)
+    case ${choose} in
+    1 | 2)
+        exec_handler '--reverse'
+        exec_handler '--restart'
+        ;;
+    3)
+        exec_handler '--reverse-share'
+        ;;
+    *) exit 0 ;;
+    esac
+}
+
 function processes_config() {
     # 显示主配置管理菜单
     exec_menu '--management'
@@ -349,6 +371,7 @@ function processes_config() {
     4) exec_handler '--change-port' ;;  # 选择 4：修改 Xray 端口
     5) exec_handler '--geodata-cron' ;; # 选择 5：配置 GeoData Cron 任务
     6) processes_language ;;            # 选择 6：设置语言
+    7) processes_reverse ;;             # 选择 7：配置反向代理
     *) exit 0 ;;                        # 其他情况：退出脚本
     esac
 }
@@ -410,6 +433,14 @@ function main() {
     --xhttp) exec_handler '--quick' 'XHTTP' ;;
     # 如果参数是 --fallback，则执行快速安装 Fallback
     --fallback) exec_handler '--quick' 'Fallback' ;;
+    # --multi uses the interactive multi-node collector, then runs the normal install flow.
+    --multi)
+        exec_handler '--script-config' 'multi'
+        exec_handler '--install'
+        exec_handler '--xray-config'
+        exec_handler '--restart'
+        exec_handler '--share'
+        ;;
     # 对于其他参数，进入主索引流程，并将第二个参数传递给它
     *) processes_index "$2" ;;
     esac

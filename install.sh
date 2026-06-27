@@ -134,6 +134,7 @@ function show_help() {
   --vision       快速安装 Vision 配置
   --xhttp        快速安装 XHTTP 配置
   --fallback     快速安装 Fallback 配置
+  --multi        交互式安装多节点组合配置
   --lang=<code>  设置语言 (zh/en/auto)
   -d <path>      自定义安装目录
   --help         显示此帮助信息
@@ -142,6 +143,7 @@ function show_help() {
 示例:
   bash $0                    # 启动交互式菜单
   bash $0 --vision           # 快速安装 Vision
+  bash $0 --multi            # 交互式生成多个节点
   bash $0 --lang=en          # 使用英文界面
   bash $0 -d /opt/xray       # 安装到自定义目录
 EOF
@@ -505,7 +507,7 @@ function main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
         # 快速安装选项
-        --vision | --xhttp | --fallback)
+        --vision | --xhttp | --fallback | --multi)
             QUICK_INSTALL="${1}"
             ;;
         # 自定义安装目录选项
@@ -520,7 +522,7 @@ function main() {
     # 从脚本配置文件中读取已记录的安装路径
     local script_path="$(jq -r '.path' "${SCRIPT_CONFIG_PATH}")"
     # 如果配置文件中没有记录路径，且命令行也未指定，则使用默认路径
-    if [[ -z "${script_path}" && -z "${PROJECT_ROOT}" ]]; then
+    if [[ (-z "${script_path}" || "${script_path}" == "null") && -z "${PROJECT_ROOT}" ]]; then
         PROJECT_ROOT='/usr/local/xray-script'
         SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
         backup_config "${SCRIPT_CONFIG_PATH}"

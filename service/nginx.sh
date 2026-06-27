@@ -527,11 +527,11 @@ function gen_cflags() {
     fi
     # sanitizer 相关
     if gcc -v --help 2>&1 | grep -qw "\\-fsanitize"; then
-        >temp.c # 创建一个空的 C 文件用于测试
-        if gcc -E -fno-sanitize=all temp.c >/dev/null 2>&1; then
+        >"${TMPFILE_DIR}/temp.c" # 创建一个空的 C 文件用于测试
+        if gcc -E -fno-sanitize=all "${TMPFILE_DIR}/temp.c" >/dev/null 2>&1; then
             cflags+=('-fno-sanitize=all')
         fi
-        rm temp.c # 删除临时文件
+        rm -f "${TMPFILE_DIR}/temp.c" # 删除临时文件
     fi
     # instrumentation 相关
     if gcc -v --help 2>&1 | grep -qw "\\-finstrument\\-functions"; then

@@ -48,6 +48,7 @@ readonly GENERATE_PATH="${CUR_DIR}/generate.sh"
 readonly CHECK_PATH="${CUR_DIR}/check.sh"
 readonly SHARE_PATH="${CUR_DIR}/share.sh"
 readonly READ_PATH="${CUR_DIR}/read.sh"
+readonly MENU_PATH="${CUR_DIR}/menu.sh"
 readonly NGINX_PATH="${SERVICE_DIR}/nginx.sh"
 readonly SSL_PATH="${SERVICE_DIR}/ssl.sh"
 readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh"
@@ -84,12 +85,10 @@ function exec_docker() {
 
 function exec_ssl() {
     bash "${SSL_PATH}" "$@"
-    return $?
 }
 
 function exec_check() {
     bash "${CHECK_PATH}" "$@"
-    return $?
 }
 
 # =============================================================================
@@ -281,6 +280,16 @@ function exec_read() {
             # 验证端口号
             exec_check '--port' "${result}" || continue
             ;;
+        reverse-port)
+            result="${result:-8443}"
+            exec_check '--port' "${result}" || continue
+            ;;
+        reverse-target)
+            exec_check '--reverse-target' "${result}" || continue
+            ;;
+        reverse-uuid)
+            exec_check '--uuid' "${result}"
+            ;;
         uuid | fallback)
             # 验证 UUID (fallback 也使用 uuid 验证)
             exec_check '--uuid' "${result}"
@@ -338,17 +347,280 @@ function exec_read() {
 }
 
 # =============================================================================
-# 函数名称: reset_json_fields
-# 功能描述: 重置 JSON 对象中指定键下的字段值。
-#           1. 如果指定了目标键 ($2)，则只重置该键下的字段。
-#           2. 如果未指定目标键，则重置整个 JSON 对象的字段。
-#           3. 保留指定的字段 ($3, $4, ...) 不变，其他字段根据类型重置为空值。
+# 函数名称: map_protocol_choice_to_tag
+# 功能描述: 将用户的菜单选择编号映射为对应的协议配置标签。
 # 参数:
-#   $1: 原始 JSON 字符串
-#   $2: 目标键名 (例如 'xray' 或 'nginx')，如果为 "null" 则重置整个对象
-#   $@: (从 $3 开始) 需要保留的字段名列表
-# 返回值: 重置后的 JSON 字符串 (echo 输出)
+#   $1: 用户选择的菜单编号 (1-9)
+# 返回值: 对应的协议标签名称 (echo 输出，如 'mKCP', 'Vision', 'XHTTP' 等)
 # =============================================================================
+function map_protocol_choice_to_tag() {
+    case "$1" in
+    1) echo 'mKCP' ;;
+    2 | 0) echo 'Vision' ;;
+    3) echo 'XHTTP' ;;
+    4) echo 'Trojan' ;;
+    5) echo 'Fallback' ;;
+    8) echo 'hy2' ;;
+    9) echo 'ss2022' ;;
+    *) echo '' ;;
+    esac
+}
+
+function read_multi_protocol_tag() {
+    local node_index="$1"
+    local choose config_tag
+
+    while true; do
+        echo -e "${GREEN}[Multi]${NC} Select protocol for node ${node_index}" >&2
+        bash "${MENU_PATH}" '--config'
+        choose=$?
+        config_tag="$(map_protocol_choice_to_tag "${choose}")"
+
+        if [[ -n "${config_tag}" ]]; then
+            echo "${config_tag}"
+            return 0
+        fi
+
+        echo -e "${YELLOW}[Multi]${NC} SNI/CDN/nested multi are not supported inside multi-node mode. Please choose another protocol." >&2
+    done
+}
+
+function port_in_list() {
+    local needle="$1"
+    shift
+    local value
+    for value in "$@"; do
+        [[ "${value}" == "${needle}" ]] && return 0
+    done
+    return 1
+}
+
+function generate_unique_multi_port() {
+    local requested="$1"
+    local config_tag="$2"
+    shift 2
+    local used_ports=("$@")
+    local port="${requested}"
+
+    if [[ -z "${port}" ]]; then
+        if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
+            port="$(exec_generate '--port')"
+        else
+            port=443
+        fi
+    fi
+
+    while port_in_list "${port}" "${used_ports[@]}"; do
+        echo -e "${YELLOW}[Multi]${NC} Port ${port} is already used by another node, generating a random port." >&2
+        port="$(exec_generate '--port')"
+    done
+
+    echo "${port}"
+}
+
+function build_multi_node_json() {
+    local config_tag="$1"
+    local node_index="$2"
+    local xray_port="$3"
+    local node
+
+    node="$(jq -n \
+        --arg tag "${config_tag}" \
+        --arg name "${config_tag}-${node_index}" \
+        --argjson port "${xray_port}" \
+        '{tag:$tag,name:$name,port:$port}')"
+
+    case "${config_tag,,}" in
+    trojan)
+        local trojan_password="${CONFIG_DATA['password']:-$(exec_generate '--password')}"
+        node="$(echo "${node}" | jq --arg password "${trojan_password}" '.trojan = $password')"
+        ;;
+    hy2)
+        local hy2_auth="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--password')}"
+        node="$(echo "${node}" | jq --arg auth "${hy2_auth}" '.hy2auth = $auth')"
+        ;;
+    ss2022)
+        local ss2022_key="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}"
+        node="$(echo "${node}" | jq --arg key "${ss2022_key}" '.ss2022Key = $key')"
+        ;;
+    mkcp | vision | xhttp | fallback)
+        local xray_uuid="$(exec_generate '--uuid' ${CONFIG_DATA['uuid']})"
+        node="$(echo "${node}" | jq --arg uuid "${xray_uuid}" '.uuid = $uuid')"
+        ;;
+    esac
+
+    case "${config_tag,,}" in
+    fallback)
+        local fallback_uuid="${CONFIG_DATA['fallback']:-$(exec_generate '--uuid')}"
+        node="$(echo "${node}" | jq --arg uuid "${fallback_uuid}" '.fallback = $uuid')"
+        ;;
+    mkcp)
+        local kcp_seed="${CONFIG_DATA['seed']:-$(exec_generate '--password')}"
+        node="$(echo "${node}" | jq --arg seed "${kcp_seed}" '.kcp = $seed')"
+        ;;
+    esac
+
+    case "${config_tag,,}" in
+    vision | xhttp | trojan | fallback)
+        local target_domain="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
+        local server_names="$(exec_generate '--server-names' "${target_domain}")"
+        local short_ids="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-${CONFIG_DATA['short']:-'8 8'}})"
+        node="$(echo "${node}" | jq \
+            --arg target "${target_domain}" \
+            --argjson serverNames "${server_names}" \
+            --argjson shortIds "${short_ids}" \
+            '.target = $target | .serverNames = $serverNames | .shortIds = $shortIds')"
+        ;;
+    esac
+
+    case "${config_tag,,}" in
+    xhttp | trojan | fallback)
+        local xhttp_path="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
+        local xhttp_mode="${CONFIG_DATA['xhttp-mode']:-auto}"
+        node="$(echo "${node}" | jq --arg path "${xhttp_path}" --arg mode "${xhttp_mode}" '.path = $path | .xhttpMode = $mode')"
+        ;;
+    esac
+
+    echo "${node}"
+}
+
+function handler_read_multi_xray_config() {
+    local nodes='[]'
+    local used_ports=()
+    local node_count
+    local has_vless='n'
+    local has_hy2='n'
+
+    CONFIG_DATA=()
+    CONFIG_DATA['tag']='multi'
+
+    if echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset' | grep -Eq '^(0|1)$'; then
+        exec_read 'rules'
+    fi
+    if [[ "${CONFIG_DATA['rules'],,}" != 'n' ]]; then
+        exec_read 'block-bt'
+        exec_read 'block-cn'
+        exec_read 'block-ad'
+    fi
+    local multi_rules="${CONFIG_DATA['rules']}"
+    local multi_block_bt="${CONFIG_DATA['block-bt']}"
+    local multi_block_cn="${CONFIG_DATA['block-cn']}"
+    local multi_block_ad="${CONFIG_DATA['block-ad']}"
+
+    while true; do
+        echo -e "${GREEN}[Multi]${NC} How many nodes do you want to create? [2]: " >&2
+        read -r node_count
+        node_count="${node_count:-2}"
+        [[ "${node_count}" =~ ^[0-9]+$ && "${node_count}" -gt 0 ]] && break
+        echo -e "${YELLOW}[Multi]${NC} Please enter a positive integer." >&2
+    done
+
+    local i
+    for ((i = 1; i <= node_count; i++)); do
+        local config_tag
+        config_tag="$(read_multi_protocol_tag "${i}")"
+
+        CONFIG_DATA=()
+        CONFIG_DATA['tag']="${config_tag}"
+
+        exec_read 'port'
+        local xray_port
+        xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")"
+        used_ports+=("${xray_port}")
+
+        case "${config_tag,,}" in
+        trojan) exec_read 'password' ;;
+        hy2)
+            exec_read 'hy2-auth'
+            has_hy2='y'
+            ;;
+        ss2022) exec_read 'ss2022-password' ;;
+        mkcp | vision | xhttp | fallback)
+            exec_read 'uuid'
+            has_vless='y'
+            ;;
+        esac
+
+        case "${config_tag,,}" in
+        fallback) exec_read 'fallback' ;;
+        mkcp) exec_read 'seed' ;;
+        esac
+
+        case "${config_tag,,}" in
+        vision | xhttp | trojan | fallback) exec_read 'target' ;;
+        esac
+
+        case "${config_tag,,}" in
+        vision | xhttp | trojan | fallback) exec_read 'short' ;;
+        esac
+
+        case "${config_tag,,}" in
+        xhttp | trojan | fallback)
+            exec_read 'path'
+            exec_read 'xhttp-mode'
+            ;;
+        esac
+
+        local node
+        node="$(build_multi_node_json "${config_tag}" "${i}" "${xray_port}")"
+        nodes="$(echo "${nodes}" | jq --argjson node "${node}" '. + [$node]')"
+    done
+
+    if [[ "${has_vless}" == 'y' ]]; then
+        run_vlessenc_choice
+    fi
+
+    if [[ "${has_hy2}" == 'y' ]]; then
+        echo -e "${YELLOW}[Multi]${NC} HY2 nodes share one TLS certificate in multi-node mode." >&2
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
+        local hy2_cert_source_reply
+        read -r hy2_cert_source_reply
+        hy2_cert_source_reply="${hy2_cert_source_reply:-1}"
+        CONFIG_DATA['hy2_cert_source']="${hy2_cert_source_reply}"
+        case "${hy2_cert_source_reply}" in
+        1)
+            exec_read 'hy2-cert-domain'
+            CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
+            exec_read 'email'
+            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
+            ;;
+        2)
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
+            local server_ip
+            server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me)
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
+            CONFIG_DATA['hy2_cert_domain']="${server_ip}"
+            exec_read 'email'
+            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
+            ;;
+        3)
+            local hy2_fullchain hy2_privkey
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
+                read -r hy2_fullchain
+                hy2_fullchain="$(echo "${hy2_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${hy2_fullchain}" ]] && break
+            done
+            while true; do
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
+                read -r hy2_privkey
+                hy2_privkey="$(echo "${hy2_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "${hy2_privkey}" ]] && break
+            done
+            CONFIG_DATA['hy2_cert_fullchain']="${hy2_fullchain}"
+            CONFIG_DATA['hy2_cert_privkey']="${hy2_privkey}"
+            ;;
+        esac
+    fi
+
+    CONFIG_DATA['tag']='multi'
+    CONFIG_DATA['rules']="${multi_rules}"
+    CONFIG_DATA['block-bt']="${multi_block_bt}"
+    CONFIG_DATA['block-cn']="${multi_block_cn}"
+    CONFIG_DATA['block-ad']="${multi_block_ad}"
+    CONFIG_DATA['nodes_json']="${nodes}"
+}
+
 function reset_json_fields() {
     local raw_json="$1"   # 获取原始 JSON 字符串
     local target_key="$2" # 获取目标键名
@@ -488,7 +760,7 @@ function handler_routing() {
     # 调用 exec_read 读取用户输入的规则值
     exec_read "${rule_tag}"
     # 调用 add_rule 将规则添加到 Xray 配置中
-    add_rule "${rule_tag}" "${rule_target}" "${XRAY_CONFIG[${rule_tag}]}" "${rule_type}"
+    add_rule "${rule_tag}" "${rule_target}" "${CONFIG_DATA[${rule_tag}]}" "${rule_type}"
 }
 
 # =============================================================================
@@ -578,6 +850,34 @@ function handler_script_config() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn != "n" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
     # 更新脚本配置中的 block ad 状态
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad != "n" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
+    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
+        local MULTI_NODES="${CONFIG_DATA['nodes_json']:-[]}"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg tag "${CONFIG_TAG}" '.xray.tag = $tag')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${MULTI_NODES}" '.xray.nodes = $nodes')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.port = ((.xray.nodes[0].port // 443) | tonumber)')"
+        if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
+        fi
+        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_source']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['hy2_cert_source']}" '.xray.hy2CertSource = $cs')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_domain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cd "${CONFIG_DATA['hy2_cert_domain']}" '.xray.hy2CertDomain = $cd')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_email']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ce "${CONFIG_DATA['hy2_cert_email']}" '.nginx.ca = $ce')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_fullchain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['hy2_cert_fullchain']}" '.xray.hy2CertFullchain = $cf')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['hy2_cert_privkey']}" '.xray.hy2CertPrivkey = $ck')"
+        fi
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        return 0
+    fi
     # 根据配置标签更新特定字段
     case "${CONFIG_TAG,,}" in
     trojan)
@@ -771,6 +1071,333 @@ function handler_mldsa65_config() {
 # 参数: 无
 # 返回值: 无 (直接修改 XRAY_CONFIG 全局变量和 XRAY_CONFIG_PATH/SCRIPT_CONFIG_PATH 文件)
 # =============================================================================
+function open_xray_firewall_port() {
+    local port="$1"
+    local protocol="$2"
+
+    [[ -z "${port}" || -z "${protocol}" ]] && return 0
+
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${port}/${protocol}" >&2
+    if command -v ufw &>/dev/null; then
+        ufw allow "${port}"/"${protocol}" >/dev/null 2>&1
+    elif command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    else
+        iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || true
+        ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || true
+    fi
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
+}
+
+function multi_upsert_route_rule() {
+    local rule="$1"
+
+    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson new_rule "${rule}" '
+        if any(.routing.rules[]?; .ruleTag == $new_rule.ruleTag) then
+            .routing.rules |= map(if .ruleTag == $new_rule.ruleTag then $new_rule else . end)
+        else
+            (.routing.rules | map(.ruleTag) | index("private-ip")) as $private_index |
+            if $private_index == null then
+                .routing.rules += [$new_rule]
+            else
+                .routing.rules = (.routing.rules[:$private_index] + [$new_rule] + .routing.rules[$private_index:])
+            end
+        end
+    ')"
+}
+
+function multi_add_optional_block_rules() {
+    local XRAY_RULES_BT="$1"
+    local XRAY_RULES_CN="$2"
+    local XRAY_RULES_AD="$3"
+    local new_rule
+
+    if [[ "${XRAY_RULES_BT}" -eq 1 ]]; then
+        new_rule="$(jq -n '{ruleTag:"bt",protocol:["bittorrent"],outboundTag:"block"}')"
+        multi_upsert_route_rule "${new_rule}"
+    fi
+    if [[ "${XRAY_RULES_CN}" -eq 1 ]]; then
+        new_rule="$(jq -n '{ruleTag:"cn-ip",ip:["geoip:cn"],outboundTag:"block"}')"
+        multi_upsert_route_rule "${new_rule}"
+    fi
+    if [[ "${XRAY_RULES_AD}" -eq 1 ]]; then
+        new_rule="$(jq -n '{ruleTag:"ad-domain",domain:["geosite:category-ads-all"],outboundTag:"block"}')"
+        multi_upsert_route_rule "${new_rule}"
+    fi
+}
+
+function handler_multi_firewall_ports() {
+    local nodes="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.nodes // []')"
+    local node_count="$(echo "${nodes}" | jq 'length')"
+    local i
+
+    for ((i = 0; i < node_count; i++)); do
+        local node="$(echo "${nodes}" | jq -c --argjson i "${i}" '.[$i]')"
+        local node_tag="$(echo "${node}" | jq -r '.tag | ascii_downcase')"
+        local node_port="$(echo "${node}" | jq -r '.port')"
+
+        case "${node_tag}" in
+        vision | xhttp | trojan | fallback)
+            open_xray_firewall_port "${node_port}" tcp
+            ;;
+        mkcp | hy2)
+            open_xray_firewall_port "${node_port}" udp
+            ;;
+        ss2022)
+            open_xray_firewall_port "${node_port}" tcp
+            open_xray_firewall_port "${node_port}" udp
+            ;;
+        esac
+    done
+}
+
+function handler_multi_xray_config() {
+    local skip_vlessenc="${1:-0}"
+    local nodes="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.nodes // []')"
+    local node_count="$(echo "${nodes}" | jq 'length')"
+    local PRIVATE_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.privateKey // ""')"
+    local MLDSA65_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')"
+    local XRAY_RULES_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')"
+    local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"
+    local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"
+    local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"
+    local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -c '.rules // []')"
+    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp // 0')"
+    local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
+
+    if [[ "${node_count}" -eq 0 ]]; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Multi-node config has no nodes." >&2
+        return 1
+    fi
+
+    if [[ "${skip_vlessenc}" != "1" ]]; then
+        if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
+            run_vlessenc_prompt 1
+            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+            else
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+                VLESS_ENC_DECRYPTION=""
+            fi
+        elif [[ "${VLESS_ENC_ENABLE}" == "n" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+            VLESS_ENC_DECRYPTION=""
+        fi
+    fi
+
+    XRAY_CONFIG="$(jq '.inbounds = [.inbounds[0]] | .routing.rules = [.routing.rules[] | select(.ruleTag == "api" or .ruleTag == "private-ip")]' "${SCRIPT_XRAY_DIR}/XHTTP.json")"
+    if [[ "${XRAY_RULES_STATUS}" -eq 0 ]]; then
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '
+            .routing.rules = ($rules | map(select(((.ruleTag // "") | tostring | startswith("anti-steal-") | not))))
+        ')"
+    fi
+
+    local used_listen_ports=("32768")
+    local i
+    for ((i = 0; i < node_count; i++)); do
+        local configured_port
+        configured_port="$(echo "${nodes}" | jq -r --argjson i "${i}" '.[$i].port // empty')"
+        [[ -n "${configured_port}" ]] && used_listen_ports+=("${configured_port}")
+    done
+
+    for ((i = 0; i < node_count; i++)); do
+        local suffix="$((i + 1))"
+        local node="$(echo "${nodes}" | jq -c --argjson i "${i}" '.[$i]')"
+        local node_tag="$(echo "${node}" | jq -r '.tag')"
+        local node_tag_lower="${node_tag,,}"
+        local node_port="$(echo "${node}" | jq -r '.port')"
+        local node_inbounds
+
+        node_inbounds="$(jq '.inbounds[1:]' "${SCRIPT_XRAY_DIR}/${node_tag}.json")"
+        node_inbounds="$(echo "${node_inbounds}" | jq --arg suffix "${suffix}" --argjson port "${node_port}" '
+            map(.tag = (.tag + "-" + $suffix)) | .[0].port = $port
+        ')"
+
+        if [[ -n "${VLESS_ENC_DECRYPTION}" ]]; then
+            node_inbounds="$(echo "${node_inbounds}" | jq --arg dec "${VLESS_ENC_DECRYPTION}" '
+                map(if .protocol? == "vless" and (.settings.decryption? != null) then .settings.decryption = $dec else . end)
+            ')"
+        fi
+
+        case "${node_tag_lower}" in
+        mkcp)
+            local node_uuid="$(echo "${node}" | jq -r '.uuid')"
+            local kcp_seed="$(echo "${node}" | jq -r '.kcp')"
+            node_inbounds="$(echo "${node_inbounds}" | jq --arg uuid "${node_uuid}" --arg seed "${kcp_seed}" '
+                .[0].settings.clients[0].id = $uuid |
+                .[0].streamSettings.kcpSettings.seed = $seed
+            ')"
+            ;;
+        vision)
+            local node_uuid="$(echo "${node}" | jq -r '.uuid')"
+            local node_target="$(echo "${node}" | jq -r '.target')"
+            local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
+            local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
+            local anti_port=$((32768 + suffix))
+            while port_in_list "${anti_port}" "${used_listen_ports[@]}"; do
+                anti_port=$((anti_port + 1))
+            done
+            used_listen_ports+=("${anti_port}")
+            node_inbounds="$(echo "${node_inbounds}" | jq \
+                --arg uuid "${node_uuid}" \
+                --arg target "${node_target}" \
+                --argjson serverNames "${server_names}" \
+                --arg privateKey "${PRIVATE_KEY}" \
+                --argjson shortIds "${short_ids}" \
+                --arg seed "${MLDSA65_SEED}" \
+                --argjson antiPort "${anti_port}" '
+                .[0].settings.clients[0].id = $uuid |
+                .[0].streamSettings.realitySettings.dest = ("127.0.0.1:" + ($antiPort | tostring)) |
+                .[0].streamSettings.realitySettings.serverNames = $serverNames |
+                .[0].streamSettings.realitySettings.privateKey = $privateKey |
+                .[0].streamSettings.realitySettings.shortIds = $shortIds |
+                (if $seed != "" then .[0].streamSettings.realitySettings.mldsa65Seed = $seed else . end) |
+                .[1].port = $antiPort |
+                .[1].settings.address = $target
+            ')"
+
+            local anti_in_tag="$(echo "${node_inbounds}" | jq -r '.[1].tag')"
+            local allow_rule="$(jq -n --arg ruleTag "anti-steal-allow-${suffix}" --arg inboundTag "${anti_in_tag}" --argjson domains "${server_names}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],domain:$domains,outboundTag:"direct"}')"
+            local block_rule="$(jq -n --arg ruleTag "anti-steal-block-${suffix}" --arg inboundTag "${anti_in_tag}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],outboundTag:"block"}')"
+            multi_upsert_route_rule "${allow_rule}"
+            multi_upsert_route_rule "${block_rule}"
+            ;;
+        xhttp)
+            local node_uuid="$(echo "${node}" | jq -r '.uuid')"
+            local node_target="$(echo "${node}" | jq -r '.target')"
+            local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
+            local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
+            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
+            node_inbounds="$(echo "${node_inbounds}" | jq \
+                --arg uuid "${node_uuid}" \
+                --arg target "${node_target}:443" \
+                --argjson serverNames "${server_names}" \
+                --arg privateKey "${PRIVATE_KEY}" \
+                --argjson shortIds "${short_ids}" \
+                --arg seed "${MLDSA65_SEED}" \
+                --arg path "${xhttp_path}" \
+                --arg mode "${xhttp_mode}" '
+                .[0].settings.clients[0].id = $uuid |
+                .[0].streamSettings.realitySettings.target = $target |
+                .[0].streamSettings.realitySettings.serverNames = $serverNames |
+                .[0].streamSettings.realitySettings.privateKey = $privateKey |
+                .[0].streamSettings.realitySettings.shortIds = $shortIds |
+                (if $seed != "" then .[0].streamSettings.realitySettings.mldsa65Seed = $seed else . end) |
+                .[0].streamSettings.xhttpSettings.path = $path |
+                .[0].streamSettings.xhttpSettings.mode = $mode
+            ')"
+            ;;
+        trojan)
+            local trojan_password="$(echo "${node}" | jq -r '.trojan')"
+            local node_target="$(echo "${node}" | jq -r '.target')"
+            local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
+            local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
+            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
+            node_inbounds="$(echo "${node_inbounds}" | jq \
+                --arg password "${trojan_password}" \
+                --arg target "${node_target}:443" \
+                --argjson serverNames "${server_names}" \
+                --arg privateKey "${PRIVATE_KEY}" \
+                --argjson shortIds "${short_ids}" \
+                --arg seed "${MLDSA65_SEED}" \
+                --arg path "${xhttp_path}" \
+                --arg mode "${xhttp_mode}" '
+                .[0].settings.clients[0].password = $password |
+                .[0].streamSettings.realitySettings.target = $target |
+                .[0].streamSettings.realitySettings.serverNames = $serverNames |
+                .[0].streamSettings.realitySettings.privateKey = $privateKey |
+                .[0].streamSettings.realitySettings.shortIds = $shortIds |
+                (if $seed != "" then .[0].streamSettings.realitySettings.mldsa65Seed = $seed else . end) |
+                .[0].streamSettings.xhttpSettings.path = $path |
+                .[0].streamSettings.xhttpSettings.mode = $mode
+            ')"
+            ;;
+        fallback)
+            local node_uuid="$(echo "${node}" | jq -r '.uuid')"
+            local fallback_uuid="$(echo "${node}" | jq -r '.fallback')"
+            local node_target="$(echo "${node}" | jq -r '.target')"
+            local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
+            local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
+            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
+            local uds_name="@uds2xhttp-${suffix}.sock"
+            node_inbounds="$(echo "${node_inbounds}" | jq \
+                --arg uuid "${node_uuid}" \
+                --arg fallback "${fallback_uuid}" \
+                --arg target "${node_target}:443" \
+                --argjson serverNames "${server_names}" \
+                --arg privateKey "${PRIVATE_KEY}" \
+                --argjson shortIds "${short_ids}" \
+                --arg seed "${MLDSA65_SEED}" \
+                --arg path "${xhttp_path}" \
+                --arg mode "${xhttp_mode}" \
+                --arg uds "${uds_name}" '
+                .[0].settings.clients[0].id = $uuid |
+                .[0].settings.fallbacks[0].dest = $uds |
+                .[0].streamSettings.realitySettings.target = $target |
+                .[0].streamSettings.realitySettings.serverNames = $serverNames |
+                .[0].streamSettings.realitySettings.privateKey = $privateKey |
+                .[0].streamSettings.realitySettings.shortIds = $shortIds |
+                (if $seed != "" then .[0].streamSettings.realitySettings.mldsa65Seed = $seed else . end) |
+                .[1].settings.clients[0].id = $fallback |
+                .[1].listen = $uds |
+                .[1].streamSettings.xhttpSettings.path = $path |
+                .[1].streamSettings.xhttpSettings.mode = $mode
+            ')"
+            ;;
+        hy2)
+            local hy2_auth="$(echo "${node}" | jq -r '.hy2auth')"
+            local HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
+            local HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"
+            node_inbounds="$(echo "${node_inbounds}" | jq --arg auth "${hy2_auth}" --arg cert "${HY2_FULLCHAIN}" --arg key "${HY2_PRIVKEY}" '
+                if .[0].settings.users? then .[0].settings.users[0].auth = $auth
+                else .[0].settings.clients[0].auth = $auth end |
+                .[0].streamSettings.tlsSettings.certificates[0].certificateFile = $cert |
+                .[0].streamSettings.tlsSettings.certificates[0].keyFile = $key
+            ')"
+            ;;
+        ss2022)
+            local ss2022_key="$(echo "${node}" | jq -r '.ss2022Key')"
+            node_inbounds="$(echo "${node_inbounds}" | jq --arg key "${ss2022_key}" '.[0].settings.password = $key')"
+            ;;
+        esac
+
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson node_inbounds "${node_inbounds}" '.inbounds += $node_inbounds')"
+    done
+
+    if [[ "${XRAY_RULES_STATUS}" -eq 1 ]]; then
+        multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}"
+    fi
+
+    if [[ "${WARP_STATUS:-0}" -eq 1 ]]; then
+        local container_ip="$(exec_docker '--obtain-container-ip')"
+        local socks_config='[{"tag":"warp","protocol":"socks","settings":{"servers":[{"address":"'"${container_ip}"'","port":40001}]}}]'
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')"
+    fi
+
+    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        handler_reverse_config
+    fi
+
+    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    echo "${XRAY_CONFIG}" >"${XRAY_CONFIG_PATH}" && sleep 2
+    handler_multi_firewall_ports
+
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
+        open_xray_firewall_port "${reverse_port}" tcp
+    fi
+}
+
 function handler_xray_config() {
     local skip_vlessenc="${1:-0}"
     # 打印绿色的 Xray 配置更新提示
@@ -798,6 +1425,10 @@ function handler_xray_config() {
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
+    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
+        handler_multi_xray_config "${skip_vlessenc}"
+        return $?
+    fi
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' && "${skip_vlessenc}" != "1" ]]; then
         if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
             run_vlessenc_prompt 1
@@ -846,7 +1477,7 @@ function handler_xray_config() {
         ;;
     hy2)
         # 更新 HY2 auth 密码
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.clients[0].auth = $auth')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.inbounds[1].settings.users[0].auth = $auth')"
         # 始终使用安全、拥有正确权限的证书路径进行配置，避免权限问题
         local HY2_FULLCHAIN="/usr/local/etc/xray/certs/fullchain.pem"
         local HY2_PRIVKEY="/usr/local/etc/xray/certs/privkey.pem"
@@ -933,6 +1564,12 @@ function handler_xray_config() {
         # 将 WARP 出站配置添加到 Xray 配置中
         XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')
     fi
+    # 应用反向代理配置
+    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        handler_reverse_config
+    fi
+
     # 获取更新后的路由规则
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
     # 更新脚本配置中的路由规则
@@ -973,6 +1610,12 @@ function handler_xray_config() {
             ip6tables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
         fi
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
+    fi
+
+    # 反向代理防火墙端口
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
+        open_xray_firewall_port "${reverse_port}" tcp
     fi
 }
 
@@ -1186,19 +1829,19 @@ function handler_hy2_cert() {
     local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"
     local ACCOUNT_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca // ""')"
     local CERT_DIR="/usr/local/etc/xray/certs"
+    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
 
     # 1. 开放 UDP 端口防火墙规则
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${XRAY_PORT}/udp" >&2
-    if command -v ufw &>/dev/null; then
-        ufw allow "${XRAY_PORT}"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="${XRAY_PORT}"/udp >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
+    if [[ "${CONFIG_TAG,,}" == "multi" ]]; then
+        local hy2_ports
+        hy2_ports="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.nodes[]? | select((.tag | ascii_downcase) == "hy2") | .port')"
+        local hy2_port
+        while IFS= read -r hy2_port; do
+            [[ -n "${hy2_port}" ]] && open_xray_firewall_port "${hy2_port}" udp
+        done <<<"${hy2_ports}"
     else
-        iptables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
-        ip6tables -I INPUT -p udp --dport "${XRAY_PORT}" -j ACCEPT 2>/dev/null || true
+        open_xray_firewall_port "${XRAY_PORT}" udp
     fi
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
 
     # 2. 处理证书
     case "${CERT_SOURCE}" in
@@ -1331,7 +1974,7 @@ function handler_sni_config() {
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
     local web="${1}" # 获取 Web 服务类型参数
     case "${CONFIG_TAG,,}" in
-    mkcp | vision | xhttp | trojan | fallback | hy2 | ss2022)
+    mkcp | vision | xhttp | trojan | fallback | hy2 | ss2022 | multi)
         # 对于非 SNI 配置，停止 Cloudreve 和 Nginx 服务
         handler_cloudreve_v3 'stop'
         handler_cloudreve_v4 'stop'
@@ -1573,9 +2216,9 @@ function handler_geodata_cron() {
     # 从脚本配置中检查 Xray 状态 (版本)
     local XRAY_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')"
     # 如果 Xray 已安装
-    if ! [[ -z "${XRAY_STATUS}" ]]; then
-        # 如果是快速模式
-        if (("${IS_QUICK}" == 0)) && crontab -l | grep -q "${GEODATA_PATH}"; then
+    if [[ -n "${XRAY_STATUS}" ]]; then
+        # 如果非快速模式且 cron 已存在，则移除
+        if [[ "${IS_QUICK}" == "0" ]] && crontab -l | grep -q "${GEODATA_PATH}"; then
             # 移除现有的 GeoData Cron 任务
             crontab -l | grep -v "${GEODATA_PATH}" | crontab -
             # 打印关闭 Cron 任务的提示
@@ -2242,6 +2885,271 @@ function handler_web() {
 }
 
 # =============================================================================
+# 函数名称: handler_reverse_config
+# 功能描述: 将反向代理配置追加到 Xray 配置中 (在保存到文件前调用)。
+# 参数: 无
+# 返回值: 无 (修改全局变量 XRAY_CONFIG)
+# =============================================================================
+function handler_reverse_config() {
+    local reverse_uuid=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid // ""')
+    local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
+
+    [[ -z "${reverse_uuid}" ]] && return 0
+
+    # 1. 向所有 vless inbound 追加反向代理 client
+    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg uuid "${reverse_uuid}" '
+        .inbounds |= map(
+            if .protocol? == "vless" then
+                .settings.clients += [{
+                    "email": "reverse@xtls.reality",
+                    "id": $uuid,
+                    "flow": (.settings.clients[0].flow // "xtls-rprx-vision"),
+                    "reverse": {
+                        "tag": "reverse-out"
+                    }
+                }]
+            else . end
+        )
+    ')"
+
+    # 2. 追加 tunnel 协议的 inbound
+    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson port "${reverse_port}" '
+        if any(.inbounds[]?; .tag == "reverse-portal") then
+            .inbounds |= map(if .tag == "reverse-portal" then .port = $port else . end)
+        else
+            .inbounds += [{
+                "tag": "reverse-portal",
+                "listen": "0.0.0.0",
+                "port": $port,
+                "protocol": "tunnel"
+            }]
+        end
+    ')"
+
+    # 3. 追加对应的路由规则
+    local route_rule='{"ruleTag":"reverse-portal","inboundTag":["reverse-portal"],"outboundTag":"reverse-out"}'
+    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson new_rule "${route_rule}" '
+        if any(.routing.rules[]?; .ruleTag == "reverse-portal") then
+            .routing.rules |= map(if .ruleTag == "reverse-portal" then $new_rule else . end)
+        else
+            (.routing.rules | map(.ruleTag) | index("private-ip")) as $private_index |
+            if $private_index == null then
+                .routing.rules += [$new_rule]
+            else
+                .routing.rules = (.routing.rules[:$private_index] + [$new_rule] + .routing.rules[$private_index:])
+            end
+        end
+    ')"
+}
+
+# =============================================================================
+# 函数名称: handler_reverse_toggle
+# 功能描述: 开启或关闭反向代理功能。
+# 参数: 无
+# 返回值: 无
+# =============================================================================
+function handler_reverse_toggle() {
+    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        # 禁用反向代理
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.reverse = 0')"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.disabled")" >&2
+    else
+        # 启用反向代理，首先检查 Xray 是否安装
+        local xray_ver=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')
+        if [[ -z "${xray_ver}" ]]; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.not_installed")" >&2
+            return 1
+        fi
+
+        # 读取用户输入
+        exec_read 'reverse-port'
+        exec_read 'reverse-target'
+        exec_read 'reverse-uuid'
+
+        local reverse_port="${CONFIG_DATA['reverse-port']:-8443}"
+        local reverse_target="${CONFIG_DATA['reverse-target']}"
+        local reverse_uuid="${CONFIG_DATA['reverse-uuid']}"
+        reverse_uuid="$(exec_generate '--uuid' "${reverse_uuid}")"
+
+        # 写入脚本配置
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson val 1 '.xray.reverse = $val')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${reverse_port}" '.xray.reversePort = $port')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg target "${reverse_target}" '.xray.reverseTarget = $target')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${reverse_uuid}" '.xray.reverseUuid = $uuid')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mode "forward" '.xray.reverseMode = $mode')"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.enabled")" >&2
+    fi
+}
+
+# =============================================================================
+# 函数名称: handler_reverse_share
+# 功能描述: 生成并打印内网端(Bridge)的配置模板供复制使用。
+# 参数: 无
+# 返回值: 无
+# =============================================================================
+function handler_reverse_share() {
+    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    if [[ "${reverse_status}" -ne 1 ]]; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.no_reverse")" >&2
+        return 1
+    fi
+
+    local reverse_uuid=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid')
+    local reverse_target=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseTarget')
+    local current_tag=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')
+    local xray_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port // 443')
+    local server_name=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.serverNames[0] // ""')
+    local public_key=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')
+    local short_id=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds[0] // ""')
+    local xhttp_path=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')
+    local xhttp_mode=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')
+
+    local server_ip
+    server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me || echo "SERVER_IP")
+
+    local target_ip="${reverse_target%%:*}"
+    local target_port="${reverse_target##*:}"
+
+    # 构造 VLESS outbound settings
+    local vless_settings
+    if [[ "${current_tag,,}" == "xhttp" ]]; then
+        vless_settings=$(jq -n \
+            --arg addr "${server_ip}" \
+            --argjson port "${xray_port}" \
+            --arg uuid "${reverse_uuid}" \
+            '{
+                "servers": [{
+                    "address": $addr,
+                    "port": $port,
+                    "users": [{
+                        "id": $uuid,
+                        "encryption": "none"
+                    }]
+                }]
+            }')
+    else
+        vless_settings=$(jq -n \
+            --arg addr "${server_ip}" \
+            --argjson port "${xray_port}" \
+            --arg uuid "${reverse_uuid}" \
+            --arg flow "xtls-rprx-vision" \
+            '{
+                "servers": [{
+                    "address": $addr,
+                    "port": $port,
+                    "users": [{
+                        "id": $uuid,
+                        "flow": $flow,
+                        "encryption": "none"
+                    }]
+                }]
+            }')
+    fi
+
+    # 构造 streamSettings
+    local stream_settings
+    if [[ "${current_tag,,}" == "xhttp" ]]; then
+        stream_settings=$(jq -n \
+            --arg sn "${server_name}" \
+            --arg pbk "${public_key}" \
+            --arg sid "${short_id}" \
+            --arg path "${xhttp_path}" \
+            --arg mode "${xhttp_mode}" \
+            '{
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {
+                    "serverName": $sn,
+                    "publicKey": $pbk,
+                    "shortId": $sid,
+                    "fingerprint": "chrome",
+                    "spiderX": "/"
+                },
+                "xhttpSettings": {
+                    "path": $path,
+                    "mode": $mode
+                }
+            }')
+    else
+        stream_settings=$(jq -n \
+            --arg sn "${server_name}" \
+            --arg pbk "${public_key}" \
+            --arg sid "${short_id}" \
+            '{
+                "network": "raw",
+                "security": "reality",
+                "realitySettings": {
+                    "serverName": $sn,
+                    "publicKey": $pbk,
+                    "shortId": $sid,
+                    "fingerprint": "chrome",
+                    "spiderX": "/"
+                }
+            }')
+    fi
+
+    # 构造完整配置
+    local config
+    config=$(jq -n \
+        --argjson vless_s "${vless_settings}" \
+        --argjson stream_s "${stream_settings}" \
+        --arg target_ip "${target_ip}" \
+        --arg target_port "${target_port}" \
+        --arg redirect_str "${reverse_target}" \
+        '{
+            "log": {
+                "loglevel": "warning"
+            },
+            "routing": {
+                "rules": [
+                    {
+                        "inboundTag": ["reverse-in"],
+                        "outboundTag": "reverse-direct"
+                    }
+                ]
+            },
+            "outbounds": [
+                {
+                    "protocol": "freedom"
+                },
+                {
+                    "protocol": "freedom",
+                    "tag": "reverse-direct",
+                    "settings": {
+                        "redirect": $redirect_str,
+                        "finalRules": [
+                            {
+                                "action": "allow",
+                                "network": "tcp",
+                                "ip": $target_ip,
+                                "port": $target_port
+                            }
+                        ]
+                    }
+                },
+                {
+                    "protocol": "vless",
+                    "settings": $vless_s,
+                    "streamSettings": $stream_s,
+                    "reverse": {
+                        "tag": "reverse-in"
+                    }
+                }
+            ]
+        }')
+
+    echo -e "${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_title")${NC}"
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_hint")"
+    echo "--------------------------------------------------"
+    echo "${config}" | jq '.'
+    echo "--------------------------------------------------"
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_info")"
+}
+
+# =============================================================================
 # 函数名称: handler_quick_install
 # 功能描述: 执行一键快速安装流程。
 #           1. 调用 handler_script_config 配置脚本。
@@ -2321,14 +3229,38 @@ function main() {
     --nginx-update) handler_nginx_update ;;   # 更新 Nginx
     --nginx-purge) handler_nginx_purge ;;     # 卸载 Nginx
     --script-config)
-        handler_read_xray_config "$1" # 读取 Xray 配置输入
+        if [[ "${1,,}" == 'multi' ]]; then
+            handler_read_multi_xray_config
+        else
+            handler_read_xray_config "$1" # 读取 Xray 配置输入
+        fi
         handler_script_config         # 更新脚本配置
         ;;
     --xray-config)
         handler_sni_config "$1" # 处理 SNI 配置
         # 获取当前配置标签
         local current_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
-        if [[ "${current_tag,,}" == 'hy2' ]]; then
+        if [[ "${current_tag,,}" == 'multi' ]]; then
+            local has_hy2="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')"
+            local has_vless="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; ((.tag | ascii_downcase) == "mkcp") or ((.tag | ascii_downcase) == "vision") or ((.tag | ascii_downcase) == "xhttp") or ((.tag | ascii_downcase) == "fallback"))')"
+            local has_reality="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; ((.tag | ascii_downcase) == "vision") or ((.tag | ascii_downcase) == "xhttp") or ((.tag | ascii_downcase) == "trojan") or ((.tag | ascii_downcase) == "fallback"))')"
+            if [[ "${has_hy2}" == 'true' ]]; then
+                handler_hy2_cert || return 1
+            fi
+            if [[ "${has_reality}" == 'true' ]]; then
+                handler_x25519_config
+                local mldsa65_reply
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
+                read -r mldsa65_reply
+                mldsa65_reply="${mldsa65_reply:-n}"
+                handler_mldsa65_config "${mldsa65_reply}"
+                handler_xray_config
+            elif [[ "${has_vless}" == 'true' ]]; then
+                handler_xray_config
+            else
+                handler_xray_config 1
+            fi
+        elif [[ "${current_tag,,}" == 'hy2' ]]; then
             # HY2 不需要 x25519 和 mldsa65，但需要处理证书和防火墙
             handler_hy2_cert || return 1
             handler_xray_config 1  # 跳过 vlessenc
@@ -2365,6 +3297,8 @@ function main() {
     --warp) handler_warp ;;                     # 管理 WARP
     --reset-warp) handler_reset_warp ;;         # 重置 WARP
     --traffic) handler_traffic ;;               # 显示流量统计
+    --reverse) handler_reverse_toggle ;;         # 开启/关闭反向代理
+    --reverse-share) handler_reverse_share ;;   # 查看内网端配置模板
     --change-port)
         handler_change_xray_port  # 处理 Xray 端口配置
         handler_xray_config       # 更新 Xray 配置

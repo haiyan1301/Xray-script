@@ -171,6 +171,7 @@ function menu_xray_config() {
     echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option8")"
     # 打印选项 9
     echo -e "${GREEN}9.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option9")"
+    echo -e "${GREEN}10.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option10")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
@@ -196,6 +197,7 @@ function menu_xray_config() {
     echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info8")"
     # 打印选项 9 的说明信息
     echo -e "9. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info9")"
+    echo -e "10. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info10")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -247,6 +249,8 @@ function menu_config() {
     echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option5")"
     # 打印选项 6
     echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option6")"
+    # 打印选项 7
+    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option7")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
@@ -260,6 +264,8 @@ function menu_config() {
     echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info4")"
     # 打印选项 5 的说明信息
     echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info5")"
+    # 打印选项 7 的说明信息
+    echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info6")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -341,6 +347,34 @@ function menu_sni_config() {
 }
 
 # =============================================================================
+# 函数名称: menu_reverse
+# 功能描述: 显示反向代理配置菜单。
+# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 返回值: 无 (直接打印到标准错误输出 >&2)
+# =============================================================================
+function menu_reverse() {
+    # 打印反向代理菜单标题
+    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.title") ------------------"
+    # 打印选项 1
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option1")"
+    # 打印选项 2
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option2")"
+    # 打印选项 3
+    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option3")"
+
+    # 打印分隔线
+    echo -e "------------------------------------------------------"
+    # 打印选项 1 的说明信息
+    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info1")"
+    # 打印选项 2 的说明信息
+    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info2")"
+    # 打印选项 3 的说明信息
+    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info3")"
+    # 打印分隔线
+    echo -e "------------------------------------------------------"
+}
+
+# =============================================================================
 # 函数名称: print_banner
 # 功能描述: 随机打印一个 ASCII 艺术风格的 Banner。
 # 参数: 无
@@ -374,6 +408,7 @@ function print_status() {
     local XRAY_VERSION=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')
     local CONFIG_TAG=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')
     local WARP_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')
+    local REVERSE_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
 
     # 从 i18n 数据中读取状态描述文本
     local not_installed=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.not_installed")
@@ -387,12 +422,15 @@ function print_status() {
     [[ ${CONFIG_TAG} ]] && CONFIG_TAG="${GREEN}${CONFIG_TAG}${NC}" || CONFIG_TAG="${RED}${not_configured}${NC}"
     # 根据 WARP 状态 (1 或 0)，设置显示颜色和文本
     [[ ${WARP_STATUS} -eq 1 ]] && WARP_STATUS="${GREEN}${enabled}${NC}" || WARP_STATUS="${RED}${disabled}${NC}"
+    # 根据反向代理状态，设置显示颜色和文本
+    [[ ${REVERSE_STATUS} -eq 1 ]] && REVERSE_STATUS="${GREEN}${enabled}${NC}" || REVERSE_STATUS="${RED}${disabled}${NC}"
 
     # 打印状态信息
     echo -e "------------------------------------------------------"
-    echo -e "Xray       : ${XRAY_VERSION}"
-    echo -e "CONFIG     : ${CONFIG_TAG}"
-    echo -e "WARP Proxy : ${WARP_STATUS}"
+    echo -e "Xray          : ${XRAY_VERSION}"
+    echo -e "CONFIG        : ${CONFIG_TAG}"
+    echo -e "WARP Proxy    : ${WARP_STATUS}"
+    echo -e "Reverse Proxy : ${REVERSE_STATUS}"
     echo -e "------------------------------------------------------"
     echo
 }
@@ -460,6 +498,7 @@ function main() {
     --management) menu_config >&2 ;;      # 显示配置管理菜单
     --route) menu_route >&2 ;;            # 显示路由管理菜单
     --sni) menu_sni_config >&2 ;;         # 显示 SNI 配置菜单
+    --reverse) menu_reverse >&2 ;;         # 显示反向代理配置菜单
     --banner) print_banner >&2 ;;         # 显示 Banner
     --status) print_status >&2 ;;         # 显示状态信息
     esac

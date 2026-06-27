@@ -63,7 +63,7 @@
       "protocol": "hysteria",
       "settings": {
         "version": 2,
-        "users": [
+        "clients": [
           {
             "auth": "your-password-here",
             "email": "hy2@xray.hysteria",

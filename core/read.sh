@@ -155,6 +155,9 @@ declare -A param_map=(
     ["--hy2-auth"]="config,hy2_auth"
     ["--hy2-cert-domain"]="config,hy2_cert_domain"
     ["--ss2022-password"]="config,ss2022_password"
+    ["--reverse-port"]="config,reverse_port"
+    ["--reverse-target"]="config,reverse_target"
+    ["--reverse-uuid"]="config,reverse_uuid"
 )
 
 # =============================================================================

@@ -33,7 +33,13 @@
     "hy2CertDomain": "",
     "hy2CertSource": "",
     "hy2CertFullchain": "",
-    "hy2CertPrivkey": ""
+    "hy2CertPrivkey": "",
+    "nodes": [],
+    "reverse": 0,
+    "reverseUuid": "",
+    "reversePort": 8443,
+    "reverseTarget": "",
+    "reverseMode": ""
   },
   "nginx": {
     "version": "",

@@ -66,6 +66,7 @@
       "option7": "CDN Standalone",
       "option8": "Hysteria2 (HY2)",
       "option9": "Shadowsocks 2022 (SS2022)",
+      "option10": "Multi-node Composite",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
       "info3": "XHTTP supports all scenarios",
@@ -76,7 +77,8 @@
       "info6": "SNI-based split through Nginx on port 443, supports CDN and direct connection",
       "info7": "CDN only (XHTTP over TLS), no REALITY direct link",
       "info8": "Hysteria2 based on QUIC(UDP), high performance low latency, requires TLS certificate (domain/IP)",
-      "info9": "Shadowsocks 2022 is the classic next-gen Shadowsocks protocol, highly secure, using a Pre-Shared Key (PSK)"
+      "info9": "Shadowsocks 2022 is the classic next-gen Shadowsocks protocol, highly secure, using a Pre-Shared Key (PSK)",
+      "info10": "Generate multiple nodes in one run, with per-node protocol, port, and related settings"
     },
     "web_config": {
       "title": "Web Config",
@@ -94,11 +96,13 @@
       "option4": "Change Xray Port",
       "option5": "Enable/Disable geodata auto-update",
       "option6": "Language",
+      "option7": "Reverse Proxy (NAT Traversal)",
       "info1": "Full config update",
       "info2": "Manage blocking or WARP routing",
       "info3": "Includes Nginx update, domain change, web config",
       "info4": "(Non-SNI) Change Xray listen port and restart service",
-      "info5": "geodata provided by  https://github.com/Loyalsoldier/v2ray-rules-dat "
+      "info5": "geodata provided by  https://github.com/Loyalsoldier/v2ray-rules-dat ",
+      "info6": "Configure Xray VLESS reverse proxy, map public port to internal network service"
     },
     "route_management": {
       "title": "Custom Routing",
@@ -128,6 +132,15 @@
       "option7": "Reset Cloudreve v3 admin data",
       "info1": "Domain for REALITY",
       "info2": "Domain for CDN"
+    },
+    "reverse": {
+      "title": "Reverse Proxy (NAT Traversal)",
+      "option1": "Enable Reverse Proxy",
+      "option2": "Disable Reverse Proxy",
+      "option3": "View Bridge Config Template",
+      "info1": "Enable reverse proxy in current Xray config (port forwarding mode)",
+      "info2": "Remove reverse proxy from current Xray config",
+      "info3": "Generate bridge-side Xray config template for internal network devices"
     }
   },
   "handler": {
@@ -196,6 +209,15 @@
     },
     "mldsa": {
       "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)"
+    },
+    "reverse": {
+      "enabled": "Reverse proxy enabled",
+      "disabled": "Reverse proxy disabled",
+      "not_installed": "Xray is not installed, please install Xray first",
+      "bridge_title": "===== Bridge Config Template =====",
+      "bridge_hint": "Save the following config as Xray config.json on the internal network device",
+      "bridge_info": "The bridge device needs Xray installed and running with this config",
+      "no_reverse": "Reverse proxy is not enabled, please enable it first"
     }
   },
   "read": {
@@ -226,7 +248,10 @@
     "warp_ip": "Enter IP to route to WARP",
     "warp_domain": "Enter domain to route to WARP",
     "block_ip": "Enter IP to route to block",
-    "block_domain": "Enter domain to route to block"
+    "block_domain": "Enter domain to route to block",
+    "reverse_port": "Enter reverse proxy tunnel port (default: 8443): ",
+    "reverse_target": "Enter internal service target address (format: IP:PORT, e.g. 192.168.1.100:80): ",
+    "reverse_uuid": "Enter reverse proxy UUID (leave empty to auto-generate): "
   },
   "share": {
     "client": "Client Configuration",
@@ -312,6 +337,12 @@
       "check": "Checking if Xray version exists: ",
       "exist": "Xray version exists: v",
       "not_exist": "Xray version does not exist: v"
+    },
+    "reverse_target": {
+      "check": "Checking internal service target address validity: ",
+      "valid": "Internal service target address format is valid: ",
+      "empty": "Internal service target address cannot be empty",
+      "format_error": "Invalid format, please use IP:PORT or hostname:PORT format: "
     },
     "email": {
       "check": "Validating email address: ",

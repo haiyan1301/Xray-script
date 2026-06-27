@@ -1,0 +1,154 @@
+{
+  "log": {
+    "loglevel": "warning",
+    "error": "/var/log/xray/error.log",
+    "access": "/var/log/xray/access.log"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ]
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true,
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+  "routing": {
+    "rules": [
+      {
+        "ruleTag": "api",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "ruleTag": "reverse-portal",
+        "inboundTag": [
+          "reverse-portal"
+        ],
+        "outboundTag": "reverse-out"
+      },
+      {
+        "ruleTag": "private-ip",
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "block"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "127.0.0.1",
+      "port": 32768,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      },
+      "sniffing": null
+    },
+    {
+      "tag": "VLESS-Vision-REALITY",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "email": "vless@xtls.reality",
+            "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "flow": "xtls-rprx-vision",
+            "level": 0
+          },
+          {
+            "email": "reverse@xtls.reality",
+            "id": "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy",
+            "flow": "xtls-rprx-vision",
+            "reverse": {
+              "tag": "reverse-out"
+            }
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "127.0.0.1:4431",
+          "xver": 0,
+          "serverNames": [],
+          "privateKey": "xray x25519 Private key",
+          "shortIds": [
+            "",
+            "01",
+            "0123",
+            "01234567",
+            "0123456789abcdef"
+          ],
+          "mldsa65Seed": ""
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "reverse-portal",
+      "listen": "0.0.0.0",
+      "port": 8443,
+      "protocol": "tunnel"
+    },
+    {
+      "tag": "anti-steal-in",
+      "listen": "127.0.0.1",
+      "port": 4431,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "",
+        "port": 443,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "tls"
+        ],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ]
+}

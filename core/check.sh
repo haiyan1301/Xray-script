@@ -288,7 +288,7 @@ function check_port() {
     if [[ -z "${port}" ]]; then
         _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.empty")"
     # 检查端口号是否在 1-65535 范围内
-    elif ((port < 65535 && port > 1)); then
+    elif ((port <= 65535 && port >= 1)); then
         _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.valid")$port"
     else
         # 如果超出范围，则为无效
@@ -345,7 +345,7 @@ function check_password() {
     fi
 
     # 检查密码中是否包含空格
-    if [[ "${password}" =~ *\ * ]]; then
+    if [[ "${password}" == *" "* ]]; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.space_error")$password"
         return 1
     fi
@@ -386,7 +386,7 @@ function check_path() {
     fi
 
     # 检查路径中是否包含空格
-    if [[ "${path}" =~ *\ * ]]; then
+    if [[ "${path}" == *" "* ]]; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
         return 1
     fi
@@ -428,7 +428,7 @@ function check_path_required() {
         return 1
     fi
 
-    if [[ "${path}" =~ *\ * ]]; then
+    if [[ "${path}" == *" "* ]]; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
         return 1
     fi
@@ -674,6 +674,42 @@ function validate_email() {
 }
 
 # =============================================================================
+# 函数名称: check_reverse_target
+# 功能描述: 检查内网服务目标地址的合法性。
+#           格式要求: IP:PORT 或 hostname:PORT
+# 参数:
+#   $1: target - 待检查的目标地址
+# 返回值: 0 (通过), 1 (失败)
+# =============================================================================
+function check_reverse_target() {
+    local target="$1"
+
+    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.check")${target}"
+
+    # 检查是否为空
+    if [[ -z "${target}" ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.empty")"
+        return 1
+    fi
+
+    # 检查格式: host:port
+    if [[ ! "${target}" =~ ^[a-zA-Z0-9._-]+:[0-9]+$ ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.format_error")${target}"
+        return 1
+    fi
+
+    # 提取端口并检查范围
+    local port="${target##*:}"
+    if [[ "${port}" -lt 1 || "${port}" -gt 65535 ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.range_error")${port}"
+        return 1
+    fi
+
+    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.valid")${target}"
+    return 0
+}
+
+# =============================================================================
 # 函数名称: main
 # 功能描述: 脚本的主入口函数。根据传入的第一个参数 (option)
 #           调用相应的检查函数并输出结果。
@@ -705,6 +741,7 @@ function main() {
     --tag) check_xray_config_exists "$@" >&2 ;;   # 检查 Xray 配置文件
     --xray) check_xray_version_exists "$@" >&2 ;; # 检查 Xray 版本
     --email) validate_email "$@" >&2 ;;           # 验证邮箱
+    --reverse-target) check_reverse_target "$@" >&2 ;; # 检查反向代理目标地址
     esac
 }
 

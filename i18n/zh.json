@@ -66,6 +66,7 @@
       "option7": "CDN 独立配置",
       "option8": "Hysteria2 (HY2)",
       "option9": "Shadowsocks 2022 (SS2022)",
+      "option10": "多节点组合配置",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
       "info3": "XHTTP 全场景通吃的时代正式到来(详情: https://github.com/XTLS/Xray-core/discussions/4113    )",
@@ -76,7 +77,8 @@
       "info6": "通过 Nginx 的 SNI 分流共用 443 端口，实现 REALITY 直连与过 CDN 共存",
       "info7": "仅启用 CDN（XHTTP over TLS），不包含 REALITY 直连",
       "info8": "Hysteria2 基于 QUIC(UDP) 协议，高性能低延迟，需要 TLS 证书(域名/IP)",
-      "info9": "Shadowsocks 2022 是最经典的新一代 Shadowsocks 协议，高安全性，使用预共享密钥 (PSK)"
+      "info9": "Shadowsocks 2022 是最经典的新一代 Shadowsocks 协议，高安全性，使用预共享密钥 (PSK)",
+      "info10": "一次生成多个节点，可为每个节点选择协议、端口和相关参数"
     },
     "web_config": {
       "title": "Web 配置",
@@ -94,11 +96,13 @@
       "option4": "修改 Xray 端口",
       "option5": "开/关 geodata 自动更新",
       "option6": "设置语言",
+      "option7": "反向代理(内网穿透)",
       "info1": "更新配置功能为整个配置的更新",
       "info2": "管理屏蔽或 WARP 分流",
       "info3": "包含 Nginx 更新，修改域名，修改 Web 配置等",
       "info4": "(非 SNI 配置) 修改 Xray 监听端口，并自动重启服务",
-      "info5": "geodata 由 https://github.com/Loyalsoldier/v2ray-rules-dat  提供"
+      "info5": "geodata 由 https://github.com/Loyalsoldier/v2ray-rules-dat  提供",
+      "info6": "配置 Xray VLESS 反向代理，将公网端口映射到内网服务"
     },
     "route_management": {
       "title": "自定义分流",
@@ -128,6 +132,15 @@
       "option7": "重置 Cloudreve v3 版管理员数据",
       "info1": "Reality 对应的域名",
       "info2": "套用 CDN 的域名"
+    },
+    "reverse": {
+      "title": "反向代理(内网穿透)",
+      "option1": "启用反向代理",
+      "option2": "禁用反向代理",
+      "option3": "查看内网端配置模板",
+      "info1": "在当前 Xray 配置中启用反向代理功能(入口转发模式)",
+      "info2": "从当前 Xray 配置中移除反向代理功能",
+      "info3": "生成内网端 Xray 配置模板，供内网设备使用"
     }
   },
   "handler": {
@@ -196,6 +209,15 @@
     },
     "mldsa": {
       "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)"
+    },
+    "reverse": {
+      "enabled": "反向代理已启用",
+      "disabled": "反向代理已禁用",
+      "not_installed": "Xray 尚未安装，请先安装 Xray",
+      "bridge_title": "===== 内网端配置模板 =====",
+      "bridge_hint": "请将以下配置保存为内网设备的 Xray config.json",
+      "bridge_info": "内网端需要安装 Xray 并使用此配置运行",
+      "no_reverse": "反向代理未启用，请先启用反向代理"
     }
   },
   "read": {
@@ -226,7 +248,10 @@
     "warp_ip": "请输入分流到 WARP 的 ip",
     "warp_domain": "请输入分流到 WARP 的 domain",
     "block_ip": "请输入分流到 block 的 ip",
-    "block_domain": "请输入分流到 block 的 domain"
+    "block_domain": "请输入分流到 block 的 domain",
+    "reverse_port": "请输入反向代理入口端口 (默认: 8443): ",
+    "reverse_target": "请输入内网服务目标地址 (格式: IP:PORT, 例如 192.168.1.100:80): ",
+    "reverse_uuid": "请输入反向代理专用 UUID (留空自动生成): "
   },
   "share": {
     "client": "客户端配置",
@@ -312,6 +337,12 @@
       "check": "正在检查 Xray 版本是否存在：",
       "exist": "Xray 版本存在：v",
       "not_exist": "Xray 版本不存在：v"
+    },
+    "reverse_target": {
+      "check": "正在检查内网服务目标地址合法性：",
+      "valid": "内网服务目标地址格式合法：",
+      "empty": "内网服务目标地址不能为空",
+      "format_error": "格式不合法，请使用 IP:PORT 或 hostname:PORT 格式："
     },
     "email": {
       "check": "正在校验电子邮箱合法性：",
