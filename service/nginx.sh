@@ -548,16 +548,46 @@ function gen_cflags() {
 # =============================================================================
 function prebuilt_install() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading')"
-    # 获取当前仓库的 GitHub Releases 最新版本信息
+    # 获取当前仓库的 GitHub Releases，并按当前 CPU 架构选择最新的可用产物。
     local repo_owner="haiyan1301"
     local repo_name="Xray-script"
-    local api_url="https://api.github.com/repos/${repo_owner}/${repo_name}/releases/latest"
+    local machine_arch="$(uname -m)"
+    local release_arch
+    case "${machine_arch}" in
+    x86_64 | amd64)
+        release_arch="amd64"
+        ;;
+    aarch64 | arm64)
+        release_arch="arm64"
+        ;;
+    *)
+        print_error "Unsupported architecture for prebuilt Nginx: ${machine_arch}"
+        ;;
+    esac
+
+    local api_url="https://api.github.com/repos/${repo_owner}/${repo_name}/releases?per_page=100"
     local release_info
     release_info="$(curl -fsSL "${api_url}" 2>/dev/null)" || print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.fetch_fail')"
 
-    # 从 release 信息中提取 tar.gz 下载 URL（排除 .sha256 文件）
+    # 新产物带架构后缀；AMD64 同时兼容已有的无架构后缀历史产物。
     local download_url
-    download_url="$(echo "${release_info}" | jq -r '.assets[] | select(.name | endswith(".tar.gz") and (endswith(".sha256") | not)) | .browser_download_url' | head -1)"
+    download_url="$(echo "${release_info}" | jq -r --arg arch "${release_arch}" '
+        [
+            .[]
+            | select(.draft == false and .prerelease == false)
+            | .assets[]
+            | select(
+                .name
+                | if $arch == "arm64" then
+                    endswith("-arm64.tar.gz")
+                  else
+                    endswith("-amd64.tar.gz")
+                    or test("^[0-9]{8}-[0-9]{6}-nginx-[0-9]+\\.[0-9]+\\.[0-9]+-boringssl-[0-9]{8}-[0-9a-f]{12}\\.tar\\.gz$")
+                  end
+            )
+            | .browser_download_url
+        ][0] // empty
+    ')"
     if [[ -z "${download_url}" ]]; then
         print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.no_release')"
     fi

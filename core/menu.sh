@@ -251,6 +251,7 @@ function menu_config() {
     echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option6")"
     # 打印选项 7
     echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option7")"
+    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option8")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
@@ -266,6 +267,7 @@ function menu_config() {
     echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info5")"
     # 打印选项 7 的说明信息
     echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info6")"
+    echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info7")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -374,6 +376,19 @@ function menu_reverse() {
     echo -e "------------------------------------------------------"
 }
 
+function menu_lan() {
+    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option1")"
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option2")"
+    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option3")"
+    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option4")"
+    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option5")"
+    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option6")"
+    echo -e "------------------------------------------------------"
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.info")"
+    echo -e "------------------------------------------------------"
+}
+
 # =============================================================================
 # 函数名称: print_banner
 # 功能描述: 随机打印一个 ASCII 艺术风格的 Banner。
@@ -409,6 +424,7 @@ function print_status() {
     local CONFIG_TAG=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')
     local WARP_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')
     local REVERSE_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    local LAN_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')
 
     # 从 i18n 数据中读取状态描述文本
     local not_installed=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.not_installed")
@@ -424,6 +440,7 @@ function print_status() {
     [[ ${WARP_STATUS} -eq 1 ]] && WARP_STATUS="${GREEN}${enabled}${NC}" || WARP_STATUS="${RED}${disabled}${NC}"
     # 根据反向代理状态，设置显示颜色和文本
     [[ ${REVERSE_STATUS} -eq 1 ]] && REVERSE_STATUS="${GREEN}${enabled}${NC}" || REVERSE_STATUS="${RED}${disabled}${NC}"
+    [[ ${LAN_STATUS} -eq 1 ]] && LAN_STATUS="${GREEN}${enabled}${NC}" || LAN_STATUS="${RED}${disabled}${NC}"
 
     # 打印状态信息
     echo -e "------------------------------------------------------"
@@ -431,6 +448,7 @@ function print_status() {
     echo -e "CONFIG        : ${CONFIG_TAG}"
     echo -e "WARP Proxy    : ${WARP_STATUS}"
     echo -e "Reverse Proxy : ${REVERSE_STATUS}"
+    echo -e "Virtual LAN   : ${LAN_STATUS}"
     echo -e "------------------------------------------------------"
     echo
 }
@@ -499,6 +517,7 @@ function main() {
     --route) menu_route >&2 ;;            # 显示路由管理菜单
     --sni) menu_sni_config >&2 ;;         # 显示 SNI 配置菜单
     --reverse) menu_reverse >&2 ;;         # 显示反向代理配置菜单
+    --lan) menu_lan >&2 ;;                 # 显示异地组网菜单
     --banner) print_banner >&2 ;;         # 显示 Banner
     --status) print_status >&2 ;;         # 显示状态信息
     esac

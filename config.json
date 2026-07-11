@@ -39,7 +39,21 @@
     "reverseUuid": "",
     "reversePort": 8443,
     "reverseTarget": "",
-    "reverseMode": ""
+    "reverseMode": "",
+    "lan": {
+      "enabled": 0,
+      "role": "hub",
+      "port": 9443,
+      "target": "",
+      "serverName": "",
+      "serverAddress": "",
+      "privateKey": "",
+      "publicKey": "",
+      "shortId": "",
+      "tunName": "xray0",
+      "mtu": 1400,
+      "sites": []
+    }
   },
   "nginx": {
     "version": "",

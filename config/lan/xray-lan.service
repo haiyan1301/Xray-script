@@ -1,0 +1,20 @@
+[Unit]
+Description=Xray routed virtual LAN edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=@XRAY_BIN@ run -config /usr/local/etc/xray-lan/config.json
+ExecStartPost=/usr/local/libexec/xray-lan-net start
+ExecStopPost=/usr/local/libexec/xray-lan-net stop
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

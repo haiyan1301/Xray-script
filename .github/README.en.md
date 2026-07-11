@@ -20,6 +20,10 @@
   * Add custom block rules
 * Cloudflare WARP Proxy toggle (🐳 Docker deployment)
 * Geodata auto-update toggle
+* Site-to-site routed virtual LAN:
+  * Connects multiple sites with Xray's native TUN inbound and VLESS reverse channels
+  * Supports non-overlapping private IPv4 CIDRs and Linux host/gateway modes
+  * Generates isolated credentials, restricted routes, and a deployable systemd package for each site
 * Xray ports default/fill:
   * VLESS-mKCP: Randomly generated
   * ALL-REALITY: 443
@@ -91,6 +95,14 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
     ```sh
     bash ${HOME}/Xray-script.sh --fallback
     ```
+
+  * Manage site-to-site LAN
+
+    ```sh
+    bash ${HOME}/Xray-script.sh --lan
+    ```
+
+    Initialize the Hub, add at least two sites, and export each edge package. An edge requires Xray-core with TUN support, `jq`, and `iproute2`; gateway mode also requires `iptables`. Only declared remote private CIDRs are routed. Layer-2 broadcast, mDNS, and network-neighborhood discovery are not supported.
 
 * Quick start (with interface)
   ```sh

@@ -358,6 +358,32 @@ function processes_reverse() {
     esac
 }
 
+function processes_lan() {
+    exec_menu '--lan'
+    local choose=$(echo $?)
+    case ${choose} in
+    1)
+        exec_handler '--lan-enable' || return 1
+        exec_handler '--restart'
+        ;;
+    2)
+        exec_handler '--lan-add' || return 1
+        exec_handler '--restart'
+        ;;
+    3)
+        exec_handler '--lan-remove' || return 1
+        exec_handler '--restart'
+        ;;
+    4) exec_handler '--lan-list' ;;
+    5) exec_handler '--lan-export' ;;
+    6)
+        exec_handler '--lan-disable' || return 1
+        exec_handler '--restart'
+        ;;
+    *) exit 0 ;;
+    esac
+}
+
 function processes_config() {
     # 显示主配置管理菜单
     exec_menu '--management'
@@ -372,6 +398,7 @@ function processes_config() {
     5) exec_handler '--geodata-cron' ;; # 选择 5：配置 GeoData Cron 任务
     6) processes_language ;;            # 选择 6：设置语言
     7) processes_reverse ;;             # 选择 7：配置反向代理
+    8) processes_lan ;;                 # 选择 8：配置异地组网
     *) exit 0 ;;                        # 其他情况：退出脚本
     esac
 }
@@ -441,6 +468,7 @@ function main() {
         exec_handler '--restart'
         exec_handler '--share'
         ;;
+    --lan) processes_lan ;;
     # 对于其他参数，进入主索引流程，并将第二个参数传递给它
     *) processes_index "$2" ;;
     esac

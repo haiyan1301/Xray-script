@@ -135,6 +135,7 @@ function show_help() {
   --xhttp        快速安装 XHTTP 配置
   --fallback     快速安装 Fallback 配置
   --multi        交互式安装多节点组合配置
+  --lan          管理异地组网
   --lang=<code>  设置语言 (zh/en/auto)
   -d <path>      自定义安装目录
   --help         显示此帮助信息
@@ -144,6 +145,7 @@ function show_help() {
   bash $0                    # 启动交互式菜单
   bash $0 --vision           # 快速安装 Vision
   bash $0 --multi            # 交互式生成多个节点
+  bash $0 --lan              # 管理异地组网
   bash $0 --lang=en          # 使用英文界面
   bash $0 -d /opt/xray       # 安装到自定义目录
 EOF
@@ -507,7 +509,7 @@ function main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
         # 快速安装选项
-        --vision | --xhttp | --fallback | --multi)
+        --vision | --xhttp | --fallback | --multi | --lan)
             QUICK_INSTALL="${1}"
             ;;
         # 自定义安装目录选项

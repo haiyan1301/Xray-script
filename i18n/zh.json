@@ -97,12 +97,14 @@
       "option5": "开/关 geodata 自动更新",
       "option6": "设置语言",
       "option7": "反向代理(内网穿透)",
+      "option8": "异地组网(虚拟局域网)",
       "info1": "更新配置功能为整个配置的更新",
       "info2": "管理屏蔽或 WARP 分流",
       "info3": "包含 Nginx 更新，修改域名，修改 Web 配置等",
       "info4": "(非 SNI 配置) 修改 Xray 监听端口，并自动重启服务",
       "info5": "geodata 由 https://github.com/Loyalsoldier/v2ray-rules-dat  提供",
-      "info6": "配置 Xray VLESS 反向代理，将公网端口映射到内网服务"
+      "info6": "配置 Xray VLESS 反向代理，将公网端口映射到内网服务",
+      "info7": "通过 Xray TUN 和专用 VLESS 反向通道连接多个 IPv4 局域网"
     },
     "route_management": {
       "title": "自定义分流",
@@ -141,6 +143,16 @@
       "info1": "在当前 Xray 配置中启用反向代理功能(入口转发模式)",
       "info2": "从当前 Xray 配置中移除反向代理功能",
       "info3": "生成内网端 Xray 配置模板，供内网设备使用"
+    },
+    "lan": {
+      "title": "异地组网(虚拟局域网)",
+      "option1": "启用并初始化 Hub",
+      "option2": "添加地点",
+      "option3": "删除地点",
+      "option4": "查看状态和地点",
+      "option5": "导出地点端部署包",
+      "option6": "禁用异地组网",
+      "info": "首版支持 Linux、IPv4、不重叠私网网段；只路由声明的远端网段，不修改默认路由"
     }
   },
   "handler": {
@@ -218,6 +230,43 @@
       "bridge_hint": "请将以下配置保存为内网设备的 Xray config.json",
       "bridge_info": "内网端需要安装 Xray 并使用此配置运行",
       "no_reverse": "反向代理未启用，请先启用反向代理"
+    },
+    "lan": {
+      "error": "错误",
+      "not_enabled": "异地组网尚未启用，请先初始化 Hub",
+      "already_enabled": "异地组网 Hub 已启用",
+      "xray_required": "需要先安装支持 TUN 的 Xray-core",
+      "port_prompt": "请输入组网专用 TCP 端口 [9443]: ",
+      "port_invalid": "端口无效或与现有节点冲突",
+      "target_prompt": "请输入 REALITY 目标域名",
+      "server_address_prompt": "请输入 Hub 公网 IP 或域名: ",
+      "host_invalid": "IP 或域名格式无效",
+      "keygen_failed": "组网密钥生成失败",
+      "enabled": "异地组网 Hub 已启用",
+      "disabled": "异地组网已禁用，地点数据仍保留",
+      "site_id_prompt": "地点 ID（小写字母/数字/-/_）: ",
+      "site_id_invalid": "地点 ID 格式无效，最长 32 个字符",
+      "site_exists": "地点 ID 已存在",
+      "site_name_prompt": "地点名称（默认使用 ID）: ",
+      "cidrs_prompt": "本站局域网网段（逗号分隔，例如 192.168.10.0/24）: ",
+      "cidrs_invalid": "仅支持 /8 到 /32 的 IPv4 私网 CIDR",
+      "cidrs_overlap": "该网段与已有地点重叠",
+      "mode_prompt": "运行模式 [1. 本机加入 / 2. 局域网网关]（默认 1）: ",
+      "interface_prompt": "本地局域网接口名（例如 eth1/br0）: ",
+      "site_added": "地点已添加",
+      "redeploy_required": "拓扑已变化，请将刷新后的部署包重新安装到现有地点端",
+      "status_title": "===== 异地组网状态 =====",
+      "status_enabled": "启用状态",
+      "status_port": "Hub 端口",
+      "status_server": "Hub 地址",
+      "status_sites": "地点数量",
+      "remove_prompt": "请输入要删除的地点 ID: ",
+      "site_not_found": "地点不存在",
+      "site_removed": "地点已删除",
+      "no_sites": "没有可导出的地点",
+      "export_prompt": "请输入要导出的地点 ID: ",
+      "exported": "地点端部署目录",
+      "archive": "地点端压缩包"
     }
   },
   "read": {

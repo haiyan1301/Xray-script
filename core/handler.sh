@@ -54,6 +54,7 @@ readonly SSL_PATH="${SERVICE_DIR}/ssl.sh"
 readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh"
 readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"
 readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"
+readonly LAN_PATH="${CUR_DIR}/lan.sh"
 readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"
@@ -64,6 +65,13 @@ declare XRAY_CONFIG=""
 declare LANG_PARAM=''
 declare I18N_DATA=''
 declare -A CONFIG_DATA
+
+source "${LAN_PATH}"
+
+function reset_config_data() {
+    unset CONFIG_DATA
+    declare -gA CONFIG_DATA
+}
 
 # =============================================================================
 # handler.sh 专用函数
@@ -366,14 +374,36 @@ function map_protocol_choice_to_tag() {
     esac
 }
 
+function print_multi_protocol_menu() {
+    echo -e "------------------ Multi Node Protocol ------------------" >&2
+    echo -e "${GREEN}1.${NC} mKCP" >&2
+    echo -e "${GREEN}2.${NC} Vision (${GREEN}default${NC})" >&2
+    echo -e "${GREEN}3.${NC} XHTTP" >&2
+    echo -e "${GREEN}4.${NC} Trojan" >&2
+    echo -e "${GREEN}5.${NC} Fallback" >&2
+    echo -e "${GREEN}8.${NC} Hysteria2" >&2
+    echo -e "${GREEN}9.${NC} Shadowsocks 2022" >&2
+    echo -e "----------------------------------------------------------" >&2
+}
+
 function read_multi_protocol_tag() {
     local node_index="$1"
     local choose config_tag
 
     while true; do
         echo -e "${GREEN}[Multi]${NC} Select protocol for node ${node_index}" >&2
-        bash "${MENU_PATH}" '--config'
-        choose=$?
+        print_multi_protocol_menu
+        printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC} $(echo "$I18N_DATA" | jq -r ".menu.choose"): " >&2
+        read -r choose
+        choose="${choose:-2}"
+
+        if [[ "${choose}" =~ ^[0-9]+$ ]]; then
+            choose="$(echo "${choose}" | sed 's/^0*//')"
+            choose="${choose:-0}"
+        else
+            choose=''
+        fi
+
         config_tag="$(map_protocol_choice_to_tag "${choose}")"
 
         if [[ -n "${config_tag}" ]]; then
@@ -491,7 +521,7 @@ function handler_read_multi_xray_config() {
     local has_vless='n'
     local has_hy2='n'
 
-    CONFIG_DATA=()
+    reset_config_data
     CONFIG_DATA['tag']='multi'
 
     if echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset' | grep -Eq '^(0|1)$'; then
@@ -520,7 +550,7 @@ function handler_read_multi_xray_config() {
         local config_tag
         config_tag="$(read_multi_protocol_tag "${i}")"
 
-        CONFIG_DATA=()
+        reset_config_data
         CONFIG_DATA['tag']="${config_tag}"
 
         exec_read 'port'
@@ -613,12 +643,30 @@ function handler_read_multi_xray_config() {
         esac
     fi
 
+    local multi_vless_enc_enable="${CONFIG_DATA['vless_enc_enable']}"
+    local multi_vless_enc_decryption="${CONFIG_DATA['vless_enc_decryption']}"
+    local multi_vless_enc_encryption="${CONFIG_DATA['vless_enc_encryption']}"
+    local multi_hy2_cert_source="${CONFIG_DATA['hy2_cert_source']}"
+    local multi_hy2_cert_domain="${CONFIG_DATA['hy2_cert_domain']}"
+    local multi_hy2_cert_email="${CONFIG_DATA['hy2_cert_email']}"
+    local multi_hy2_cert_fullchain="${CONFIG_DATA['hy2_cert_fullchain']}"
+    local multi_hy2_cert_privkey="${CONFIG_DATA['hy2_cert_privkey']}"
+
+    reset_config_data
     CONFIG_DATA['tag']='multi'
     CONFIG_DATA['rules']="${multi_rules}"
     CONFIG_DATA['block-bt']="${multi_block_bt}"
     CONFIG_DATA['block-cn']="${multi_block_cn}"
     CONFIG_DATA['block-ad']="${multi_block_ad}"
     CONFIG_DATA['nodes_json']="${nodes}"
+    CONFIG_DATA['vless_enc_enable']="${multi_vless_enc_enable}"
+    CONFIG_DATA['vless_enc_decryption']="${multi_vless_enc_decryption}"
+    CONFIG_DATA['vless_enc_encryption']="${multi_vless_enc_encryption}"
+    CONFIG_DATA['hy2_cert_source']="${multi_hy2_cert_source}"
+    CONFIG_DATA['hy2_cert_domain']="${multi_hy2_cert_domain}"
+    CONFIG_DATA['hy2_cert_email']="${multi_hy2_cert_email}"
+    CONFIG_DATA['hy2_cert_fullchain']="${multi_hy2_cert_fullchain}"
+    CONFIG_DATA['hy2_cert_privkey']="${multi_hy2_cert_privkey}"
 }
 
 function reset_json_fields() {
@@ -818,6 +866,38 @@ function handler_script_config() {
     local XRAY_RULES_CN="${CONFIG_DATA['block-cn']}"
     # 获取 block ad 状态
     local XRAY_RULES_AD="${CONFIG_DATA['block-ad']}"
+    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
+        local MULTI_NODES="${CONFIG_DATA['nodes_json']:-[]}"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset != "n" then .xray.rules.reset = 1 else .xray.rules.reset = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg bt "${XRAY_RULES_BT,,}" ' if $bt != "n" then .xray.rules.bt = 1 else .xray.rules.bt = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn != "n" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad != "n" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg tag "${CONFIG_TAG}" '.xray.tag = $tag')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${MULTI_NODES}" '.xray.nodes = $nodes')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.port = ((.xray.nodes[0].port // 443) | tonumber)')"
+        if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
+        fi
+        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_source']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['hy2_cert_source']}" '.xray.hy2CertSource = $cs')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_domain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cd "${CONFIG_DATA['hy2_cert_domain']}" '.xray.hy2CertDomain = $cd')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_email']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ce "${CONFIG_DATA['hy2_cert_email']}" '.nginx.ca = $ce')"
+        fi
+        if [[ -n "${CONFIG_DATA['hy2_cert_fullchain']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['hy2_cert_fullchain']}" '.xray.hy2CertFullchain = $cf')"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['hy2_cert_privkey']}" '.xray.hy2CertPrivkey = $ck')"
+        fi
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        return 0
+    fi
     # 获取端口，默认 443
     local XRAY_PORT="${CONFIG_DATA['port']:-443}"
     # 获取或生成 UUID
@@ -850,34 +930,6 @@ function handler_script_config() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn != "n" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
     # 更新脚本配置中的 block ad 状态
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad != "n" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
-    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
-        local MULTI_NODES="${CONFIG_DATA['nodes_json']:-[]}"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg tag "${CONFIG_TAG}" '.xray.tag = $tag')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${MULTI_NODES}" '.xray.nodes = $nodes')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.port = ((.xray.nodes[0].port // 443) | tonumber)')"
-        if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
-        fi
-        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-        fi
-        if [[ -n "${CONFIG_DATA['hy2_cert_source']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['hy2_cert_source']}" '.xray.hy2CertSource = $cs')"
-        fi
-        if [[ -n "${CONFIG_DATA['hy2_cert_domain']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cd "${CONFIG_DATA['hy2_cert_domain']}" '.xray.hy2CertDomain = $cd')"
-        fi
-        if [[ -n "${CONFIG_DATA['hy2_cert_email']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ce "${CONFIG_DATA['hy2_cert_email']}" '.nginx.ca = $ce')"
-        fi
-        if [[ -n "${CONFIG_DATA['hy2_cert_fullchain']:-}" ]]; then
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cf "${CONFIG_DATA['hy2_cert_fullchain']}" '.xray.hy2CertFullchain = $cf')"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ck "${CONFIG_DATA['hy2_cert_privkey']}" '.xray.hy2CertPrivkey = $ck')"
-        fi
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-        return 0
-    fi
     # 根据配置标签更新特定字段
     case "${CONFIG_TAG,,}" in
     trojan)
@@ -1385,6 +1437,7 @@ function handler_multi_xray_config() {
     if [[ "${reverse_status}" -eq 1 ]]; then
         handler_reverse_config
     fi
+    handler_apply_lan_config
 
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
@@ -1396,6 +1449,7 @@ function handler_multi_xray_config() {
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
         open_xray_firewall_port "${reverse_port}" tcp
     fi
+    handler_lan_open_firewall
 }
 
 function handler_xray_config() {
@@ -1569,6 +1623,7 @@ function handler_xray_config() {
     if [[ "${reverse_status}" -eq 1 ]]; then
         handler_reverse_config
     fi
+    handler_apply_lan_config
 
     # 获取更新后的路由规则
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
@@ -1617,6 +1672,7 @@ function handler_xray_config() {
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
         open_xray_firewall_port "${reverse_port}" tcp
     fi
+    handler_lan_open_firewall
 }
 
 # =============================================================================
@@ -3021,14 +3077,13 @@ function handler_reverse_share() {
             --argjson port "${xray_port}" \
             --arg uuid "${reverse_uuid}" \
             '{
-                "servers": [{
-                    "address": $addr,
-                    "port": $port,
-                    "users": [{
-                        "id": $uuid,
-                        "encryption": "none"
-                    }]
-                }]
+                "address": $addr,
+                "port": $port,
+                "id": $uuid,
+                "encryption": "none",
+                "reverse": {
+                    "tag": "reverse-in"
+                }
             }')
     else
         vless_settings=$(jq -n \
@@ -3037,15 +3092,14 @@ function handler_reverse_share() {
             --arg uuid "${reverse_uuid}" \
             --arg flow "xtls-rprx-vision" \
             '{
-                "servers": [{
-                    "address": $addr,
-                    "port": $port,
-                    "users": [{
-                        "id": $uuid,
-                        "flow": $flow,
-                        "encryption": "none"
-                    }]
-                }]
+                "address": $addr,
+                "port": $port,
+                "id": $uuid,
+                "flow": $flow,
+                "encryption": "none",
+                "reverse": {
+                    "tag": "reverse-in"
+                }
             }')
     fi
 
@@ -3133,10 +3187,7 @@ function handler_reverse_share() {
                 {
                     "protocol": "vless",
                     "settings": $vless_s,
-                    "streamSettings": $stream_s,
-                    "reverse": {
-                        "tag": "reverse-in"
-                    }
+                    "streamSettings": $stream_s
                 }
             ]
         }')
@@ -3299,6 +3350,12 @@ function main() {
     --traffic) handler_traffic ;;               # 显示流量统计
     --reverse) handler_reverse_toggle ;;         # 开启/关闭反向代理
     --reverse-share) handler_reverse_share ;;   # 查看内网端配置模板
+    --lan-enable) handler_lan_enable ;;          # 启用异地组网 Hub
+    --lan-disable) handler_lan_disable ;;        # 禁用异地组网 Hub
+    --lan-add) handler_lan_add_site ;;           # 添加组网站点
+    --lan-remove) handler_lan_remove_site ;;     # 删除组网站点
+    --lan-list) handler_lan_list ;;              # 查看组网站点
+    --lan-export) handler_lan_export_site ;;     # 导出站点端配置包
     --change-port)
         handler_change_xray_port  # 处理 Xray 端口配置
         handler_xray_config       # 更新 Xray 配置

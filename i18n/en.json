@@ -97,12 +97,14 @@
       "option5": "Enable/Disable geodata auto-update",
       "option6": "Language",
       "option7": "Reverse Proxy (NAT Traversal)",
+      "option8": "Site-to-Site LAN",
       "info1": "Full config update",
       "info2": "Manage blocking or WARP routing",
       "info3": "Includes Nginx update, domain change, web config",
       "info4": "(Non-SNI) Change Xray listen port and restart service",
       "info5": "geodata provided by  https://github.com/Loyalsoldier/v2ray-rules-dat ",
-      "info6": "Configure Xray VLESS reverse proxy, map public port to internal network service"
+      "info6": "Configure Xray VLESS reverse proxy, map public port to internal network service",
+      "info7": "Connect multiple IPv4 LANs through Xray TUN and dedicated VLESS reverse channels"
     },
     "route_management": {
       "title": "Custom Routing",
@@ -141,6 +143,16 @@
       "info1": "Enable reverse proxy in current Xray config (port forwarding mode)",
       "info2": "Remove reverse proxy from current Xray config",
       "info3": "Generate bridge-side Xray config template for internal network devices"
+    },
+    "lan": {
+      "title": "Site-to-Site Virtual LAN",
+      "option1": "Enable and initialize Hub",
+      "option2": "Add site",
+      "option3": "Remove site",
+      "option4": "Show status and sites",
+      "option5": "Export edge deployment package",
+      "option6": "Disable virtual LAN",
+      "info": "Initial release supports Linux, IPv4, and non-overlapping private CIDRs; only declared remote CIDRs are routed"
     }
   },
   "handler": {
@@ -218,6 +230,43 @@
       "bridge_hint": "Save the following config as Xray config.json on the internal network device",
       "bridge_info": "The bridge device needs Xray installed and running with this config",
       "no_reverse": "Reverse proxy is not enabled, please enable it first"
+    },
+    "lan": {
+      "error": "Error",
+      "not_enabled": "Virtual LAN is not enabled; initialize the Hub first",
+      "already_enabled": "Virtual LAN Hub is already enabled",
+      "xray_required": "Xray-core with TUN support must be installed first",
+      "port_prompt": "Enter dedicated Hub TCP port [9443]: ",
+      "port_invalid": "Port is invalid or conflicts with an existing node",
+      "target_prompt": "Enter REALITY target domain",
+      "server_address_prompt": "Enter Hub public IP or domain: ",
+      "host_invalid": "Invalid IP or domain",
+      "keygen_failed": "Failed to generate virtual LAN keys",
+      "enabled": "Virtual LAN Hub enabled",
+      "disabled": "Virtual LAN disabled; site data was retained",
+      "site_id_prompt": "Site ID (lowercase letters/digits/-/_): ",
+      "site_id_invalid": "Invalid site ID; maximum length is 32 characters",
+      "site_exists": "Site ID already exists",
+      "site_name_prompt": "Site name (defaults to ID): ",
+      "cidrs_prompt": "Local private CIDRs (comma-separated, e.g. 192.168.10.0/24): ",
+      "cidrs_invalid": "Only private IPv4 CIDRs from /8 to /32 are supported",
+      "cidrs_overlap": "CIDR overlaps an existing site",
+      "mode_prompt": "Mode [1. Local host / 2. LAN gateway] (default 1): ",
+      "interface_prompt": "Physical LAN interface (e.g. eth1/br0): ",
+      "site_added": "Site added",
+      "redeploy_required": "Topology changed; reinstall the refreshed packages on existing edges",
+      "status_title": "===== Virtual LAN Status =====",
+      "status_enabled": "Enabled",
+      "status_port": "Hub port",
+      "status_server": "Hub address",
+      "status_sites": "Sites",
+      "remove_prompt": "Enter site ID to remove: ",
+      "site_not_found": "Site not found",
+      "site_removed": "Site removed",
+      "no_sites": "There are no sites to export",
+      "export_prompt": "Enter site ID to export: ",
+      "exported": "Edge deployment directory",
+      "archive": "Edge archive"
     }
   },
   "read": {

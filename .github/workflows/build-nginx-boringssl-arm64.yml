@@ -1,4 +1,4 @@
-name: Build Nginx with BoringSSL
+name: Build Nginx with BoringSSL (arm64)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
       - master
     paths:
       - 'service/nginx.sh'
-      - '.github/workflows/build-nginx-boringssl.yml'
+      - '.github/workflows/build-nginx-boringssl-arm64.yml'
   schedule:
     - cron: '17 3 * * 1'
 
@@ -16,19 +16,19 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-nginx-boringssl
+  group: build-nginx-boringssl-arm64
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build and publish Nginx/BoringSSL amd64 binary
-    runs-on: ubuntu-24.04
+    name: Build and publish Nginx/BoringSSL arm64 binary
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
 
     env:
       NGINX_PREFIX: /usr/local/nginx
       NGINX_LOG_PATH: /var/log/nginx
-      BUILD_ROOT: ${{ github.workspace }}/nginx-boringssl-build
+      BUILD_ROOT: ${{ github.workspace }}/nginx-boringssl-arm64-build
 
     steps:
       - name: Checkout repository
@@ -103,9 +103,9 @@ jobs:
           libcrypto_path="$(find "${BUILD_ROOT}/boringssl/build" -name libcrypto.a -print -quit)"
           cp "${libssl_path}" "${shim}/lib/"
           cp "${libcrypto_path}" "${shim}/lib/"
-          # Dummy Makefile at boringssl root — Nginx runs 'cd $OPENSSL && make'
+          # Dummy Makefile at boringssl root - Nginx runs 'cd $OPENSSL && make'
           printf 'all:\n\t@echo "BoringSSL already built"\ninstall:\n\t@echo "skip"\ninstall_sw:\n\t@echo "skip"\nclean:\n\t@echo "skip"\n' > "${BUILD_ROOT}/boringssl/Makefile"
-          # Dummy config script — safety net in case the Makefile recipe fires
+          # Dummy config script - safety net in case the Makefile recipe fires
           printf '#!/bin/sh\nexit 0\n' > "${BUILD_ROOT}/boringssl/config"
           chmod +x "${BUILD_ROOT}/boringssl/config"
 
@@ -118,7 +118,7 @@ jobs:
       - name: Configure and compile Nginx
         run: |
           set -euxo pipefail
-          test "$(uname -m)" = "x86_64"
+          test "$(uname -m)" = "aarch64"
           cd "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}"
 
           sed -i "s/OPTIMIZE[ \\t]*=>[ \\t]*'-O'/OPTIMIZE          => '-O3'/g" src/http/modules/perl/Makefile.PL
@@ -181,12 +181,12 @@ jobs:
           # Fix link order: -lstdc++ must follow libcrypto.a (not precede it).
           # Patch the generated objs/Makefile to insert -lstdc++ right after libcrypto.a.
           sed -i 's|libcrypto\.a|libcrypto.a -lstdc++|g' objs/Makefile
-          # Touch ssl.h AFTER sed — sed -i updates objs/Makefile mtime,
+          # Touch ssl.h AFTER sed - sed -i updates objs/Makefile mtime,
           # so ssl.h must be touched last to stay newer and prevent the
           # OpenSSL build recipe from re-triggering during make.
           touch "${BUILD_ROOT}/boringssl/.openssl/include/openssl/ssl.h"
           make -j"$(nproc)"
-          readelf -h objs/nginx | grep -F 'X86-64'
+          readelf -h objs/nginx | grep -F 'AArch64'
           objs/nginx -V
 
       - name: Package binary and metadata
@@ -197,15 +197,15 @@ jobs:
           if ! id -u nginx &>/dev/null; then
             sudo useradd --system --no-create-home --shell /usr/sbin/nologin nginx || true
           fi
-          test "$(uname -m)" = "x86_64"
+          test "$(uname -m)" = "aarch64"
           release_time="$(date -u +%Y%m%d-%H%M%S)"
-          release_name="${release_time}-nginx-${{ steps.nginx.outputs.nginx_semver }}-boringssl-${{ steps.boringssl.outputs.boringssl_version }}-amd64"
+          release_name="${release_time}-nginx-${{ steps.nginx.outputs.nginx_semver }}-boringssl-${{ steps.boringssl.outputs.boringssl_version }}-arm64"
           package_dir="${BUILD_ROOT}/${release_name}"
           mkdir -p "${package_dir}/sbin" "${package_dir}/modules" "${package_dir}/logs"
           cp "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs/nginx" "${package_dir}/sbin/nginx"
           find "${BUILD_ROOT}/${{ steps.nginx.outputs.nginx_version }}/objs" -maxdepth 1 -name '*.so' -exec cp {} "${package_dir}/modules/" \; 2>/dev/null || true
           printf 'Release: %s\nBuilt at: %s\nArchitecture: %s\nNginx version: %s\nNginx source: https://nginx.org/download/%s.tar.gz\nBoringSSL version: %s\nBoringSSL source: https://github.com/google/boringssl\nPrefix: %s\n' \
-            "${release_name}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "amd64 (x86_64)" "${{ steps.nginx.outputs.nginx_semver }}" "${{ steps.nginx.outputs.nginx_version }}" "${{ steps.boringssl.outputs.boringssl_version }}" "${NGINX_PREFIX}" > "${package_dir}/BUILD_INFO.txt"
+            "${release_name}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "arm64 (aarch64)" "${{ steps.nginx.outputs.nginx_semver }}" "${{ steps.nginx.outputs.nginx_version }}" "${{ steps.boringssl.outputs.boringssl_version }}" "${NGINX_PREFIX}" > "${package_dir}/BUILD_INFO.txt"
           "${package_dir}/sbin/nginx" -V > "${package_dir}/NGINX_VERSION.txt" 2>&1
           tar -C "${BUILD_ROOT}" -czf "${BUILD_ROOT}/${release_name}.tar.gz" "${release_name}"
           (cd "${BUILD_ROOT}" && sha256sum "${release_name}.tar.gz" > "${release_name}.tar.gz.sha256")
@@ -219,7 +219,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euxo pipefail
-          release_notes="$(printf 'Automated Nginx amd64 binary build with BoringSSL.\n\nArchitecture: amd64\nNginx: %s\nBoringSSL: %s' \
+          release_notes="$(printf 'Automated Nginx arm64 binary build with BoringSSL.\n\nArchitecture: arm64\nNginx: %s\nBoringSSL: %s' \
             "${{ steps.nginx.outputs.nginx_semver }}" "${{ steps.boringssl.outputs.boringssl_version }}")"
           gh release create "${{ steps.package.outputs.release_tag }}" \
             "${{ steps.package.outputs.archive }}" \

@@ -23,6 +23,10 @@
   * 添加自定义屏蔽分流
 * 开关 Cloudflare WARP Proxy( :whale: Docker 部署)
 * 开关 geodata 自动更新功能
+* 异地组网（路由型虚拟局域网）:
+  * 使用 Xray 原生 TUN 与 VLESS 反向通道连接多个地点
+  * 支持多个不重叠的 IPv4 私网网段和 Linux 本机/网关模式
+  * 为每个地点生成独立凭据、受限路由和可部署的 systemd 配置包
 * xray 端口默认与自填:
   * VLESS-mKCP: 随机生成
   * ALL-REALITY: 443
@@ -97,6 +101,14 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
     ```sh
     bash ${HOME}/Xray-script.sh --fallback
     ```
+
+  * 管理异地组网
+
+    ```sh
+    bash ${HOME}/Xray-script.sh --lan
+    ```
+
+    Hub 初始化后至少添加两个地点，再分别导出地点端部署包。地点端需要支持 TUN 的 Xray-core、`jq`、`iproute2`；网关模式还需要 `iptables`。该功能只添加远端私网路由，不修改默认路由，不支持二层广播、mDNS 或网上邻居发现。
 
 * 快速启动(界面)
 
