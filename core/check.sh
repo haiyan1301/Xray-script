@@ -194,8 +194,8 @@ function dns_resolution() {
     local domain=$1 # 获取域名参数
 
     # 获取当前服务器的公网 IPv4 和 IPv6 地址
-    local expected_ipv4="$(curl -fsSL ipv4.icanhazip.com)"
-    local expected_ipv6="$(curl -fsSL ipv6.icanhazip.com)"
+    local expected_ipv4="$(curl -fsS4L --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+    local expected_ipv6="$(curl -fsS6L --max-time 10 https://api64.ipify.org 2>/dev/null || true)"
 
     local resolved=0 # 初始化标志变量，表示是否匹配
 
@@ -204,9 +204,9 @@ function dns_resolution() {
     local actual_ipv6="$(dig +short AAAA "${domain}")"
 
     # 检查解析到的 IPv4 是否包含服务器的 IPv4
-    if [[ ${actual_ipv4} =~ ${expected_ipv4} ]]; then resolved=1; fi
+    if [[ -n "${expected_ipv4}" ]] && grep -Fxq "${expected_ipv4}" <<<"${actual_ipv4}"; then resolved=1; fi
     # 检查解析到的 IPv6 是否包含服务器的 IPv6
-    if [[ ${actual_ipv6} =~ ${expected_ipv6} ]]; then resolved=1; fi
+    if [[ -n "${expected_ipv6}" ]] && grep -Fxq "${expected_ipv6}" <<<"${actual_ipv6}"; then resolved=1; fi
 
     # 根据 resolved 标志返回结果
     [[ ${resolved} -eq 1 ]]
@@ -287,8 +287,11 @@ function check_port() {
     # 如果端口为空，则认为是有效的（可能表示使用默认值）
     if [[ -z "${port}" ]]; then
         _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.empty")"
+    elif [[ "${port}" =~ ^0*32768$ ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.reserved_error")"
+        return 1
     # 检查端口号是否在 1-65535 范围内
-    elif ((port <= 65535 && port >= 1)); then
+    elif [[ "${port}" =~ ^[0-9]+$ ]] && ((10#${port} <= 65535 && 10#${port} >= 1)); then
         _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.valid")$port"
     else
         # 如果超出范围，则为无效
@@ -359,6 +362,44 @@ function check_password() {
     # 如果所有检查都通过，则密码有效
     _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.valid")$password"
     return 0
+}
+
+function check_ss2022_key() {
+    local key="$1"
+    local decoded_size
+
+    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.check")"
+    if [[ -z "${key}" ]]; then
+        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.empty")"
+        return 0
+    fi
+
+    if [[ ! "${key}" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.invalid")"
+        return 1
+    fi
+
+    decoded_size="$(printf '%s' "${key}" | base64 --decode 2>/dev/null | wc -c | tr -d '[:space:]')"
+    if [[ "${decoded_size}" != '32' ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.invalid")"
+        return 1
+    fi
+
+    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.valid")"
+}
+
+function check_xhttp_mode() {
+    local mode="${1,,}"
+
+    case "${mode}" in
+    auto | packet-up | stream-up | stream-one)
+        return 0
+        ;;
+    *)
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xhttp_mode.invalid")${1}"
+        return 1
+        ;;
+    esac
 }
 
 # =============================================================================
@@ -733,6 +774,8 @@ function main() {
     --port) check_port "$@" >&2 ;;                # 检查端口
     --uuid) check_uuid "$@" >&2 ;;                # 检查 UUID
     --password) check_password "$@" >&2 ;;        # 检查密码
+    --ss2022-key) check_ss2022_key "$@" >&2 ;;
+    --xhttp-mode) check_xhttp_mode "$@" >&2 ;;
     --path) check_path "$@" >&2 ;;                # 检查路径
     --path-required) check_path_required "$@" >&2 ;;
     --short) check_short_id "$@" >&2 ;;           # 检查 Short ID
@@ -747,4 +790,6 @@ function main() {
 
 # --- 脚本执行入口 ---
 # 将脚本接收到的所有参数传递给 main 函数开始执行
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

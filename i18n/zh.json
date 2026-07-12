@@ -206,6 +206,8 @@
       "fullchain": "请输入证书(fullchain)文件路径: ",
       "privkey": "请输入私钥(privkey)文件路径: ",
       "path_invalid": "文件不存在或不可读，请重新输入",
+      "source_invalid": "请选择 1、2 或 3",
+      "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试",
       "firewall_open": "正在开放 UDP 端口",
       "firewall_ok": "UDP 端口已开放",
       "cron_setup": "正在设置证书自动续签定时任务",
@@ -290,9 +292,9 @@
     "short_id_tip": "支持输入 0 到 8 自动生成对应倍数长度的 shortId",
     "path": "请输入 path (默认自动生成): ",
     "xhttp_mode": "请输入 XHTTP 传输模式 (默认 auto): ",
-    "xhttp_mode_tip": "常用模式: auto(自动选择), stream(流式), packet(包式)。留空默认 auto",
+    "xhttp_mode_tip": "可选模式: auto、packet-up、stream-up、stream-one。留空默认 auto",
     "hy2_auth": "请输入 HY2 认证密码 auth (默认自动生成): ",
-    "hy2_cert_domain": "请输入用于申请证书的域名或 IP: ",
+    "hy2_cert_domain": "请输入已解析到本机的证书域名: ",
     "ss2022_password": "请输入 SS2022 pre-shared key (PSK, 32字节Base64格式，默认自动生成): ",
     "warp_ip": "请输入分流到 WARP 的 ip",
     "warp_domain": "请输入分流到 WARP 的 domain",
@@ -319,6 +321,7 @@
       "check": "正在检查端口合法性：",
       "valid": "端口号合法：",
       "empty": "输入值为空，将自动配置端口",
+      "reserved_error": "端口 32768 已被 Xray API 占用，请使用其他端口",
       "range_error": "端口号必须在 1-65535 之间："
     },
     "uuid": {
@@ -333,6 +336,15 @@
       "empty": "输入值为空，将自动生成密码",
       "space_error": "密码不能包含空格：",
       "length_error": "密码长度必须大于等于 8 个字符："
+    },
+    "ss2022_key": {
+      "check": "正在校验 SS2022 PSK",
+      "valid": "SS2022 PSK 格式合法",
+      "empty": "输入为空，将自动生成 SS2022 PSK",
+      "invalid": "SS2022 PSK 必须是 32 字节数据的标准 Base64 编码"
+    },
+    "xhttp_mode": {
+      "invalid": "XHTTP 模式必须是 auto、packet-up、stream-up 或 stream-one："
     },
     "path": {
       "check": "正在检查路径合法性：",

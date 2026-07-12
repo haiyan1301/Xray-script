@@ -206,6 +206,8 @@
       "fullchain": "Enter fullchain certificate file path: ",
       "privkey": "Enter private key file path: ",
       "path_invalid": "File not found or not readable",
+      "source_invalid": "Select 1, 2, or 3",
+      "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry",
       "firewall_open": "Opening UDP port in firewall",
       "firewall_ok": "UDP port opened in firewall",
       "cron_setup": "Setting up certificate auto-renewal cron job",
@@ -290,9 +292,9 @@
     "short_id_tip": "Supports input 0 to 8 to automatically generate shortId of corresponding length",
     "path": "Enter path (default auto-generated): ",
     "xhttp_mode": "Enter XHTTP mode (default auto): ",
-    "xhttp_mode_tip": "Common modes: auto, stream, packet. Leave empty for auto.",
+    "xhttp_mode_tip": "Modes: auto, packet-up, stream-up, stream-one. Leave empty for auto.",
     "hy2_auth": "Enter HY2 auth password (default auto-generated): ",
-    "hy2_cert_domain": "Enter domain or IP for certificate: ",
+    "hy2_cert_domain": "Enter a certificate domain that resolves to this server: ",
     "ss2022_password": "Please enter SS2022 pre-shared key (PSK, 32-byte Base64 format, default auto-generated): ",
     "warp_ip": "Enter IP to route to WARP",
     "warp_domain": "Enter domain to route to WARP",
@@ -319,6 +321,7 @@
       "check": "Checking port validity: ",
       "valid": "Port number is valid: ",
       "empty": "Input is empty, will be auto-configured",
+      "reserved_error": "Port 32768 is reserved by the Xray API; choose another port",
       "range_error": "Port must be between 1-65535: "
     },
     "uuid": {
@@ -333,6 +336,15 @@
       "empty": "Input is empty, will auto-generate password",
       "space_error": "Password cannot contain spaces: ",
       "length_error": "Password must be at least 8 characters: "
+    },
+    "ss2022_key": {
+      "check": "Validating SS2022 PSK",
+      "valid": "SS2022 PSK is valid",
+      "empty": "Input is empty; an SS2022 PSK will be generated",
+      "invalid": "SS2022 PSK must be standard Base64 encoding of exactly 32 bytes"
+    },
+    "xhttp_mode": {
+      "invalid": "XHTTP mode must be auto, packet-up, stream-up, or stream-one: "
     },
     "path": {
       "check": "Checking path validity: ",

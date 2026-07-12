@@ -29,8 +29,8 @@
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
-readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly CUR_FILE="$(basename "${BASH_SOURCE[0]}" | sed 's/\..*//')"
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)"
 
 # 引入公共库
@@ -55,8 +55,8 @@ readonly DOCKER_PATH="${SERVICE_DIR}/docker.sh"
 readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"
 readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"
 readonly LAN_PATH="${CUR_DIR}/lan.sh"
-readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
+readonly XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH_OVERRIDE:-/usr/local/etc/xray/config.json}"
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_PATH_OVERRIDE:-${SCRIPT_CONFIG_DIR}/config.json}"
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"
 
 # --- 全局变量声明 ---
@@ -287,10 +287,12 @@ function exec_read() {
         port)
             # 验证端口号
             exec_check '--port' "${result}" || continue
+            [[ -n "${result}" ]] && result="$((10#${result}))"
             ;;
         reverse-port)
             result="${result:-8443}"
             exec_check '--port' "${result}" || continue
+            result="$((10#${result}))"
             ;;
         reverse-target)
             exec_check '--reverse-target' "${result}" || continue
@@ -302,13 +304,19 @@ function exec_read() {
             # 验证 UUID (fallback 也使用 uuid 验证)
             exec_check '--uuid' "${result}"
             ;;
-        seed | password | hy2-auth | ss2022-password)
-            # 验证密码或种子或 HY2 auth 或 SS2022 预共享密钥
+        seed | password | hy2-auth)
+            # 验证密码、种子或 HY2 auth
             exec_check '--password' "${result}" || continue
+            ;;
+        ss2022-password)
+            exec_check '--ss2022-key' "${result}" || continue
             ;;
         target)
             # 验证目标域名
             exec_check '--domain' "${result}" || continue
+            ;;
+        hy2-cert-domain)
+            exec_check '--dns' "${result}" || continue
             ;;
         only-change-domain)
             # 为仅更新域名选项设置默认值 'Y'
@@ -326,13 +334,19 @@ function exec_read() {
             [[ -z "${result}" ]] && exec_check '--short' "${result}" && break
             # 将逗号分隔的输入分割成数组
             IFS=',' read -r -a values <<<"${result}"
+            local parsed_short_ids=''
+            local short_ids_valid=true
             # 遍历每个 Short ID 进行验证
             for value in "${values[@]}"; do
                 if exec_check '--short' "${value}"; then
-                    # 验证通过则追加到 CONFIG_DATA['short_ids']
-                    CONFIG_DATA['short_ids']="${CONFIG_DATA['short_ids']} ${value}"
+                    parsed_short_ids+=" ${value}"
+                else
+                    short_ids_valid=false
+                    break
                 fi
             done
+            ${short_ids_valid} || continue
+            CONFIG_DATA['short_ids']="${parsed_short_ids# }"
             ;;
         path)
             # 验证路径
@@ -345,6 +359,8 @@ function exec_read() {
             ;;
         xhttp-mode)
             result="${result:-auto}"
+            exec_check '--xhttp-mode' "${result}" || continue
+            result="${result,,}"
             ;;
         esac
         # 输入验证通过，设置 flag 为 false 退出循环
@@ -440,8 +456,8 @@ function generate_unique_multi_port() {
         fi
     fi
 
-    while port_in_list "${port}" "${used_ports[@]}"; do
-        echo -e "${YELLOW}[Multi]${NC} Port ${port} is already used by another node, generating a random port." >&2
+    while [[ "${port}" == '32768' ]] || port_in_list "${port}" "${used_ports[@]}"; do
+        echo -e "${YELLOW}[Multi]${NC} Port ${port} is reserved or already used, generating a random port." >&2
         port="$(exec_generate '--port')"
     done
 
@@ -474,14 +490,14 @@ function build_multi_node_json() {
         node="$(echo "${node}" | jq --arg key "${ss2022_key}" '.ss2022Key = $key')"
         ;;
     mkcp | vision | xhttp | fallback)
-        local xray_uuid="$(exec_generate '--uuid' ${CONFIG_DATA['uuid']})"
+        local xray_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")"
         node="$(echo "${node}" | jq --arg uuid "${xray_uuid}" '.uuid = $uuid')"
         ;;
     esac
 
     case "${config_tag,,}" in
     fallback)
-        local fallback_uuid="${CONFIG_DATA['fallback']:-$(exec_generate '--uuid')}"
+        local fallback_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")"
         node="$(echo "${node}" | jq --arg uuid "${fallback_uuid}" '.fallback = $uuid')"
         ;;
     mkcp)
@@ -514,6 +530,107 @@ function build_multi_node_json() {
     echo "${node}"
 }
 
+function read_multi_node_protocol_fields() {
+    local config_tag="$1"
+
+    case "${config_tag,,}" in
+    trojan)
+        exec_read 'password'
+        exec_read 'target'
+        exec_read 'short'
+        exec_read 'path'
+        exec_read 'xhttp-mode'
+        ;;
+    hy2)
+        exec_read 'hy2-auth'
+        ;;
+    ss2022)
+        exec_read 'ss2022-password'
+        ;;
+    mkcp)
+        exec_read 'uuid'
+        exec_read 'seed'
+        ;;
+    vision)
+        exec_read 'uuid'
+        exec_read 'target'
+        exec_read 'short'
+        ;;
+    xhttp)
+        exec_read 'uuid'
+        exec_read 'target'
+        exec_read 'short'
+        exec_read 'path'
+        exec_read 'xhttp-mode'
+        ;;
+    fallback)
+        exec_read 'uuid'
+        exec_read 'fallback'
+        exec_read 'target'
+        exec_read 'short'
+        exec_read 'path'
+        exec_read 'xhttp-mode'
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+function read_hy2_certificate_config() {
+    local cert_source server_ip fullchain privkey
+
+    while true; do
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
+        read -r cert_source
+        cert_source="${cert_source:-1}"
+        case "${cert_source}" in
+        1 | 2 | 3) break ;;
+        *) echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.source_invalid")" >&2 ;;
+        esac
+    done
+
+    CONFIG_DATA['hy2_cert_source']="${cert_source}"
+    case "${cert_source}" in
+    1)
+        exec_read 'hy2-cert-domain'
+        CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
+        exec_read 'email'
+        CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
+        ;;
+    2)
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
+        server_ip="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
+        if [[ -z "${server_ip}" ]] || ! exec_check '--ip' "${server_ip}"; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_fetch_fail")" >&2
+            return 1
+        fi
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
+        CONFIG_DATA['hy2_cert_domain']="${server_ip}"
+        exec_read 'email'
+        CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
+        ;;
+    3)
+        while true; do
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
+            read -r fullchain
+            fullchain="$(echo "${fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [[ -f "${fullchain}" && -r "${fullchain}" ]] && break
+            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+        done
+        while true; do
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
+            read -r privkey
+            privkey="$(echo "${privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [[ -f "${privkey}" && -r "${privkey}" ]] && break
+            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+        done
+        CONFIG_DATA['hy2_cert_fullchain']="${fullchain}"
+        CONFIG_DATA['hy2_cert_privkey']="${privkey}"
+        ;;
+    esac
+}
+
 function handler_read_multi_xray_config() {
     local nodes='[]'
     local used_ports=()
@@ -524,25 +641,23 @@ function handler_read_multi_xray_config() {
     reset_config_data
     CONFIG_DATA['tag']='multi'
 
-    if echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset' | grep -Eq '^(0|1)$'; then
-        exec_read 'rules'
-    fi
+    exec_read 'rules'
     if [[ "${CONFIG_DATA['rules'],,}" != 'n' ]]; then
         exec_read 'block-bt'
         exec_read 'block-cn'
         exec_read 'block-ad'
     fi
-    local multi_rules="${CONFIG_DATA['rules']}"
-    local multi_block_bt="${CONFIG_DATA['block-bt']}"
-    local multi_block_cn="${CONFIG_DATA['block-cn']}"
-    local multi_block_ad="${CONFIG_DATA['block-ad']}"
+    local multi_rules="${CONFIG_DATA['rules']:-N}"
+    local multi_block_bt="${CONFIG_DATA['block-bt']:-N}"
+    local multi_block_cn="${CONFIG_DATA['block-cn']:-N}"
+    local multi_block_ad="${CONFIG_DATA['block-ad']:-N}"
 
     while true; do
         echo -e "${GREEN}[Multi]${NC} How many nodes do you want to create? [2]: " >&2
         read -r node_count
         node_count="${node_count:-2}"
-        [[ "${node_count}" =~ ^[0-9]+$ && "${node_count}" -gt 0 ]] && break
-        echo -e "${YELLOW}[Multi]${NC} Please enter a positive integer." >&2
+        [[ "${node_count}" =~ ^[0-9]+$ && "${node_count}" -ge 2 && "${node_count}" -le 100 ]] && break
+        echo -e "${YELLOW}[Multi]${NC} Please enter an integer from 2 to 100." >&2
     done
 
     local i
@@ -558,37 +673,11 @@ function handler_read_multi_xray_config() {
         xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")"
         used_ports+=("${xray_port}")
 
-        case "${config_tag,,}" in
-        trojan) exec_read 'password' ;;
-        hy2)
-            exec_read 'hy2-auth'
-            has_hy2='y'
-            ;;
-        ss2022) exec_read 'ss2022-password' ;;
-        mkcp | vision | xhttp | fallback)
-            exec_read 'uuid'
-            has_vless='y'
-            ;;
-        esac
+        read_multi_node_protocol_fields "${config_tag}" || return 1
 
         case "${config_tag,,}" in
-        fallback) exec_read 'fallback' ;;
-        mkcp) exec_read 'seed' ;;
-        esac
-
-        case "${config_tag,,}" in
-        vision | xhttp | trojan | fallback) exec_read 'target' ;;
-        esac
-
-        case "${config_tag,,}" in
-        vision | xhttp | trojan | fallback) exec_read 'short' ;;
-        esac
-
-        case "${config_tag,,}" in
-        xhttp | trojan | fallback)
-            exec_read 'path'
-            exec_read 'xhttp-mode'
-            ;;
+        hy2) has_hy2='y' ;;
+        mkcp | vision | xhttp | fallback) has_vless='y' ;;
         esac
 
         local node
@@ -602,55 +691,17 @@ function handler_read_multi_xray_config() {
 
     if [[ "${has_hy2}" == 'y' ]]; then
         echo -e "${YELLOW}[Multi]${NC} HY2 nodes share one TLS certificate in multi-node mode." >&2
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
-        local hy2_cert_source_reply
-        read -r hy2_cert_source_reply
-        hy2_cert_source_reply="${hy2_cert_source_reply:-1}"
-        CONFIG_DATA['hy2_cert_source']="${hy2_cert_source_reply}"
-        case "${hy2_cert_source_reply}" in
-        1)
-            exec_read 'hy2-cert-domain'
-            CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
-            exec_read 'email'
-            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
-            ;;
-        2)
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
-            local server_ip
-            server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me)
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
-            CONFIG_DATA['hy2_cert_domain']="${server_ip}"
-            exec_read 'email'
-            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
-            ;;
-        3)
-            local hy2_fullchain hy2_privkey
-            while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
-                read -r hy2_fullchain
-                hy2_fullchain="$(echo "${hy2_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                [[ -n "${hy2_fullchain}" ]] && break
-            done
-            while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
-                read -r hy2_privkey
-                hy2_privkey="$(echo "${hy2_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                [[ -n "${hy2_privkey}" ]] && break
-            done
-            CONFIG_DATA['hy2_cert_fullchain']="${hy2_fullchain}"
-            CONFIG_DATA['hy2_cert_privkey']="${hy2_privkey}"
-            ;;
-        esac
+        read_hy2_certificate_config || return 1
     fi
 
-    local multi_vless_enc_enable="${CONFIG_DATA['vless_enc_enable']}"
-    local multi_vless_enc_decryption="${CONFIG_DATA['vless_enc_decryption']}"
-    local multi_vless_enc_encryption="${CONFIG_DATA['vless_enc_encryption']}"
-    local multi_hy2_cert_source="${CONFIG_DATA['hy2_cert_source']}"
-    local multi_hy2_cert_domain="${CONFIG_DATA['hy2_cert_domain']}"
-    local multi_hy2_cert_email="${CONFIG_DATA['hy2_cert_email']}"
-    local multi_hy2_cert_fullchain="${CONFIG_DATA['hy2_cert_fullchain']}"
-    local multi_hy2_cert_privkey="${CONFIG_DATA['hy2_cert_privkey']}"
+    local multi_vless_enc_enable="${CONFIG_DATA['vless_enc_enable']:-}"
+    local multi_vless_enc_decryption="${CONFIG_DATA['vless_enc_decryption']:-}"
+    local multi_vless_enc_encryption="${CONFIG_DATA['vless_enc_encryption']:-}"
+    local multi_hy2_cert_source="${CONFIG_DATA['hy2_cert_source']:-}"
+    local multi_hy2_cert_domain="${CONFIG_DATA['hy2_cert_domain']:-}"
+    local multi_hy2_cert_email="${CONFIG_DATA['hy2_cert_email']:-}"
+    local multi_hy2_cert_fullchain="${CONFIG_DATA['hy2_cert_fullchain']:-}"
+    local multi_hy2_cert_privkey="${CONFIG_DATA['hy2_cert_privkey']:-}"
 
     reset_config_data
     CONFIG_DATA['tag']='multi'
@@ -901,9 +952,9 @@ function handler_script_config() {
     # 获取端口，默认 443
     local XRAY_PORT="${CONFIG_DATA['port']:-443}"
     # 获取或生成 UUID
-    local XRAY_UUID="$(exec_generate '--uuid' ${CONFIG_DATA['uuid']})"
+    local XRAY_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")"
     # 获取或生成 Fallback UUID
-    local FALLBACK_UUID="${CONFIG_DATA['fallback']:-$(exec_generate '--uuid')}"
+    local FALLBACK_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")"
     # 获取或生成 Trojan 密码
     local TROJAN_PASSWORD="${CONFIG_DATA['password']:-$(exec_generate '--password')}"
     # 获取或生成 mKCP Seed
@@ -1281,7 +1332,7 @@ function handler_multi_xray_config() {
             local kcp_seed="$(echo "${node}" | jq -r '.kcp')"
             node_inbounds="$(echo "${node_inbounds}" | jq --arg uuid "${node_uuid}" --arg seed "${kcp_seed}" '
                 .[0].settings.clients[0].id = $uuid |
-                .[0].streamSettings.kcpSettings.seed = $seed
+                .[0].streamSettings.finalmask.udp[0].settings.password = $seed
             ')"
             ;;
         vision)
@@ -1543,7 +1594,7 @@ function handler_xray_config() {
     case "${CONFIG_TAG,,}" in
     mkcp)
         # 更新 mKCP Seed
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.kcpSettings.seed = $seed')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.finalmask.udp[0].settings.password = $seed')"
         ;;
     vision)
         # 更新 Reality 服务器名称、私钥和 Short IDs
@@ -1747,10 +1798,7 @@ function handler_read_xray_config() {
     if [[ "${CONFIG_TAG,,}" != 'trojan' && "${CONFIG_TAG,,}" != 'hy2' && "${CONFIG_TAG,,}" != 'ss2022' ]]; then
         run_vlessenc_choice
     fi
-    # 检查脚本配置中的规则状态，如果是 current 或 reset 则读取规则输入
-    if echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset' | grep -Eq '^(0|1)$'; then
-        exec_read 'rules'
-    fi
+    exec_read 'rules'
     # 如果规则状态不是 'n'，则读取阻止选项
     if [[ "${CONFIG_DATA['rules'],,}" != 'n' ]]; then
         exec_read 'block-bt'
@@ -1822,49 +1870,7 @@ function handler_read_xray_config() {
         fi
         ;;
     hy2)
-        # HY2 证书来源选择: 1=acme域名证书 2=acme IP证书 3=自定义证书路径
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
-        local hy2_cert_source_reply
-        read -r hy2_cert_source_reply
-        hy2_cert_source_reply="${hy2_cert_source_reply:-1}"
-        CONFIG_DATA['hy2_cert_source']="${hy2_cert_source_reply}"
-        case "${hy2_cert_source_reply}" in
-        1)
-            # acme.sh 申请域名证书
-            exec_read 'hy2-cert-domain'
-            CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
-            exec_read 'email'
-            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
-            ;;
-        2)
-            # acme.sh 申请 IP 证书
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
-            local server_ip
-            server_ip=$(curl -s4 https://ifconfig.me || curl -s6 https://ifconfig.me)
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
-            CONFIG_DATA['hy2_cert_domain']="${server_ip}"
-            exec_read 'email'
-            CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
-            ;;
-        3)
-            # 自定义证书路径
-            local hy2_fullchain hy2_privkey
-            while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
-                read -r hy2_fullchain
-                hy2_fullchain="$(echo "${hy2_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                [[ -n "${hy2_fullchain}" ]] && break
-            done
-            while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
-                read -r hy2_privkey
-                hy2_privkey="$(echo "${hy2_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-                [[ -n "${hy2_privkey}" ]] && break
-            done
-            CONFIG_DATA['hy2_cert_fullchain']="${hy2_fullchain}"
-            CONFIG_DATA['hy2_cert_privkey']="${hy2_privkey}"
-            ;;
-        esac
+        read_hy2_certificate_config || return 1
         ;;
     esac
 }
@@ -1914,12 +1920,21 @@ function handler_hy2_cert() {
             # xray-certs 表示使用已有的 Xray 证书目录，无需复制
             if [[ "${cert_reuse_choice}" != "xray-certs" ]]; then
                 # 从 acme.sh 重新安装证书到 Xray 目录
-                if [[ -e "${HOME}/.acme.sh/acme.sh" ]] && exec_ssl '--status' --domain=${cert_reuse_choice}; then
-                    "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d ${cert_reuse_choice} \
+                if [[ ! -e "${HOME}/.acme.sh/acme.sh" ]] || ! exec_ssl '--status' "--domain=${cert_reuse_choice}"; then
+                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                    return 1
+                fi
+                if ! "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d "${cert_reuse_choice}" \
                         --key-file "${CERT_DIR}/privkey.pem" \
                         --fullchain-file "${CERT_DIR}/fullchain.pem" \
-                        --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true" 2>/dev/null || true
+                        --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true" 2>/dev/null; then
+                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                    return 1
                 fi
+            fi
+            if [[ ! -r "${CERT_DIR}/fullchain.pem" || ! -r "${CERT_DIR}/privkey.pem" ]]; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                return 1
             fi
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
         else
@@ -1956,6 +1971,7 @@ function handler_hy2_cert() {
             # 证书有效期短 (约一周)，--days 3 设置每 3 天检查续签
             "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
                 --standalone \
+                --keylength ec-256 \
                 --server letsencrypt \
                 --certificate-profile shortlived \
                 --days 3 || {
@@ -1970,7 +1986,10 @@ function handler_hy2_cert() {
         "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d "${CERT_DOMAIN}" \
             --key-file "${CERT_DIR}/privkey.pem" \
             --fullchain-file "${CERT_DIR}/fullchain.pem" \
-            --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true"
+            --reloadcmd "systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null || true" || {
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+            return 1
+        }
 
         # 设置证书目录权限
         if getent group xray-nginx >/dev/null 2>&1; then
@@ -2000,8 +2019,11 @@ function handler_hy2_cert() {
 
         # 创建证书存储目录并复制自定义证书，防止非 root 运行的 xray 服务因权限不足报错
         mkdir -p "${CERT_DIR}"
-        cp -f "${CUSTOM_FULLCHAIN}" "${CERT_DIR}/fullchain.pem" 2>/dev/null || true
-        cp -f "${CUSTOM_PRIVKEY}" "${CERT_DIR}/privkey.pem" 2>/dev/null || true
+        if ! cp -f "${CUSTOM_FULLCHAIN}" "${CERT_DIR}/fullchain.pem" 2>/dev/null ||
+            ! cp -f "${CUSTOM_PRIVKEY}" "${CERT_DIR}/privkey.pem" 2>/dev/null; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+            return 1
+        fi
 
         # 设置证书目录权限，确保 xray user 可读
         if getent group xray-nginx >/dev/null 2>&1; then
@@ -2012,6 +2034,10 @@ function handler_hy2_cert() {
         chmod 750 "${CERT_DIR}" 2>/dev/null || true
 
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
+        ;;
+    *)
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.source_invalid")" >&2
+        return 1
         ;;
     esac
 }
@@ -3370,4 +3396,6 @@ function main() {
 
 # --- 脚本执行入口 ---
 # 将脚本接收到的所有参数传递给 main 函数开始执行
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
