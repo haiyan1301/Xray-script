@@ -322,11 +322,20 @@ function exec_read() {
             # 为仅更新域名选项设置默认值 'Y'
             result="${result:-Y}"
             ;;
-        domain | cdn)
-            # 验证域名或 CDN 域名
+        domain)
+            # Reality/SNI 域名仍需解析到当前服务器
             exec_check '--dns' "${result}" || continue
-            # 如果是 'domain' 选项，同时设置 CONFIG_DATA['target']
-            [[ "$1" == 'domain' ]] && CONFIG_DATA['target']="${result}"
+            CONFIG_DATA['target']="${result}"
+            ;;
+        cdn)
+            local config_tag="${CONFIG_DATA['tag']:-}"
+            [[ -z "${config_tag}" ]] && config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
+            if [[ "${config_tag,,}" == 'cdn' ]]; then
+                # CDN 域名应解析到 CDN 节点，仅校验格式以避免暴露源站 IP
+                exec_check '--domain-format' "${result}" || continue
+            else
+                exec_check '--dns' "${result}" || continue
+            fi
             ;;
         short)
             # 特殊处理 Short IDs

@@ -632,6 +632,24 @@ function check_dns_resolution() {
 }
 
 # =============================================================================
+# 函数名称: check_domain_format
+# 功能描述: 仅检查域名格式，不执行 DNS 解析或源站 IP 匹配。
+# 参数:
+#   $1: 待检查的域名 (domain)
+# 返回值: 0-格式正确 1-格式错误
+# =============================================================================
+function check_domain_format() {
+    local domain="$1"
+
+    if ! valid_domain "$domain"; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.format_error")$domain"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
 # 函数名称: check_xray_config_exists
 # 功能描述: 检查指定名称的 Xray 配置文件是否存在。
 # 参数:
@@ -780,6 +798,7 @@ function main() {
     --path-required) check_path_required "$@" >&2 ;;
     --short) check_short_id "$@" >&2 ;;           # 检查 Short ID
     --domain) check_domain_security "$@" >&2 ;;   # 检查域名安全性
+    --domain-format) check_domain_format "$@" >&2 ;; # 仅检查域名格式
     --dns) check_dns_resolution "$@" >&2 ;;       # 检查 DNS 解析
     --tag) check_xray_config_exists "$@" >&2 ;;   # 检查 Xray 配置文件
     --xray) check_xray_version_exists "$@" >&2 ;; # 检查 Xray 版本
