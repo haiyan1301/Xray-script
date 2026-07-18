@@ -576,6 +576,7 @@
       "options_title": "选项",
       "opt_install": "安装 Nginx",
       "opt_update": "更新 Nginx",
+      "opt_service_config": "重新配置 Nginx systemd 服务和共享 Socket 目录",
       "opt_prebuilt": "使用 GitHub Releases 预编译二进制 (与 --install 或 --update 一起使用)",
       "opt_brotli": "启用 Brotli 压缩 (与 --install 或 --update 一起使用)",
       "opt_purge": "卸载 Nginx",

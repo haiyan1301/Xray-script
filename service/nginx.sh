@@ -879,6 +879,23 @@ function purge_nginx() {
 }
 
 # =============================================================================
+# 函数名称: migrate_nginx_runtime_config
+# 功能描述: 迁移旧 Nginx 配置中 BoringSSL 不支持的曲线别名和 OCSP 指令。
+# 参数: 无
+# 返回值: 无
+# =============================================================================
+function migrate_nginx_runtime_config() {
+    local nginx_conf="${NGINX_PATH}/conf/nginx.conf"
+    [[ -f "${nginx_conf}" ]] || return 0
+
+    sed -i \
+        -e 's#^\([[:space:]]*\)ssl_ecdh_curve[[:space:]].*secp256r1.*;#\1ssl_ecdh_curve            X25519:prime256v1:secp384r1;#' \
+        -e 's|^\([[:space:]]*\)\(ssl_stapling[[:space:]][^;]*;\)|\1# \2|' \
+        -e 's|^\([[:space:]]*\)\(ssl_stapling_verify[[:space:]][^;]*;\)|\1# \2|' \
+        "${nginx_conf}"
+}
+
+# =============================================================================
 # 函数名称: systemctl_config_nginx
 # 功能描述: 配置 Nginx 的 systemd 服务文件。
 # 参数: 无
@@ -886,6 +903,45 @@ function purge_nginx() {
 # =============================================================================
 function systemctl_config_nginx() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.service.configure')"
+    migrate_nginx_runtime_config
+
+    local migrate_existing_unit=0
+    local xray_group_changed=0
+    if [[ -f /etc/systemd/system/nginx.service ]]; then
+        if grep -Eq 'rm[[:space:]]+-rf[[:space:]]+/dev/shm/nginx(/|[[:space:]]|$)|ExecStopPost=.*dev/shm/nginx' /etc/systemd/system/nginx.service ||
+            ! grep -Eq '^UMask=0007[[:space:]]*$' /etc/systemd/system/nginx.service ||
+            ! grep -Fq -- '-m 2770 /dev/shm/nginx' /etc/systemd/system/nginx.service ||
+            ! grep -Fq 'xray-nginx' /etc/systemd/system/nginx.service; then
+            migrate_existing_unit=1
+        fi
+    fi
+
+    # Nginx 与 Xray 通过 /dev/shm/nginx 下的 Unix Socket 通信。共享组和
+    # setgid 目录保证双方都能创建或访问 Socket，且重启 Nginx 时不会误删
+    # Xray 正在使用的 Socket/lock 文件。
+    if ! getent group xray-nginx >/dev/null 2>&1; then
+        groupadd -r xray-nginx
+    fi
+    if ! id -u nginx >/dev/null 2>&1; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin nginx
+    fi
+    usermod -aG xray-nginx nginx
+    if id -u xray >/dev/null 2>&1; then
+        if ! id -nG xray | tr ' ' '\n' | grep -Fxq xray-nginx; then
+            xray_group_changed=1
+        fi
+        usermod -aG xray-nginx xray
+    fi
+
+    install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx
+    install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx/tcmalloc
+    install -d -m 0755 /etc/tmpfiles.d
+    cat >/etc/tmpfiles.d/xray-nginx-shm.conf <<EOF
+d /dev/shm/nginx 2770 nginx xray-nginx -
+d /dev/shm/nginx/tcmalloc 2770 nginx xray-nginx -
+EOF
+    systemd-tmpfiles --create /etc/tmpfiles.d/xray-nginx-shm.conf
+
     # 使用 here document 创建服务文件内容
     cat >/etc/systemd/system/nginx.service <<EOF
 [Unit]
@@ -896,12 +952,11 @@ Wants=network-online.target
 [Service]
 Type=forking
 PIDFile=/run/nginx.pid
-# 清理并创建共享内存目录
-ExecStartPre=/bin/rm -rf /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx
-ExecStartPre=/bin/chmod 711 /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx/tcmalloc
-ExecStartPre=/bin/chmod 0777 /dev/shm/nginx/tcmalloc
+UMask=0007
+# 保留 Xray 创建的 Socket，仅清理 Nginx 自己可能遗留的监听 Socket
+ExecStartPre=/usr/bin/install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx
+ExecStartPre=/usr/bin/install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/rm -f /dev/shm/nginx/default_backend.sock /dev/shm/nginx/cdn_to_nginx.sock /dev/shm/nginx/xray_reality_to_nginx.sock
 # 测试配置文件
 ExecStartPre=/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'
 # 启动 Nginx
@@ -910,8 +965,6 @@ ExecStart=/usr/sbin/nginx -g 'daemon on; master_process on;'
 ExecReload=/usr/sbin/nginx -g 'daemon on; master_process on;' -s reload
 # 停止 Nginx
 ExecStop=/bin/kill -s QUIT \$MAINPID
-# 停止后清理共享内存
-ExecStopPost=/bin/rm -rf /dev/shm/nginx
 TimeoutStopSec=5
 KillMode=mixed
 PrivateTmp=true
@@ -920,6 +973,25 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload # 重新加载 systemd 配置以使新服务生效
+
+    # 旧 unit 的 UMask 只有完整重启 master 才会生效；同时让 Xray 获取新增的
+    # supplementary group，并恢复此前因目录/权限问题进入 failed 的服务。
+    if [[ "${migrate_existing_unit}" -eq 1 ]]; then
+        if systemctl is-active --quiet nginx; then
+            systemctl restart nginx
+        elif systemctl is-failed --quiet nginx; then
+            systemctl reset-failed nginx
+            systemctl start nginx
+        fi
+    fi
+    if [[ "${migrate_existing_unit}" -eq 1 || "${xray_group_changed}" -eq 1 ]]; then
+        if systemctl is-active --quiet xray; then
+            systemctl restart xray
+        elif systemctl is-failed --quiet xray; then
+            systemctl reset-failed xray
+            systemctl start xray
+        fi
+    fi
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.service.complete')"
 }
 
@@ -935,6 +1007,7 @@ function show_help() {
     local options_title="$(echo "$I18N_DATA" | jq -r '.nginx.help.options_title')"
     local opt_install="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_install')"
     local opt_update="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_update')"
+    local opt_service_config="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_service_config')"
     local opt_prebuilt="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_prebuilt')"
     local opt_brotli="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_brotli')"
     local opt_purge="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_purge')"
@@ -946,6 +1019,7 @@ ${usage}
 ${options_title}:
   --install    ${opt_install}
   --update     ${opt_update}
+  --service-config ${opt_service_config}
   --prebuilt   ${opt_prebuilt}
   --brotli     ${opt_brotli}
   --purge      ${opt_purge}
@@ -979,8 +1053,8 @@ function main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
         # 处理主要操作参数
-        --install | --update | --purge)
-            action="${1#--}" # 移除 '--' 前缀，获取操作名称 (install/update/purge)
+        --install | --update | --service-config | --purge)
+            action="${1#--}" # 移除 '--' 前缀，获取操作名称
             ;;
         # 使用预编译二进制（从 GitHub Releases 下载）
         --prebuilt)
@@ -1014,12 +1088,18 @@ function main() {
         systemctl_config_nginx # 配置 systemd 服务
         ;;
     update)
+        # 必须在替换 BoringSSL 二进制或 USR2 平滑升级之前迁移旧配置。
+        migrate_nginx_runtime_config
         if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
             prebuilt_install       # 从 GitHub Releases 下载最新预编译版本覆盖
         else
             compile_dependencies # 安装/更新依赖 (如果需要)
             source_update        # 检查并更新
         fi
+        systemctl_config_nginx # 更新时同步迁移 systemd 服务和共享目录
+        ;;
+    service-config)
+        systemctl_config_nginx # 重新生成 systemd 服务和共享目录配置
         ;;
     purge)
         purge_nginx # 卸载

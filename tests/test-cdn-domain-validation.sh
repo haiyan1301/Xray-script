@@ -9,13 +9,15 @@ cd "${TEST_PROJECT_ROOT}"
 readonly JQ_BIN="$(command -v jq || true)"
 [[ -n "${JQ_BIN}" ]] || { echo "jq is required" >&2; exit 1; }
 
-mkdir -p "${TEST_DIR}/home/.xray-script" "${TEST_DIR}/home/bin"
+mkdir -p "${TEST_DIR}/home/.xray-script" "${TEST_DIR}/home/bin" "${TEST_DIR}/nginx/sites-available"
 ln -s "${JQ_BIN}" "${TEST_DIR}/home/bin/jq"
 cp config.json "${TEST_DIR}/script.json"
 cp config.json "${TEST_DIR}/home/.xray-script/config.json"
 export HOME="${TEST_DIR}/home"
 export SCRIPT_CONFIG_PATH_OVERRIDE="${TEST_DIR}/script.json"
 export XRAY_CONFIG_PATH_OVERRIDE="${TEST_DIR}/xray.json"
+export NGINX_CONFIG_DIR_OVERRIDE="${TEST_DIR}/nginx"
+export NGINX_SERVICE_PATH_OVERRIDE="${TEST_DIR}/nginx.service"
 
 source core/handler.sh
 I18N_DATA="$(jq . i18n/en.json)"
@@ -75,4 +77,158 @@ exec_read 'domain'
 [[ "${CHECK_OPTION}" == '--dns' ]]
 [[ "${CONFIG_DATA['target']}" == "${READ_RESULT}" ]]
 
-echo "CDN domain validation tests passed"
+GEN_LOG="${TEST_DIR}/generate.log"
+: >"${GEN_LOG}"
+function exec_generate() {
+    local option="$1"
+    printf '%s\n' "${option}" >>"${GEN_LOG}"
+    case "${option}" in
+    --uuid) echo '11111111-1111-1111-1111-111111111111' ;;
+    --password) echo 'generated-password' ;;
+    --short-ids) echo '["0123456789abcdef"]' ;;
+    --path) echo '/generated-path' ;;
+    --target) echo 'random-target.example.com' ;;
+    --server-names) echo '["random-target.example.com"]' ;;
+    *) return 1 ;;
+    esac
+}
+
+reset_config_data
+SCRIPT_CONFIG="$(jq '
+    .nginx.domain = "stale-reality.example.com" |
+    .nginx.cdn = "" |
+    .xray.target = "stale-reality.example.com" |
+    .xray.serverNames = ["stale-reality.example.com"]
+' config.json)"
+write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+CONFIG_DATA['tag']='CDN'
+CONFIG_DATA['rules']='N'
+CONFIG_DATA['block-bt']='N'
+CONFIG_DATA['block-cn']='N'
+CONFIG_DATA['block-ad']='N'
+CONFIG_DATA['port']='443'
+CONFIG_DATA['uuid']=''
+CONFIG_DATA['path']='/cdn-test'
+CONFIG_DATA['xhttp-mode']='auto'
+CONFIG_DATA['cdn']='hydns.org'
+CONFIG_DATA['email']=''
+CONFIG_DATA['vless_enc_enable']='n'
+handler_script_config
+
+jq -e '
+    .xray.tag == "CDN" and
+    .nginx.cdn == "hydns.org" and
+    .nginx.domain == "" and
+    .xray.target == "" and
+    .xray.serverNames == []
+' <<<"${SCRIPT_CONFIG}" >/dev/null
+! grep -Eq '^--(target|server-names|short-ids)$' "${GEN_LOG}"
+
+printf '%s\n' \
+    '    ssl_ecdh_curve            x25519:secp521r1:secp384r1:secp256r1;' \
+    '    ssl_stapling              on;' \
+    '    ssl_stapling_verify       on;' \
+    >"${NGINX_CONFIG_DIR}/nginx.conf"
+printf '%s\n' 'ExecStartPre=/bin/rm -rf /dev/shm/nginx' >"${NGINX_SERVICE_PATH}"
+SERVICE_MIGRATION_LOG="${TEST_DIR}/service-migration.log"
+function bash() { printf '%s\n' "$*" >>"${SERVICE_MIGRATION_LOG}"; }
+function cmd_exists() { return 1; }
+function systemctl() { return 0; }
+handler_nginx_restart
+grep -Fxq "${NGINX_PATH} --service-config" "${SERVICE_MIGRATION_LOG}"
+grep -q 'ssl_ecdh_curve[[:space:]]*X25519:prime256v1:secp384r1;' "${NGINX_CONFIG_DIR}/nginx.conf"
+! grep -q 'secp256r1' "${NGINX_CONFIG_DIR}/nginx.conf"
+! grep -Eq '^[[:space:]]*ssl_stapling(_verify)?[[:space:]]+on;' "${NGINX_CONFIG_DIR}/nginx.conf"
+grep -q 'ssl_ecdh_curve[[:space:]]*X25519:prime256v1:secp384r1;' config/nginx/conf/nginx.conf
+! grep -Eq '^[[:space:]]*ssl_stapling(_verify)?[[:space:]]+on;' config/nginx/conf/nginx.conf
+
+for unit_source in config/nginx/nginx.service service/nginx.sh; do
+    grep -Fq 'install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx' "${unit_source}"
+    grep -Fq 'install -d -o nginx -g xray-nginx -m 2770 /dev/shm/nginx/tcmalloc' "${unit_source}"
+    grep -Eq '^[[:space:]]*UMask=0007[[:space:]]*$' "${unit_source}"
+    ! grep -Eq 'rm[[:space:]]+-rf[[:space:]]+/dev/shm/nginx(/|[[:space:]]|$)' "${unit_source}"
+    ! grep -Eq 'ExecStopPost=.*dev/shm/nginx' "${unit_source}"
+    ! grep -Eq '(rm|unlink).*(to_xray_xhttp|nginx_to_xray_vision)\.sock' "${unit_source}"
+done
+
+SERVICE_CONFIG_BODY="$(sed -n '/^function systemctl_config_nginx()/,/^}/p' service/nginx.sh)"
+for expected in \
+    '/etc/tmpfiles.d/xray-nginx-shm.conf' \
+    'd /dev/shm/nginx 2770 nginx xray-nginx -' \
+    'd /dev/shm/nginx/tcmalloc 2770 nginx xray-nginx -' \
+    'systemd-tmpfiles --create'; do
+    grep -Fq "${expected}" <<<"${SERVICE_CONFIG_BODY}"
+done
+grep -Eq 'groupadd.*xray-nginx' <<<"${SERVICE_CONFIG_BODY}"
+grep -Eq 'usermod.*xray-nginx.*nginx' <<<"${SERVICE_CONFIG_BODY}"
+grep -Eq 'usermod.*xray-nginx.*xray' <<<"${SERVICE_CONFIG_BODY}"
+grep -Fq 'systemctl restart nginx' <<<"${SERVICE_CONFIG_BODY}"
+grep -Fq 'systemctl restart xray' <<<"${SERVICE_CONFIG_BODY}"
+grep -Eq -- '--service-config([[:space:]]*\||[[:space:]]*\))' service/nginx.sh
+awk '/^[[:space:]]*service-config\)/,/^[[:space:]]*;;/' service/nginx.sh | grep -q 'systemctl_config_nginx'
+UPDATE_BODY="$(awk '/^[[:space:]]*update\)/,/^[[:space:]]*;;/' service/nginx.sh)"
+grep -q 'migrate_nginx_runtime_config' <<<"${UPDATE_BODY}"
+grep -q 'systemctl_config_nginx' <<<"${UPDATE_BODY}"
+[[ "$(grep -c 'systemctl reset-failed xray' core/handler.sh)" -ge 2 ]]
+grep -q 'systemctl reset-failed nginx' core/handler.sh
+
+cp config/nginx/conf/sites-available/cdn.example.com.conf "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+cp config/nginx/conf/sites-available/domain.example.com.conf "${NGINX_CONFIG_DIR}/sites-available/stale-reality.example.com.conf"
+SCRIPT_CONFIG="$(jq '
+    .xray.tag = "CDN" |
+    .nginx.domain = "stale-reality.example.com" |
+    .nginx.cdn = "hydns.org"
+' <<<"${SCRIPT_CONFIG}")"
+function handler_cloudreve_v3() { :; }
+function handler_cloudreve_v4() { :; }
+function handler_nginx_restart() { :; }
+function handler_restart() { :; }
+function write_config() { :; }
+handler_web 'v3'
+grep -q '^[[:space:]]*include web/cloudreve.conf;' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+grep -q '# include web/cloudreve.conf;' "${NGINX_CONFIG_DIR}/sites-available/stale-reality.example.com.conf"
+
+SCRIPT_CONFIG="$(jq '.xray.tag = "SNI"' <<<"${SCRIPT_CONFIG}")"
+handler_web 'v3'
+grep -q '^[[:space:]]*include web/cloudreve.conf;' "${NGINX_CONFIG_DIR}/sites-available/stale-reality.example.com.conf"
+
+SCRIPT_CONFIG="$(jq '.xray.tag = "CDN"' <<<"${SCRIPT_CONFIG}")"
+XRAY_CONFIG_CALLS=0
+XRAY_CONFIG_ARG='not-called'
+X25519_CALLS=0
+MLDSA_CALLS=0
+function load_i18n() { :; }
+function handler_sni_config() { :; }
+function handler_xray_config() {
+    XRAY_CONFIG_CALLS=$((XRAY_CONFIG_CALLS + 1))
+    XRAY_CONFIG_ARG="${1:-}"
+    return 0
+}
+function handler_x25519_config() {
+    X25519_CALLS=$((X25519_CALLS + 1))
+    return 0
+}
+function handler_mldsa65_config() {
+    MLDSA_CALLS=$((MLDSA_CALLS + 1))
+    return 0
+}
+main '--xray-config' 'normal'
+[[ "${XRAY_CONFIG_CALLS}" -eq 1 ]]
+[[ -z "${XRAY_CONFIG_ARG}" ]]
+[[ "${X25519_CALLS}" -eq 0 ]]
+[[ "${MLDSA_CALLS}" -eq 0 ]]
+
+NGINX_CALL_LOG="${TEST_DIR}/nginx-calls.log"
+function ensure_service_users() { :; }
+function cmd_exists() { [[ "$1" == 'nginx' ]]; }
+function bash() { printf '%s\n' "$*" >>"${NGINX_CALL_LOG}"; }
+
+: >"${NGINX_CALL_LOG}"
+handler_nginx_install
+grep -Fxq "${NGINX_PATH} --service-config" "${NGINX_CALL_LOG}"
+
+: >"${NGINX_CALL_LOG}"
+handler_nginx_update
+grep -Fxq "${NGINX_PATH} --update --brotli" "${NGINX_CALL_LOG}"
+
+echo "CDN mode tests passed"

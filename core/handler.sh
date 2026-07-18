@@ -43,7 +43,8 @@ readonly CONFIG_DIR="${PROJECT_ROOT}/config"
 readonly SERVICE_DIR="${PROJECT_ROOT}/service"
 readonly TOOL_DIR="${PROJECT_ROOT}/tool"
 readonly SCRIPT_XRAY_DIR="${CONFIG_DIR}/xray"
-readonly NGINX_CONFIG_DIR="/usr/local/nginx/conf"
+readonly NGINX_CONFIG_DIR="${NGINX_CONFIG_DIR_OVERRIDE:-/usr/local/nginx/conf}"
+readonly NGINX_SERVICE_PATH="${NGINX_SERVICE_PATH_OVERRIDE:-/etc/systemd/system/nginx.service}"
 readonly GENERATE_PATH="${CUR_DIR}/generate.sh"
 readonly CHECK_PATH="${CUR_DIR}/check.sh"
 readonly SHARE_PATH="${CUR_DIR}/share.sh"
@@ -972,14 +973,23 @@ function handler_script_config() {
     local XHTTP_PATH="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
     local XHTTP_MODE="${CONFIG_DATA['xhttp-mode']:-auto}"
     # 获取或生成目标域名
-    local TARGET_DOMAIN="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
-    local NGINX_DOMAIN="${CONFIG_DATA['domain']:-${TARGET_DOMAIN}}"
+    # CDN-only mode has no Reality target; do not generate a random domain.
+    local TARGET_DOMAIN=''
+    local NGINX_DOMAIN=''
+    local SERVER_NAMES='[]'
+    if [[ "${CONFIG_TAG,,}" != 'cdn' ]]; then
+        TARGET_DOMAIN="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
+        NGINX_DOMAIN="${CONFIG_DATA['domain']:-${TARGET_DOMAIN}}"
     # 生成服务器名称列表
-    local SERVER_NAMES="$(exec_generate '--server-names' "${TARGET_DOMAIN}")"
+        SERVER_NAMES="$(exec_generate '--server-names' "${TARGET_DOMAIN}")"
+    fi
     # 获取 CDN 域名
     local CDN_DOMAIN="${CONFIG_DATA['cdn']}"
-    # 获取或生成 Short IDs
-    local SHORT_IDS="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-'8 8'})"
+    # CDN-only mode does not use Reality Short IDs.
+    local SHORT_IDS='[]'
+    if [[ "${CONFIG_TAG,,}" != 'cdn' ]]; then
+        SHORT_IDS="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-'8 8'})"
+    fi
     # 获取 CA 邮箱
     local CA_EMAIL="${CONFIG_DATA['email']}"
     # 更新脚本配置中的规则状态
@@ -1064,6 +1074,11 @@ function handler_script_config() {
         [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${NGINX_DOMAIN}" '.nginx.domain = $domain')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        # 清理从 Reality/SNI 模式遗留的源站目标，CDN 配置不会使用这些字段。
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
+            .xray.target = "" |
+            .xray.serverNames = []
+        ')"
         # 保存证书来源选择到配置文件
         if [[ -n "${CONFIG_DATA['cert_source']:-}" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cs "${CONFIG_DATA['cert_source']}" '.nginx.certSource = $cs')"
@@ -2226,6 +2241,8 @@ function handler_start() {
     if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
         handler_xray_config 1
     fi
+    # 清除此前因 Socket 目录缺失等原因触发的 systemd 启动频率限制。
+    systemctl reset-failed xray 2>/dev/null || true
     # 检查 Xray 服务是否活跃，如果不活跃则启动
     systemctl -q is-active xray || systemctl -q start xray
     # 检查 Xray 服务是否已启用，如果未启用则启用
@@ -2263,6 +2280,8 @@ function handler_restart() {
     if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
         handler_xray_config 1
     fi
+    # 允许已经进入 start-limit-hit/failed 状态的服务在修复后立即恢复。
+    systemctl reset-failed xray 2>/dev/null || true
     # 检查 Xray 服务是否活跃，如果活跃则重启，否则启动
     systemctl -q is-active xray && systemctl -q restart xray || systemctl -q start xray
     # 检查 Xray 服务是否已启用，如果未启用则启用
@@ -2463,6 +2482,9 @@ function handler_nginx_install() {
         SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg version "${NGINX_VERSION}" '.nginx.version = $version')
         # 将更新后的脚本配置写入文件
         write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    else
+        # 已安装的 Nginx 也要迁移 systemd unit 和共享 Socket 目录权限。
+        bash "${NGINX_PATH}" --service-config
     fi
 }
 
@@ -2473,7 +2495,7 @@ function handler_nginx_install() {
 # 返回值: 无 (通过调用 nginx.sh 脚本执行更新)
 # =============================================================================
 function handler_nginx_update() {
-    # 调用 nginx.sh 脚本更新 Nginx (带 Brotli 支持)
+    # 调用 nginx.sh 更新 Nginx；其 update 分支会同时刷新 systemd 服务配置。
     bash "${NGINX_PATH}" --update --brotli
 }
 
@@ -2572,6 +2594,25 @@ function handler_nginx_stop() {
 # 返回值: 无 (通过 systemctl 命令执行操作)
 # =============================================================================
 function handler_nginx_restart() {
+    local nginx_conf="${NGINX_CONFIG_DIR}/nginx.conf"
+    if [[ -f "${nginx_conf}" ]]; then
+        sed -i \
+            -e 's#^\([[:space:]]*\)ssl_ecdh_curve[[:space:]].*secp256r1.*;#\1ssl_ecdh_curve            X25519:prime256v1:secp384r1;#' \
+            -e 's|^\([[:space:]]*\)\(ssl_stapling[[:space:]][^;]*;\)|\1# \2|' \
+            -e 's|^\([[:space:]]*\)\(ssl_stapling_verify[[:space:]][^;]*;\)|\1# \2|' \
+            "${nginx_conf}"
+    fi
+
+    # 常用的改域名/切换 Web 流程也会直接走 restart；发现旧的破坏性 unit 时
+    # 立即迁移，避免它再次删除 Xray 正在使用的共享 Socket 目录。
+    if [[ -f "${NGINX_SERVICE_PATH}" ]]; then
+        if grep -Eq 'rm[[:space:]]+-rf[[:space:]]+/dev/shm/nginx(/|[[:space:]]|$)|ExecStopPost=.*dev/shm/nginx' "${NGINX_SERVICE_PATH}" ||
+            ! grep -Eq '^UMask=0007[[:space:]]*$' "${NGINX_SERVICE_PATH}" ||
+            ! grep -Fq -- '-m 2770 /dev/shm/nginx' "${NGINX_SERVICE_PATH}" ||
+            ! grep -Fq 'xray-nginx' "${NGINX_SERVICE_PATH}"; then
+            bash "${NGINX_PATH}" --service-config
+        fi
+    fi
     # 动态检测 nginx 二进制是否包含 brotli 压缩模块，如果不包含，则自动注释 general.conf 中的 brotli 配置，以防 Nginx 启动/重载报错
     if cmd_exists 'nginx' && ! nginx -V 2>&1 | grep -qi 'brotli'; then
         if [[ -f "${NGINX_CONFIG_DIR}/nginxconfig.io/general.conf" ]]; then
@@ -2579,6 +2620,7 @@ function handler_nginx_restart() {
         fi
     fi
 
+    systemctl reset-failed nginx 2>/dev/null || true
     # 检查 nginx 服务是否活跃，如果活跃则重启，否则启动
     systemctl -q is-active nginx && systemctl -q restart nginx || systemctl -q start nginx
     # 检查 nginx 服务是否已启用，如果未启用则启用
@@ -2933,8 +2975,19 @@ function handler_cloudreve_v4() {
 function handler_web() {
     local web="${1:-normal}" # 获取 Web 类型参数，默认为 normal
     # 从脚本配置中读取域名和 CDN
-    local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain')"
-    local cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn')"
+    local config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
+    local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
+    local cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    local site_domains=()
+    case "${config_tag,,}" in
+    cdn)
+        [[ -n "${cdn}" ]] && site_domains+=("${cdn}")
+        ;;
+    sni)
+        [[ -n "${domain}" ]] && site_domains+=("${domain}")
+        [[ -n "${cdn}" ]] && site_domains+=("${cdn}")
+        ;;
+    esac
     # 根据 Web 类型启动/停止 Cloudreve 容器
     case "${web}" in
     v3)
@@ -2957,13 +3010,15 @@ function handler_web() {
     case "${web}" in
     v3 | v4)
         # 启用 Cloudreve 配置 (取消注释)
-        sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
-        sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
+        for site_domain in "${site_domains[@]}"; do
+            sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+        done
         ;;
     *)
         # 禁用 Cloudreve 配置 (添加注释)
-        sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${domain}.conf"
-        sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${cdn}.conf"
+        for site_domain in "${site_domains[@]}"; do
+            sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+        done
         ;;
     esac
     # 重启或启动 Nginx 与 xray 服务
@@ -3353,6 +3408,9 @@ function main() {
         elif [[ "${current_tag,,}" == 'ss2022' ]]; then
             # SS2022 不需要 x25519、mldsa65、证书，直接生成/更新 Xray 配置并跳过 vlessenc
             handler_xray_config 1
+        elif [[ "${current_tag,,}" == 'cdn' ]]; then
+            # CDN-only mode has no Reality; keep VLESS enc but skip x25519/ML-DSA.
+            handler_xray_config
         else
             handler_x25519_config   # 生成 x25519 配置
             # 询问是否启用 ML-DSA-65 后量子密钥

@@ -576,6 +576,7 @@
       "options_title": "Options",
       "opt_install": "Install Nginx",
       "opt_update": "Update Nginx",
+      "opt_service_config": "Reconfigure the Nginx systemd service and shared socket directory",
       "opt_prebuilt": "Use pre-compiled binary from GitHub Releases (use with --install or --update)",
       "opt_brotli": "Enable Brotli compression (use with --install or --update)",
       "opt_purge": "Uninstall Nginx",
