@@ -1,5 +1,5 @@
 {
-  "version": "v2026.04.26",
+  "version": "v2026.07.21",
   "path": "",
   "language": "",
   "xray": {
@@ -60,7 +60,21 @@
     "ca": "",
     "domain": "",
     "cdn": "",
-    "web": ""
+    "web": "",
+    "certificates": {
+      "domain": {
+        "hostname": "",
+        "source": "",
+        "fullchain": "",
+        "privkey": ""
+      },
+      "cdn": {
+        "hostname": "",
+        "source": "",
+        "fullchain": "",
+        "privkey": ""
+      }
+    }
   },
   "target": {
     "scd.akacdn.riotgames.com.edgesuite.net": [

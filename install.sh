@@ -28,7 +28,7 @@
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
+PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:${HOME}/bin:/snap/bin:${PATH:-}"
 export PATH
 
 # 获取当前脚本的目录绝对路径和文件名
@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.01.23"
+readonly SCRIPT_VERSION="v2026.07.21"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -131,10 +131,16 @@ function show_help() {
 用法: bash $0 [选项]
 
 选项:
-  --vision       快速安装 Vision 配置
-  --xhttp        快速安装 XHTTP 配置
-  --fallback     快速安装 Fallback 配置
-  --multi        交互式安装多节点组合配置
+  --vision       安装 Vision + REALITY
+  --xhttp        安装 XHTTP + REALITY
+  --trojan       安装 Trojan + XHTTP + REALITY
+  --fallback     安装 Vision 回落 XHTTP
+  --hy2          安装 Hysteria2
+  --ss2022       安装 Shadowsocks 2022
+  --mkcp         安装 mKCP
+  --cdn          安装 CDN 独立模式
+  --sni          安装 SNI 复合模式
+  --multi        安装多节点组合配置
   --lan          管理异地组网
   --lang=<code>  设置语言 (zh/en/auto)
   -d <path>      自定义安装目录
@@ -143,8 +149,10 @@ function show_help() {
 
 示例:
   bash $0                    # 启动交互式菜单
-  bash $0 --vision           # 快速安装 Vision
-  bash $0 --multi            # 交互式生成多个节点
+  bash $0 --vision           # 安装 Vision
+  bash $0 --hy2              # 安装 Hysteria2
+  bash $0 --cdn              # 安装纯 CDN 模式
+  bash $0 --multi            # 生成多个节点
   bash $0 --lan              # 管理异地组网
   bash $0 --lang=en          # 使用英文界面
   bash $0 -d /opt/xray       # 安装到自定义目录
@@ -509,7 +517,7 @@ function main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
         # 快速安装选项
-        --vision | --xhttp | --fallback | --multi | --lan)
+        --vision | --xhttp | --trojan | --fallback | --hy2 | --ss2022 | --mkcp | --cdn | --sni | --multi | --lan)
             QUICK_INSTALL="${1}"
             ;;
         # 自定义安装目录选项
@@ -578,5 +586,6 @@ function main() {
 }
 
 # --- 脚本执行入口 ---
-# 将脚本接收到的所有参数传递给 main 函数开始执行
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

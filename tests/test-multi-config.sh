@@ -18,6 +18,8 @@ export XRAY_CONFIG_PATH_OVERRIDE="${TEST_DIR}/xray.json"
 source core/handler.sh
 I18N_DATA="$(jq . i18n/en.json)"
 
+[[ "$(read_multi_protocol_tag 1 <<<"")" == 'Vision' ]]
+
 declare -A EXPECTED_FIELDS=(
     [mKCP]='uuid seed'
     [Vision]='uuid target short'
@@ -97,7 +99,11 @@ function exec_generate() {
     esac
 }
 
-touch "${TEST_DIR}/cert.pem" "${TEST_DIR}/key.pem"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj '/CN=example.com' \
+    -addext 'subjectAltName=DNS:example.com' \
+    -keyout "${TEST_DIR}/key.pem" \
+    -out "${TEST_DIR}/cert.pem" >/dev/null 2>&1
 function run_vlessenc_choice() {
     CONFIG_DATA['vless_enc_enable']='n'
 }
@@ -106,16 +112,17 @@ READ_LOG=()
 PORT_READ_COUNT=0
 handler_read_multi_xray_config <<EOF
 7
+7
 1
 2
 3
 4
 5
-8
-9
+6
 3
 ${TEST_DIR}/cert.pem
 ${TEST_DIR}/key.pem
+
 EOF
 
 expected_read_order='rules port uuid seed port uuid target short port uuid target short path xhttp-mode port password target short path xhttp-mode port uuid fallback target short path xhttp-mode port hy2-auth port ss2022-password'
@@ -240,6 +247,11 @@ jq -e '
     ([.inbounds[] | select(.protocol == "vless")] | length) == 10 and
     ([.inbounds[] | select(.protocol == "trojan")] | length) == 2 and
     ([.inbounds[] | select(.protocol == "hysteria")] | length) == 2 and
+    all(.inbounds[] | select(.protocol == "hysteria");
+        .settings.clients[0].auth == "hy2-password" and
+        .streamSettings.hysteriaSettings.auth == "hy2-password" and
+        .streamSettings.hysteriaSettings.udpIdleTimeout == 60 and
+        .streamSettings.tlsSettings.certificates[0].usage == "encipherment") and
     ([.inbounds[] | select(.protocol == "shadowsocks")] | length) == 2 and
     all(.inbounds[] | select(.streamSettings.network? == "kcp");
         .streamSettings.finalmask.udp[0].type == "mkcp-aes128gcm" and

@@ -9,11 +9,16 @@
   * XHTTP (VLESS-XHTTP-REALITY)
   * trojan (Trojan-XHTTP-REALITY)
   * Fallback (包含 VLESS-Vision-REALITY、VLESS-XHTTP-REALITY)
+  * Hysteria2 (HY2 over QUIC + TLS)
+  * Shadowsocks 2022 (TCP + UDP)
+  * CDN 独立模式 (VLESS-XHTTP-TLS，不包含 REALITY)
   * SNI (包含 Vision_REALITY、XHTTP_REALITY、XHTTP_TLS)
+  * 多节点组合配置
 * 支持 VLESS enc（ML-KEM-768 后量子）可选启用
-* SNI 配置由 Nginx 实现 SNI 分流，适合过 CDN、上下行分离、多网站共存等需求
+* CDN 与 SNI 是两个独立安装模式：CDN 只部署 XHTTP over TLS；SNI 才启用 REALITY 与 SNI 分流
+* HY2 支持域名证书、短期 IP 证书和自定义证书，自定义证书会校验私钥及 SAN/CN
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
-* SNI 支持证书来源选择（自动申请 / 自行填写证书路径）
+* CDN/SNI 的站点证书分别保存，均支持自动申请或自行填写证书路径
 * Nginx 模板默认启用 limit.conf 基础防护（常见扫描与恶意 UA 拦截）
 * 规则配置与自填:
   * 禁止 bittorrent 流量(可选)
@@ -53,10 +58,10 @@
 ## 问题
 
 1. 如果安装成功，但无法使用，请检查服务器是否开启对应端口，可通过 `https://tcp.ping.pe/ip:port` 验证服务器端口是否开放。
-2. 使用 SNI 配置前，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放。
-3. 使用 SNI 配置前，请不要开启 CDN 保护，不然无法正常申请 SSL 证书。
+2. CDN/SNI 自动申请证书时，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放，并暂时关闭 CDN 代理。
+3. HY2 使用 UDP；除开放所选 UDP 端口外，还需确认服务商安全组允许 UDP。
 4. 选择自行填写证书路径时，请确保 fullchain/privkey 文件存在可读，否则流程会中止且不会自动回退到 ACME 申请。
-5. SNI 变更域名时，若目标站点配置已存在将保留，不会覆盖已有配置。
+5. 安装或重装 CDN/SNI 时，脚本会按所选模式重建其托管的 Nginx 站点；从 SNI 切换到 CDN 会停用旧的 SNI 直连站点。
 6. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
 7. 使用 SNI 获取证书时遇到 【Could not get nonce, let's try again】 请查看 [ZeroSSL 状态页](https://status.zerossl.com/)，大概率是 ZeroSSL 的【Free ACME Service】处于 【Service disruption】或【Service outage】状态。
 8. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
@@ -84,23 +89,17 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
     bash ${HOME}/Xray-script.sh
     ```
 
-  * 快速安装 Vision
+  * 直接安装指定模式
 
     ```sh
     bash ${HOME}/Xray-script.sh --vision
+    bash ${HOME}/Xray-script.sh --hy2
+    bash ${HOME}/Xray-script.sh --cdn
+    bash ${HOME}/Xray-script.sh --sni
+    bash ${HOME}/Xray-script.sh --multi
     ```
 
-  * 快速安装 XHTTP
-
-    ```sh
-    bash ${HOME}/Xray-script.sh --xhttp
-    ```
-
-  * 快速安装 Fallback
-
-    ```sh
-    bash ${HOME}/Xray-script.sh --fallback
-    ```
+    其余可用参数：`--xhttp`、`--trojan`、`--fallback`、`--ss2022`、`--mkcp`。
 
   * 管理异地组网
 
@@ -138,8 +137,8 @@ WARP Proxy : 已启动
  Version      : v2025-07-25
  Description  : Xray 管理脚本
 ----------------- 装载管理 ----------------
-1. 完整安装
-2. 仅安装/更新
+1. 安装或重装节点
+2. 仅更新 Xray 内核
 3. 卸载
 ----------------- 操作管理 ----------------
 4. 启动
@@ -168,15 +167,13 @@ WARP Proxy : 已启动
 
 ## 安装时长说明
 
-SNI 配置适合安装一次后长期使用，不适合反复重置系统安装，这会消耗您的大量时间。如果需要更换配置和域名等，在管理界面都有相应的选项。
+CDN/SNI 的域名、证书和伪装站点可在「管理配置 -> CDN / SNI 站点管理」中单独维护。
 
-更换为非 SNI 配置后，Nginx 将停止服务，但会继续保留在本机，再启用 SNI 配置时不会进行重新安装。
+更换为非 CDN/SNI 协议后，Nginx 将停止服务但继续保留；CDN 与 SNI 之间切换时则按新模式重建托管站点。
 
 ### 安装时长参考
 
-安装流程：
-
-更新系统管理包->安装依赖->[安装Docker]->[安装Cloudreve]->[安装Cloudflare-warp]->安装Xray->安装Nginx->申请证书->配置文件
+安装流程：选择协议 -> 输入该协议所需参数 -> 安装或复用 Xray -> CDN/SNI 可选伪装站点并安装或复用 Nginx -> 配置各自证书 -> 生成并校验配置 -> 启动服务 -> 输出分享链接。
 
 **这是一台单核1G的服务器的平均安装时长，仅供参考：**
 
@@ -192,9 +189,9 @@ SNI 配置适合安装一次后长期使用，不适合反复重置系统安装�
 | 申请证书            | 1-2分钟   |
 | 配置文件            | <半分钟  |
 
-### 为什么 SNI 配置安装时间那么长？
+### Nginx 安装方式
 
-脚本的 Nginx 是采用源码编译的形式进行管理安装。
+默认下载预编译版本，也可在安装时选择本地源码编译。源码编译耗时更长，但可针对当前系统构建。
 
 编译相比直接安装二进制文件的优点有：
 
@@ -217,7 +214,7 @@ SNI 配置适合安装一次后长期使用，不适合反复重置系统安装�
 
 ## 依赖列表
 
-使用 SNI 配置时，脚本可能自动安装以下依赖：
+使用 CDN/SNI 配置时，脚本可能自动安装以下依赖：
 | 用途                            | Debian基系统                         | Red Hat基系统       |
 | ------------------------------- | ------------------------------------ | ------------------- |
 | yumdb set(标记包手动安装)       |                                      | yum-utils           |

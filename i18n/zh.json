@@ -12,7 +12,7 @@
     "multiple_values": "多个值请用英文逗号分隔"
   },
   "main": {
-    "not_support": "当前脚本配置类型不是 SNI ，无法使用该功能"
+    "not_support": "该功能仅适用于当前已安装的 CDN 或 SNI 模式"
   },
   "menu": {
     "choose": "请选择操作",
@@ -25,11 +25,11 @@
     },
     "index": {
       "description": "Xray 管理脚本",
-      "installation": "装载管理",
+      "installation": "安装与更新",
       "operation": "操作管理",
       "configuration": "配置管理",
-      "option1": "完整安装",
-      "option2": "仅安装/更新",
+      "option1": "安装或重装节点",
+      "option2": "仅更新 Xray 内核",
       "option3": "卸载",
       "option4": "启动",
       "option5": "停止",
@@ -47,26 +47,35 @@
       "info2": "自选版本,自选配置"
     },
     "xray_version": {
-      "title": "装载管理",
+      "title": "选择 Xray 内核版本",
       "option1": "最新版",
       "option2": "稳定版",
       "option3": "自选版",
+      "option0": "取消",
       "info1": "最新版包含了 pre-release 版本",
       "info2": "稳定版为最新发布的非 pre-release 版本",
       "info3": "自选版可能存在配置不兼容问题，请自行解决"
     },
     "protocol_config": {
-      "title": "可选配置",
-      "option1": "VLESS+mKCP+seed",
-      "option2": "VLESS+Vision+REALITY",
-      "option3": "VLESS+XHTTP+REALITY",
-      "option4": "Trojan+XHTTP+REALITY",
-      "option5": "双协议复合配置",
-      "option6": "SNI分流复合配置",
-      "option7": "CDN 独立配置",
-      "option8": "Hysteria2 (HY2)",
-      "option9": "Shadowsocks 2022 (SS2022)",
+      "title": "选择节点模式",
+      "group_reality": "[REALITY 直连]",
+      "group_standalone": "[独立协议]",
+      "group_web": "[Nginx / TLS 网站模式]",
+      "group_advanced": "[高级]",
+      "option1": "VLESS + Vision + REALITY",
+      "option2": "VLESS + XHTTP + REALITY",
+      "option3": "Trojan + XHTTP + REALITY",
+      "option4": "Vision 回落 XHTTP（共用端口）",
+      "option5": "Hysteria2（HY2 / QUIC）",
+      "option6": "Shadowsocks 2022（TCP + UDP）",
+      "option7": "VLESS + mKCP + seed",
+      "option8": "CDN 独立模式（XHTTP over TLS）",
+      "option9": "SNI 复合模式（REALITY + CDN）",
       "option10": "多节点组合配置",
+      "option0": "取消",
+      "note_hy2": "提示：HY2 使用 UDP，需要域名证书、IP 证书或自定义证书。",
+      "note_web": "提示：CDN/SNI 固定由 Nginx 监听 443，并在后续单独配置站点证书。",
+      "note_multi": "提示：多节点模式不包含 CDN/SNI。",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
       "info3": "XHTTP 全场景通吃的时代正式到来(详情: https://github.com/XTLS/Xray-core/discussions/4113    )",
@@ -81,18 +90,19 @@
       "info10": "一次生成多个节点，可为每个节点选择协议、端口和相关参数"
     },
     "web_config": {
-      "title": "Web 配置",
+      "title": "选择伪装站点内容（仅 CDN/SNI）",
       "option1": "Nginx 默认页面",
       "option2": "Cloudreve v3版",
       "option3": "Cloudreve v4版",
+      "option0": "取消",
       "info1": "Cloudreve v3 版本自动生成管理员账号",
       "info2": "Cloudreve v4 版本首个注册的账户会被设置为管理员"
     },
     "config_management": {
       "title": "管理配置",
-      "option1": "更新配置",
+      "option1": "重新选择协议并配置",
       "option2": "分流管理",
-      "option3": "SNI 配置管理",
+      "option3": "CDN / SNI 站点管理",
       "option4": "修改 Xray 端口",
       "option5": "开/关 geodata 自动更新",
       "option6": "设置语言",
@@ -101,7 +111,7 @@
       "info1": "更新配置功能为整个配置的更新",
       "info2": "管理屏蔽或 WARP 分流",
       "info3": "包含 Nginx 更新，修改域名，修改 Web 配置等",
-      "info4": "(非 SNI 配置) 修改 Xray 监听端口，并自动重启服务",
+      "info4": "修改单节点直连协议的 Xray 监听端口，并自动重启服务",
       "info5": "geodata 由 https://github.com/Loyalsoldier/v2ray-rules-dat  提供",
       "info6": "配置 Xray VLESS 反向代理，将公网端口映射到内网服务",
       "info7": "通过 Xray TUN 和专用 VLESS 反向通道连接多个 IPv4 局域网"
@@ -135,6 +145,15 @@
       "info1": "Reality 对应的域名",
       "info2": "套用 CDN 的域名"
     },
+    "cdn_config": {
+      "title": "CDN 站点管理",
+      "option1": "修改 CDN 域名",
+      "option2": "强制续签证书",
+      "option3": "更新 Nginx",
+      "option4": "开/关 Nginx 自动更新",
+      "option5": "修改伪装站点内容",
+      "option6": "重置 Cloudreve v3 管理员数据"
+    },
     "reverse": {
       "title": "反向代理(内网穿透)",
       "option1": "启用反向代理",
@@ -162,6 +181,12 @@
     "xray": {
       "config_update": "正在更新 Xray 配置"
     },
+    "xray_version": {
+      "fetch_fail": "无法获取有效的 Xray 版本，请检查 GitHub 网络连接后重试"
+    },
+    "port": {
+      "fixed": "当前模式使用固定入口或多节点端口，不能在此统一修改"
+    },
     "vless_enc": {
       "prompt": "是否启用 VLESS enc (ML-KEM-768 后量子) [y/N]: ",
       "running": "正在运行 xray vlessenc 生成配置...",
@@ -181,18 +206,28 @@
       "open_cron": "成功开启 nginx 自动更新任务",
       "install_mode_prompt": "请选择 Nginx 安装模式 (默认 1)：",
       "install_mode_prebuilt": "从 GitHub Releases 下载预编译二进制 (快速，推荐)",
-      "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)"
+      "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)",
+      "install_mode_invalid": "请选择 1 或 2"
     },
     "gh_proxy": {
       "prompt": "是否在中国大陆，使用 GitHub 加速下载 [y/N]: ",
       "fetch_fail": "下载 Xray 安装脚本失败，请检查网络或稍后重试"
     },
+    "multi": {
+      "protocol_title": "选择多节点协议",
+      "select_protocol": "请选择节点协议，节点序号:",
+      "unsupported": "该选项不可用于多节点模式，请选择列表中的 1-7。"
+    },
     "cert_source": {
-      "prompt": "证书来源 [1. 自动申请(acme) / 2. 自行填写证书路径] (默认 1): ",
+      "prompt_cdn": "CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "prompt_sni_domain": "SNI 直连站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "prompt_sni_cdn": "SNI 模式的 CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "source_invalid": "证书来源只能选择 1 或 2",
       "fullchain": "请输入证书(fullchain)文件路径: ",
       "privkey": "请输入私钥(privkey)文件路径: ",
       "path_invalid": "文件不存在或不可读，请重新输入",
-      "install_ok": "已使用您提供的证书"
+      "install_ok": "已使用您提供的证书",
+      "cert_invalid": "证书与私钥不匹配，或证书不包含当前站点域名"
     },
     "hy2_cert": {
       "prompt": "证书来源 [1. acme.sh 申请域名证书 / 2. acme.sh 申请 IP 证书 / 3. 自定义证书路径] (默认 1): ",
@@ -205,7 +240,11 @@
       "install_ok": "证书已安装",
       "fullchain": "请输入证书(fullchain)文件路径: ",
       "privkey": "请输入私钥(privkey)文件路径: ",
+      "server_name": "请输入客户端用于校验证书的服务器名称或 IP",
       "path_invalid": "文件不存在或不可读，请重新输入",
+      "pair_invalid": "证书格式无效或证书与私钥不匹配",
+      "name_invalid": "请输入有效的域名或 IP",
+      "name_mismatch": "该名称不在证书的 SAN/CN 中，请重新输入",
       "source_invalid": "请选择 1、2 或 3",
       "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试",
       "firewall_open": "正在开放 UDP 端口",

@@ -65,7 +65,7 @@
         "version": 2,
         "clients": [
           {
-            "auth": "your-password-here",
+            "auth": "",
             "email": "hy2@xray.hysteria",
             "level": 0
           }
@@ -77,6 +77,7 @@
         "tlsSettings": {
           "certificates": [
             {
+              "usage": "encipherment",
               "certificateFile": "/usr/local/etc/xray/certs/fullchain.pem",
               "keyFile": "/usr/local/etc/xray/certs/privkey.pem"
             }
@@ -86,7 +87,9 @@
           ]
         },
         "hysteriaSettings": {
-          "version": 2
+          "version": 2,
+          "auth": "",
+          "udpIdleTimeout": 60
         }
       },
       "sniffing": {

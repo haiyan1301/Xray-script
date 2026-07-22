@@ -9,9 +9,15 @@
   * XHTTP (VLESS-XHTTP-REALITY)
   * trojan (Trojan-XHTTP-REALITY)
   * Fallback (includes VLESS-Vision-REALITY, VLESS-XHTTP-REALITY)
+  * Hysteria2 (HY2 over QUIC + TLS)
+  * Shadowsocks 2022 (TCP + UDP)
+  * CDN-only mode (VLESS-XHTTP-TLS, without REALITY)
   * SNI (includes Vision_REALITY, XHTTP_REALITY, XHTTP_TLS)
-* SNI configuration uses Nginx for SNI traffic splitting, ideal for CDN traversal, upstream/downstream separation, and multi-site coexistence
+  * Multi-node composite configuration
+* CDN and SNI are separate modes: CDN deploys only XHTTP over TLS; SNI enables REALITY and SNI traffic splitting
+* HY2 supports domain, short-lived IP, and custom certificates; custom certificates are checked against their key and SAN/CN
 * SNI share links implement bidirectional separation (upstream: xhttp+TLS+CDN | downstream: xhttp+Reality, upstream: xhttp+Reality | downstream: xhttp+TLS+CDN)
+* CDN and SNI site certificates are stored independently; both support automatic issuance or custom certificate paths
 * Rule configurations and custom entries:
   * Block BitTorrent traffic (optional)
   * Block China IP traffic (optional)
@@ -50,8 +56,8 @@
 ## Issues
 
 1. If the installation is successful but does not work properly, please check whether the server port is open. You can verify port accessibility through `https://tcp.ping.pe/ip:port`
-2. Before using SNI configuration, ensure VPS HTTP(80) and HTTPS(443) ports are open
-3. Before using SNI configuration, disable CDN protection to avoid SSL certificate issues
+2. For automatic CDN/SNI certificates, open HTTP(80) and HTTPS(443) and temporarily disable CDN proxying
+3. HY2 uses UDP. Open the selected UDP port in both the host firewall and provider security group
 4. For upstream/downstream separation details, see [XHTTP: Beyond REALITY][XHTTP] and [xhttp 五合一配置][xhttp 五合一配置]
 5. When using SNI to obtain a certificate and encountering the error ["Could not get nonce, let's try again"], please check the [ZeroSSL Status Page](https://status.zerossl.com/) . It is highly likely that ZeroSSL's "Free ACME Service" is experiencing "Service disruption" or "Service outage"
 6. Version v2025.11.19 resolves the issue where 【"WARP was enabled without log limits, causing container logs to accumulate continuously, eventually filling up disk space"】.
@@ -78,23 +84,17 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
     bash ${HOME}/Xray-script.sh
     ```
 
-  * Quick install Vision
+  * Install a specific mode directly
 
     ```sh
     bash ${HOME}/Xray-script.sh --vision
+    bash ${HOME}/Xray-script.sh --hy2
+    bash ${HOME}/Xray-script.sh --cdn
+    bash ${HOME}/Xray-script.sh --sni
+    bash ${HOME}/Xray-script.sh --multi
     ```
 
-  * Quick install XHTTP
-
-    ```sh
-    bash ${HOME}/Xray-script.sh --xhttp
-    ```
-
-  * Quick install Fallback
-
-    ```sh
-    bash ${HOME}/Xray-script.sh --fallback
-    ```
+    Other flags: `--xhttp`, `--trojan`, `--fallback`, `--ss2022`, and `--mkcp`.
 
   * Manage site-to-site LAN
 
@@ -131,8 +131,8 @@ WARP Proxy : Running
  Version      : v2025-07-25
  Description  : Xray Management Script
 ----------------- Installation ----------------
-1. Full installation
-2. Install/Update only
+1. Install or reconfigure a node
+2. Update Xray core only
 3. Uninstall
 ----------------- Operation -----------------
 4. Start
@@ -159,9 +159,11 @@ All tested on Vultr instances. Other Debian/Red Hat derivatives might work but a
 
 ## Installation Time Notes
 
-SNI configuration is designed for long-term use after initial setup. Reinstalling systems frequently will consume significant time. Use configuration management options for domain/setting changes.
+Manage CDN/SNI domains, certificates, and camouflage content under `Manage Configuration -> CDN / SNI Site Management`.
 
-When switching from SNI configuration, Nginx stops but remains installed. Reactivating SNI won't trigger reinstallation.
+When switching to a protocol other than CDN/SNI, Nginx stops but remains installed. Switching between CDN and SNI rebuilds the managed sites for the selected mode.
+
+Installation flow: choose a protocol -> enter only its required settings -> install or reuse Xray -> for CDN/SNI, choose camouflage content and install or reuse Nginx -> configure per-site certificates -> generate and validate the configuration -> start services -> print share links.
 
 ### Installation Time Reference (1CPU/1GB)
 
@@ -177,9 +179,9 @@ When switching from SNI configuration, Nginx stops but remains installed. Reacti
 | Issue certificates      | 1-2 minutes        |
 | Configuration files     | < 100 milliseconds |
 
-### Why does the script installation take so long?
+### Nginx Installation
 
-Nginx in the script is managed by compiling from source.
+The prebuilt package is the default. Local source compilation remains available during installation and takes longer.
 
 The advantages of compiling include:
 
@@ -204,7 +206,7 @@ The drawback is that compilation takes a long time.
 
 ## Dependencies
 
-SNI configuration may install these dependencies:
+CDN/SNI configuration may install these dependencies:
 
 | Purpose                                           | Debian-based Systems                        | Red Hat-based Systems |
 | ------------------------------------------------- | ------------------------------------------- | --------------------- |

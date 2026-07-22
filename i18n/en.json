@@ -12,7 +12,7 @@
     "multiple_values": "Multiple values separated by commas"
   },
   "main": {
-    "not_support": "Current script configuration type is not SNI, this feature is not available"
+    "not_support": "This feature is available only when CDN or SNI mode is currently installed"
   },
   "menu": {
     "choose": "Please choose an option",
@@ -25,11 +25,11 @@
     },
     "index": {
       "description": "Xray Management Script",
-      "installation": "Installation",
+      "installation": "Install & Update",
       "operation": "Operation",
       "configuration": "Configuration",
-      "option1": "Full Installation",
-      "option2": "Install/Update Only",
+      "option1": "Install or Reconfigure a Node",
+      "option2": "Update Xray Core Only",
       "option3": "Uninstall",
       "option4": "Start",
       "option5": "Stop",
@@ -47,26 +47,35 @@
       "info2": "Custom version, custom config"
     },
     "xray_version": {
-      "title": "Xray Version",
+      "title": "Select Xray Core Version",
       "option1": "Latest",
       "option2": "Stable",
       "option3": "Custom",
+      "option0": "Cancel",
       "info1": "Includes pre-release versions",
       "info2": "Latest official release",
       "info3": "Custom versions may have config compatibility issues"
     },
     "protocol_config": {
-      "title": "Protocol Config",
-      "option1": "VLESS+mKCP+seed",
-      "option2": "VLESS+Vision+REALITY",
-      "option3": "VLESS+XHTTP+REALITY",
-      "option4": "Trojan+XHTTP+REALITY",
-      "option5": "Dual Protocol Composite",
-      "option6": "SNI Split Composite",
-      "option7": "CDN Standalone",
-      "option8": "Hysteria2 (HY2)",
-      "option9": "Shadowsocks 2022 (SS2022)",
+      "title": "Select Node Mode",
+      "group_reality": "[Direct REALITY]",
+      "group_standalone": "[Standalone Protocols]",
+      "group_web": "[Nginx / TLS Website Modes]",
+      "group_advanced": "[Advanced]",
+      "option1": "VLESS + Vision + REALITY",
+      "option2": "VLESS + XHTTP + REALITY",
+      "option3": "Trojan + XHTTP + REALITY",
+      "option4": "Vision fallback to XHTTP (shared port)",
+      "option5": "Hysteria2 (HY2 / QUIC)",
+      "option6": "Shadowsocks 2022 (TCP + UDP)",
+      "option7": "VLESS + mKCP + seed",
+      "option8": "CDN only (XHTTP over TLS)",
+      "option9": "SNI composite (REALITY + CDN)",
       "option10": "Multi-node Composite",
+      "option0": "Cancel",
+      "note_hy2": "Note: HY2 uses UDP and requires a domain, IP, or custom TLS certificate.",
+      "note_web": "Note: CDN/SNI always use Nginx on port 443; site certificates are configured separately.",
+      "note_multi": "Note: Multi-node mode does not include CDN or SNI.",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
       "info3": "XHTTP supports all scenarios",
@@ -81,18 +90,19 @@
       "info10": "Generate multiple nodes in one run, with per-node protocol, port, and related settings"
     },
     "web_config": {
-      "title": "Web Config",
+      "title": "Select Camouflage Site Content (CDN/SNI only)",
       "option1": "Nginx Default Page",
       "option2": "Cloudreve v3",
       "option3": "Cloudreve v4",
+      "option0": "Cancel",
       "info1": "Cloudreve v3 auto-generates admin account",
       "info2": "First registered user in Cloudreve v4 becomes admin"
     },
     "config_management": {
       "title": "Configuration Management",
-      "option1": "Update Configuration",
+      "option1": "Choose Protocol and Reconfigure",
       "option2": "Route Management",
-      "option3": "SNI Configuration",
+      "option3": "CDN / SNI Site Management",
       "option4": "Change Xray Port",
       "option5": "Enable/Disable geodata auto-update",
       "option6": "Language",
@@ -101,7 +111,7 @@
       "info1": "Full config update",
       "info2": "Manage blocking or WARP routing",
       "info3": "Includes Nginx update, domain change, web config",
-      "info4": "(Non-SNI) Change Xray listen port and restart service",
+      "info4": "Change the Xray listen port for a standalone single-node protocol and restart service",
       "info5": "geodata provided by  https://github.com/Loyalsoldier/v2ray-rules-dat ",
       "info6": "Configure Xray VLESS reverse proxy, map public port to internal network service",
       "info7": "Connect multiple IPv4 LANs through Xray TUN and dedicated VLESS reverse channels"
@@ -135,6 +145,15 @@
       "info1": "Domain for REALITY",
       "info2": "Domain for CDN"
     },
+    "cdn_config": {
+      "title": "CDN Site Management",
+      "option1": "Change CDN domain",
+      "option2": "Force certificate renewal",
+      "option3": "Update Nginx",
+      "option4": "Enable/Disable Nginx auto-update",
+      "option5": "Change camouflage site content",
+      "option6": "Reset Cloudreve v3 admin data"
+    },
     "reverse": {
       "title": "Reverse Proxy (NAT Traversal)",
       "option1": "Enable Reverse Proxy",
@@ -162,6 +181,12 @@
     "xray": {
       "config_update": "Updating Xray configuration"
     },
+    "xray_version": {
+      "fetch_fail": "Could not obtain a valid Xray version; check GitHub connectivity and retry"
+    },
+    "port": {
+      "fixed": "This mode uses a fixed entry point or per-node ports and cannot be changed here"
+    },
     "vless_enc": {
       "prompt": "Enable VLESS enc (ML-KEM-768 Post-Quantum) [y/N]: ",
       "running": "Running xray vlessenc to generate config...",
@@ -181,18 +206,28 @@
       "open_cron": "Successfully started nginx auto-update task",
       "install_mode_prompt": "Choose Nginx installation mode (default 1):",
       "install_mode_prebuilt": "Download pre-compiled binary from GitHub Releases (fast, recommended)",
-      "install_mode_compile": "Compile from source locally (slow, requires build tools)"
+      "install_mode_compile": "Compile from source locally (slow, requires build tools)",
+      "install_mode_invalid": "Select 1 or 2"
     },
     "gh_proxy": {
       "prompt": "In mainland China, use GitHub proxy for download [y/N]: ",
       "fetch_fail": "Failed to download Xray install script, check network or retry later"
     },
+    "multi": {
+      "protocol_title": "Multi-node Protocol",
+      "select_protocol": "Select protocol for node:",
+      "unsupported": "This option is unavailable in multi-node mode; choose 1-7 from the list."
+    },
     "cert_source": {
-      "prompt": "Certificate source [1. Auto (acme) / 2. Use my own certificate paths] (default 1): ",
+      "prompt_cdn": "CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
+      "prompt_sni_domain": "SNI direct-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
+      "prompt_sni_cdn": "SNI mode CDN-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
+      "source_invalid": "Certificate source must be 1 or 2",
       "fullchain": "Enter fullchain certificate file path: ",
       "privkey": "Enter private key (privkey) file path: ",
       "path_invalid": "File not found or not readable",
-      "install_ok": "Using your provided certificate"
+      "install_ok": "Using your provided certificate",
+      "cert_invalid": "The certificate and key do not match, or the certificate does not cover this site name"
     },
     "hy2_cert": {
       "prompt": "Certificate source [1. acme.sh domain cert / 2. acme.sh IP cert / 3. Custom cert path] (default 1): ",
@@ -205,7 +240,11 @@
       "install_ok": "Certificate installed",
       "fullchain": "Enter fullchain certificate file path: ",
       "privkey": "Enter private key file path: ",
+      "server_name": "Enter the server name or IP clients should use to verify the certificate",
       "path_invalid": "File not found or not readable",
+      "pair_invalid": "The certificate is invalid or does not match the private key",
+      "name_invalid": "Enter a valid domain name or IP address",
+      "name_mismatch": "The name is not covered by the certificate SAN/CN; please try again",
       "source_invalid": "Select 1, 2, or 3",
       "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry",
       "firewall_open": "Opening UDP port in firewall",

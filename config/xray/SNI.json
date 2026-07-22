@@ -58,7 +58,7 @@
     },
     {
       "tag": "VLESS-Vision-REALITY",
-      "listen": "/dev/shm/nginx/nginx_to_xray_vision.sock,0666",
+      "listen": "/dev/shm/nginx/nginx_to_xray_vision.sock,0660",
       "protocol": "vless",
       "settings": {
         "clients": [
@@ -111,7 +111,7 @@
     },
     {
       "tag": "VLESS-XHTTP-REALITY",
-      "listen": "/dev/shm/nginx/to_xray_xhttp.sock,0666",
+      "listen": "/dev/shm/nginx/to_xray_xhttp.sock,0660",
       "protocol": "vless",
       "settings": {
         "clients": [

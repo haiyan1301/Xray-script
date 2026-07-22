@@ -9,7 +9,12 @@ cd "${TEST_PROJECT_ROOT}"
 readonly JQ_BIN="$(command -v jq || true)"
 [[ -n "${JQ_BIN}" ]] || { echo "jq is required" >&2; exit 1; }
 
-mkdir -p "${TEST_DIR}/home/.xray-script" "${TEST_DIR}/home/bin" "${TEST_DIR}/nginx/sites-available"
+mkdir -p \
+    "${TEST_DIR}/home/.xray-script" \
+    "${TEST_DIR}/home/bin" \
+    "${TEST_DIR}/nginx/sites-available" \
+    "${TEST_DIR}/nginx/sites-enabled" \
+    "${TEST_DIR}/nginx/modules-enabled"
 ln -s "${JQ_BIN}" "${TEST_DIR}/home/bin/jq"
 cp config.json "${TEST_DIR}/script.json"
 cp config.json "${TEST_DIR}/home/.xray-script/config.json"
@@ -118,7 +123,7 @@ handler_script_config
 jq -e '
     .xray.tag == "CDN" and
     .nginx.cdn == "hydns.org" and
-    .nginx.domain == "" and
+    .nginx.domain == "stale-reality.example.com" and
     .xray.target == "" and
     .xray.serverNames == []
 ' <<<"${SCRIPT_CONFIG}" >/dev/null
@@ -192,13 +197,89 @@ SCRIPT_CONFIG="$(jq '.xray.tag = "SNI"' <<<"${SCRIPT_CONFIG}")"
 handler_web 'v3'
 grep -q '^[[:space:]]*include web/cloudreve.conf;' "${NGINX_CONFIG_DIR}/sites-available/stale-reality.example.com.conf"
 
+# Reinstalling CDN over an old SNI-generated site must rebuild a direct TLS
+# listener instead of retaining the SNI Unix Socket listener.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj '/CN=hydns.org' \
+    -addext 'subjectAltName=DNS:hydns.org' \
+    -keyout "${TEST_DIR}/hydns.key" \
+    -out "${TEST_DIR}/hydns.crt" >/dev/null 2>&1
+SCRIPT_CONFIG="$(jq \
+    --arg cert "${TEST_DIR}/hydns.crt" \
+    --arg key "${TEST_DIR}/hydns.key" '
+    .xray.tag = "CDN" |
+    .xray.path = "/cdn-test" |
+    .nginx.domain = "stale-reality.example.com" |
+    .nginx.cdn = "hydns.org" |
+    .nginx.certificates.cdn = {
+        hostname:"hydns.org", source:"2", fullchain:$cert, privkey:$key
+    }
+' <<<"${SCRIPT_CONFIG}")"
+reset_config_data
+CONFIG_DATA['only-change-domain']='n'
+handler_change_domain 'cdn' 'n'
+grep -q 'listen 443 ssl reuseport;' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+grep -q 'listen \[::\]:443 ssl reuseport;' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+grep -q 'server_name[[:space:]]*hydns.org;' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+! grep -q 'cdn_to_nginx.sock' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+! grep -q 'proxy_protocol' "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+
+# A fresh CDN certificate choice must use CDN-specific wording only.
+SCRIPT_CONFIG="$(jq 'del(.nginx.certificates.cdn)' <<<"${SCRIPT_CONFIG}")"
+reset_config_data
+CONFIG_DATA['only-change-domain']='n'
+CDN_PROMPT_LOG="${TEST_DIR}/cdn-prompt.log"
+handler_change_domain 'cdn' 'n' 'n' 2>"${CDN_PROMPT_LOG}" <<EOF
+2
+${TEST_DIR}/hydns.crt
+${TEST_DIR}/hydns.key
+EOF
+grep -Fq 'CDN site TLS certificate' "${CDN_PROMPT_LOG}"
+! grep -qi 'SNI' "${CDN_PROMPT_LOG}"
+
+# Preparing pure CDN mode disables the stale SNI direct site and never calls
+# the direct-domain branch.
+touch "${NGINX_CONFIG_DIR}/sites-enabled/stale-reality.example.com.conf"
+PREPARE_LOG="${TEST_DIR}/prepare.log"
+: >"${PREPARE_LOG}"
+function handler_change_domain() { printf 'domain:%s\n' "$*" >>"${PREPARE_LOG}"; }
+function handler_web() { printf 'web:%s\n' "$*" >>"${PREPARE_LOG}"; }
+handler_prepare_protocol_services 'normal'
+[[ "$(head -n 1 "${PREPARE_LOG}")" == 'domain:cdn n n' ]]
+grep -Fxq 'web:normal n' "${PREPARE_LOG}"
+! grep -Fxq 'domain:domain n n' "${PREPARE_LOG}"
+[[ ! -e "${NGINX_CONFIG_DIR}/sites-enabled/stale-reality.example.com.conf" ]]
+[[ "$(jq -r '.nginx.domain' <<<"${SCRIPT_CONFIG}")" == '' ]]
+
+# Pure CDN Xray output contains XHTTP only: no REALITY settings or public port.
+handler_xray_config
+jq -e '
+    .inbounds[1].protocol == "vless" and
+    .inbounds[1].streamSettings.network == "xhttp" and
+    (.inbounds[1].streamSettings | has("realitySettings") | not) and
+    (.inbounds[1] | has("port") | not) and
+    (.inbounds[1].listen | endswith(",0660"))
+' "${XRAY_CONFIG_PATH}" >/dev/null
+xray_bin="${XRAY_BIN:-$(command -v xray || true)}"
+if [[ -n "${xray_bin}" ]]; then
+    # A Windows Xray binary cannot build a Unix-domain listener. Replace only
+    # the platform-specific endpoint while validating the CDN protocol config.
+    jq '
+        .log = {loglevel:"none"} |
+        .inbounds[1].listen = "127.0.0.1" |
+        .inbounds[1].port = 24444
+    ' \
+        "${XRAY_CONFIG_PATH}" >"${TEST_DIR}/cdn-xray-test.json"
+    "${xray_bin}" run -test -c "${TEST_DIR}/cdn-xray-test.json"
+fi
+
 SCRIPT_CONFIG="$(jq '.xray.tag = "CDN"' <<<"${SCRIPT_CONFIG}")"
 XRAY_CONFIG_CALLS=0
 XRAY_CONFIG_ARG='not-called'
 X25519_CALLS=0
 MLDSA_CALLS=0
 function load_i18n() { :; }
-function handler_sni_config() { :; }
+function handler_prepare_protocol_services() { :; }
 function handler_xray_config() {
     XRAY_CONFIG_CALLS=$((XRAY_CONFIG_CALLS + 1))
     XRAY_CONFIG_ARG="${1:-}"
@@ -230,5 +311,20 @@ grep -Fxq "${NGINX_PATH} --service-config" "${NGINX_CALL_LOG}"
 : >"${NGINX_CALL_LOG}"
 handler_nginx_update
 grep -Fxq "${NGINX_PATH} --update --brotli" "${NGINX_CALL_LOG}"
+
+# Stopping an absent Cloudreve service is cleanup, not an installation path.
+DOCKER_CALLS=0
+function cmd_exists() { return 1; }
+function handler_docker() {
+    DOCKER_CALLS=$((DOCKER_CALLS + 1))
+    return 0
+}
+function exec_docker() {
+    DOCKER_CALLS=$((DOCKER_CALLS + 1))
+    return 0
+}
+handler_cloudreve_v3 'stop'
+handler_cloudreve_v4 'stop'
+[[ "${DOCKER_CALLS}" -eq 0 ]]
 
 echo "CDN mode tests passed"

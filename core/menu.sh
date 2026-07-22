@@ -142,6 +142,7 @@ function menu_xray() {
     echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.info3")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
+    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.option0")"
 }
 
 # =============================================================================
@@ -151,55 +152,31 @@ function menu_xray() {
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_xray_config() {
-    # 打印协议配置菜单标题
     echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.title") ------------------"
-    # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option1")"
-    # 打印选项 2 (默认)
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option2")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
-    # 打印选项 3
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_reality")"
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option1") (${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option2")"
     echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option3")"
-    # 打印选项 4
     echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option4")"
-    # 打印选项 5
+
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_standalone")"
     echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option5")"
-    # 打印选项 6
     echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option6")"
-    # 打印选项 7
     echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option7")"
-    # 打印选项 8
+
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_web")"
     echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option8")"
-    # 打印选项 9
     echo -e "${GREEN}9.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option9")"
+
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_advanced")"
     echo -e "${GREEN}10.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option10")"
 
-    # 打印分隔线
     echo -e "------------------------------------------------------"
-    # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info1")"
-    # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info2")"
-    # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info3")"
-    # 打印选项 3.1 的说明信息
-    echo -e "3.1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info3_1")"
-    # 打印选项 3.2 的说明信息
-    echo -e "3.2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info3_2")"
-    # 打印选项 4 的说明信息
-    echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info4")"
-    # 打印选项 5 的说明信息
-    echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info5")"
-    # 打印选项 6 的说明信息
-    echo -e "6. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info6")"
-    # 打印选项 7 的说明信息
-    echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info7")"
-    # 打印选项 8 的说明信息
-    echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info8")"
-    # 打印选项 9 的说明信息
-    echo -e "9. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info9")"
-    echo -e "10. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.info10")"
-    # 打印分隔线
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_hy2")"
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_web")"
+    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_multi")"
     echo -e "------------------------------------------------------"
+    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option0")"
 }
 
 # =============================================================================
@@ -226,6 +203,7 @@ function menu_web_config() {
     echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.info2")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
+    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option0")"
 }
 
 # =============================================================================
@@ -345,6 +323,15 @@ function menu_sni_config() {
     # 打印选项 2 的说明信息
     echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.info2")"
     # 打印分隔线
+    echo -e "------------------------------------------------------"
+}
+
+function menu_cdn_config() {
+    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.title") ------------------"
+    local option
+    for option in 1 2 3 4 5 6; do
+        echo -e "${GREEN}${option}.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.option${option}")"
+    done
     echo -e "------------------------------------------------------"
 }
 
@@ -474,6 +461,15 @@ function get_choose() {
     # 从标准输入读取用户输入
     read -r choose
 
+    # 空输入仅采用当前菜单标注的默认项；显式输入 0 始终表示取消。
+    if [[ -z "${choose}" ]]; then
+        case "${i18n}" in
+        --config | --web | --full) return 1 ;;
+        --xray) return 2 ;;
+        *) return 0 ;;
+        esac
+    fi
+
     # 检查输入是否为纯数字
     if [[ ${choose} =~ ^[0-9]+$ ]]; then
         # 移除前导零 (例如 01 -> 1)
@@ -516,6 +512,7 @@ function main() {
     --management) menu_config >&2 ;;      # 显示配置管理菜单
     --route) menu_route >&2 ;;            # 显示路由管理菜单
     --sni) menu_sni_config >&2 ;;         # 显示 SNI 配置菜单
+    --cdn-config) menu_cdn_config >&2 ;;  # 显示 CDN 配置菜单
     --reverse) menu_reverse >&2 ;;         # 显示反向代理配置菜单
     --lan) menu_lan >&2 ;;                 # 显示异地组网菜单
     --banner) print_banner >&2 ;;         # 显示 Banner

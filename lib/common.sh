@@ -22,7 +22,7 @@ readonly RED='\033[31m'    # 红色
 readonly NC='\033[0m'      # 无颜色（重置）
 
 # --- 环境设置 ---
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
+PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:${HOME}/bin:/snap/bin:${PATH:-}"
 export PATH
 
 # =============================================================================
@@ -142,7 +142,16 @@ function write_config() {
         echo -e "${RED}[错误]${NC} 拒绝写入空或无效的 JSON 内容到 ${target}" >&2
         return 1
     fi
-    echo "${content}" >"${target}"
-    chmod 600 "${target}"
+    local temp_file
+    temp_file="$(mktemp "${target}.tmp.XXXXXX")" || return 1
+    if ! printf '%s\n' "${content}" >"${temp_file}"; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
+    chmod 600 "${temp_file}"
+    if ! mv -f -- "${temp_file}" "${target}"; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
     sync
 }

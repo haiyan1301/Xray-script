@@ -122,6 +122,7 @@ function load_i18n() {
 # 返回值: URL 编码后的字符串 (echo 输出)
 # =============================================================================
 function urlencode() {
+    local LC_ALL=C
     local input # 声明局部变量存储输入
 
     # 如果没有传入参数，则从标准输入读取
@@ -158,6 +159,15 @@ function urlencode() {
     echo "$encoded"
 }
 
+function format_uri_host() {
+    local host="$1"
+    if [[ "${host}" == *:* && "${host}" != \[*\] ]]; then
+        printf '[%s]' "${host}"
+    else
+        printf '%s' "${host}"
+    fi
+}
+
 # =============================================================================
 # 函数名称: cache_json_data
 # 功能描述: 将 Xray 和脚本的配置文件内容读取到全局变量中进行缓存，
@@ -184,8 +194,8 @@ function get_common_config() {
     local inbound_index=$1 # 获取 inbound 索引参数
     local inbound_port
 
-    # 获取服务器的公网 IPv4 地址作为远程主机地址
-    CLIENT_CONFIG[remote_host]="$(curl -fsSL ipv4.icanhazip.com)"
+    # 优先使用公网 IPv4；仅有 IPv6 时也能生成符合 URI 语法的分享链接。
+    CLIENT_CONFIG[remote_host]="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
     # 优先使用当前 inbound 的真实监听端口；无端口的内部监听回退到脚本主端口
     inbound_port="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].port? // empty')"
     if [[ -n "${inbound_port}" ]]; then
@@ -439,10 +449,12 @@ function show_client_config() {
 # 返回值: 无 (直接修改一系列 SHARE_LINK_COMPONENT_* 全局变量)
 # =============================================================================
 function get_share_link_component() {
+    local uri_host
+    uri_host="$(format_uri_host "${CLIENT_CONFIG[remote_host]}")"
     # 生成 VLESS 协议基础链接部分 (协议://UUID@地址:端口?网络类型=...)
-    SHARE_LINK_COMPONENT_VLESS="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[uuid]}@${CLIENT_CONFIG[remote_host]}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
+    SHARE_LINK_COMPONENT_VLESS="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[uuid]}@${uri_host}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
     # 生成 Trojan 协议基础链接部分 (协议://密码@地址:端口?网络类型=...)
-    SHARE_LINK_COMPONENT_TROJAN="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[password]}@${CLIENT_CONFIG[remote_host]}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
+    SHARE_LINK_COMPONENT_TROJAN="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[password]}@${uri_host}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
     # 生成 mKCP 网络传输参数部分 (&seed=...&headerType=none)
     SHARE_LINK_COMPONENT_MKCP="&seed=${CLIENT_CONFIG[seed]}&headerType=none"
     # 生成 TLS 安全传输参数部分 (&security=tls&sni=...&alpn=h2&fp=chrome)
@@ -567,10 +579,14 @@ function get_hy2_share_link() {
     local port="${CLIENT_CONFIG[port]}"
     local sni="${CLIENT_CONFIG[hy2_cert_domain]}"
 
+    local encoded_auth uri_host
+    encoded_auth="$(urlencode "${auth}")"
+    uri_host="$(format_uri_host "${host}")"
+
     # 标准 hysteria2 分享链接格式
-    SHARE_LINK="hysteria2://${auth}@${host}:${port}/?insecure=0"
+    SHARE_LINK="hysteria2://${encoded_auth}@${uri_host}:${port}/?insecure=0"
     if [[ -n "${sni}" ]]; then
-        SHARE_LINK="${SHARE_LINK}&sni=${sni}"
+        SHARE_LINK="${SHARE_LINK}&sni=$(urlencode "${sni}")"
     fi
 }
 
@@ -590,7 +606,7 @@ function get_ss2022_share_link() {
     local userinfo
     userinfo="$(echo -n "${method}:${password}" | openssl base64 -e | tr -d '\n' | tr '+/' '-_' | tr -d '=')"
 
-    SHARE_LINK="ss://${userinfo}@${host}:${port}"
+    SHARE_LINK="ss://${userinfo}@$(format_uri_host "${host}"):${port}"
 }
 
 # =============================================================================
@@ -769,7 +785,7 @@ function get_sni_reality_down_share_link() {
 # =============================================================================
 function show_config() {
     # 在分享链接末尾追加标签作为锚点 (例如 #my_tag)
-    SHARE_LINK="${SHARE_LINK}#${CLIENT_CONFIG[tag]}"
+    SHARE_LINK="${SHARE_LINK}#$(urlencode "${CLIENT_CONFIG[tag]}")"
 
     # 显示客户端配置信息
     show_client_config
@@ -913,5 +929,6 @@ function main() {
 }
 
 # --- 脚本执行入口 ---
-# 将脚本接收到的所有参数传递给 main 函数开始执行
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
