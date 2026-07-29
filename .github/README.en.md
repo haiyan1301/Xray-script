@@ -14,10 +14,10 @@
   * CDN-only mode (VLESS-XHTTP-TLS, without REALITY)
   * SNI (includes Vision_REALITY, XHTTP_REALITY, XHTTP_TLS)
   * Multi-node composite configuration
-* CDN and SNI are separate modes: CDN deploys only XHTTP over TLS; SNI enables REALITY and SNI traffic splitting
+* CDN and SNI are separate modes: CDN deploys XHTTP over TLS with either an Nginx backend or a low-resource direct Xray TLS backend; SNI enables REALITY and SNI traffic splitting
 * HY2 supports domain, short-lived IP, and custom certificates; custom certificates are checked against their key and SAN/CN
 * SNI share links implement bidirectional separation (upstream: xhttp+TLS+CDN | downstream: xhttp+Reality, upstream: xhttp+Reality | downstream: xhttp+TLS+CDN)
-* CDN and SNI site certificates are stored independently; both support automatic issuance or custom certificate paths
+* CDN and SNI certificates are stored independently; direct Xray CDN and HY2 additionally isolate certificate directories by hostname/IP and automatic/custom source so stale renewal hooks cannot overwrite the active pair
 * Rule configurations and custom entries:
   * Block BitTorrent traffic (optional)
   * Block China IP traffic (optional)
@@ -56,13 +56,16 @@
 ## Issues
 
 1. If the installation is successful but does not work properly, please check whether the server port is open. You can verify port accessibility through `https://tcp.ping.pe/ip:port`
-2. For automatic CDN/SNI certificates, open HTTP(80) and HTTPS(443) and temporarily disable CDN proxying
+2. For automatic CDN/SNI certificates, open HTTP(80) and HTTPS(443) and temporarily disable CDN proxying. Certificate failure stops the flow before an unusable runtime config is generated
 3. HY2 uses UDP. Open the selected UDP port in both the host firewall and provider security group
-4. For upstream/downstream separation details, see [XHTTP: Beyond REALITY][XHTTP] and [xhttp 五合一配置][xhttp 五合一配置]
-5. When using SNI to obtain a certificate and encountering the error ["Could not get nonce, let's try again"], please check the [ZeroSSL Status Page](https://status.zerossl.com/) . It is highly likely that ZeroSSL's "Free ACME Service" is experiencing "Service disruption" or "Service outage"
-6. Version v2025.11.19 resolves the issue where 【"WARP was enabled without log limits, causing container logs to accumulate continuously, eventually filling up disk space"】.
+4. The Nginx CDN backend rebuilds its managed site. The direct Xray backend stops and disables Nginx, removes its auto-update job, then lets Xray listen on 443 to save memory and background processes
+5. Direct Xray CDN requires an HTTPS origin mode (Cloudflare Full or Full (strict), never Flexible). Enable HTTP/2/gRPC at the CDN for streaming XHTTP, and restrict origin port 443 to CDN source IPs in the VPS firewall/security group where possible. This mode has no camouflage site or Cloudreve
+6. For upstream/downstream separation details, see [XHTTP: Beyond REALITY][XHTTP] and [xhttp 五合一配置][xhttp 五合一配置]
+7. When using SNI to obtain a certificate and encountering the error ["Could not get nonce, let's try again"], please check the [ZeroSSL Status Page](https://status.zerossl.com/) . It is highly likely that ZeroSSL's "Free ACME Service" is experiencing "Service disruption" or "Service outage"
+8. Version v2025.11.19 resolves the issue where 【"WARP was enabled without log limits, causing container logs to accumulate continuously, eventually filling up disk space"】.
    1. Users who have already started WARP can go to 【"Manage Configuration"】 -> 【"Routing Management"】 and select the 【"Reset WARP Proxy"】 option. This option clears container logs and resets the WARP Proxy.
    2. Log limits have been added. To use the WARP feature, simply enable it directly.
+9. Version v2026.07.28 fixes Nginx CDN path drift, VLESS enc prompts on pure-HY2 multi-node setups, config generation after HY2 certificate failure, ACME email validation, current X25519 output parsing, continuation after service failures, and accidental script self-update downgrades.
 
 ## Share Links
 
@@ -159,11 +162,11 @@ All tested on Vultr instances. Other Debian/Red Hat derivatives might work but a
 
 ## Installation Time Notes
 
-Manage CDN/SNI domains, certificates, and camouflage content under `Manage Configuration -> CDN / SNI Site Management`.
+Manage CDN/SNI domains and certificates under `Manage Configuration -> CDN / SNI Site Management`. Camouflage content is available only with Nginx; direct mode can reconfigure the backend or renew/reload the Xray certificate.
 
-When switching to a protocol other than CDN/SNI, Nginx stops but remains installed. Switching between CDN and SNI rebuilds the managed sites for the selected mode.
+When switching to a protocol other than CDN/SNI, Nginx stops but remains installed. Selecting the direct Xray CDN backend also stops and disables Nginx.
 
-Installation flow: choose a protocol -> enter only its required settings -> install or reuse Xray -> for CDN/SNI, choose camouflage content and install or reuse Nginx -> configure per-site certificates -> generate and validate the configuration -> start services -> print share links.
+Installation flow: choose a protocol -> enter its settings -> choose the CDN backend when applicable -> install or reuse Xray -> only Nginx-backed modes choose camouflage content and install/reuse Nginx -> configure and verify certificates -> generate and validate the configuration -> start services -> print share links.
 
 ### Installation Time Reference (1CPU/1GB)
 

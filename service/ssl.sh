@@ -47,15 +47,19 @@ readonly I18N_DIR="${PROJECT_ROOT}/i18n"                       # 国际化文件
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
 
 # 定义 Nginx 配置、ACME 验证、 SSL 证书的路径
-readonly NGINX_CONFIG_PATH='/usr/local/nginx/conf'  # Nginx 配置目录
-readonly ACME_WEBROOT_PATH='/var/www/_zerossl'      # ACME HTTP 验证 webroot 目录
-readonly SSL_CERT_PATH="${NGINX_CONFIG_PATH}/certs" # SSL 证书存储目录
+readonly NGINX_CONFIG_PATH="${NGINX_CONFIG_PATH_OVERRIDE:-/usr/local/nginx/conf}" # Nginx 配置目录
+readonly ACME_WEBROOT_PATH="${ACME_WEBROOT_PATH_OVERRIDE:-/var/www/_zerossl}"      # ACME HTTP 验证 webroot 目录
+readonly SSL_CERT_PATH="${SSL_CERT_PATH_OVERRIDE:-${NGINX_CONFIG_PATH}/certs}"     # SSL 证书存储目录
+readonly SSL_NGINX_COMMAND="${SSL_NGINX_COMMAND_OVERRIDE:-nginx}"
+readonly SSL_SYSTEMCTL_COMMAND="${SSL_SYSTEMCTL_COMMAND_OVERRIDE:-systemctl}"
+readonly DOMAIN_REGEX='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
 
 # --- 全局变量声明 ---
 # 声明用于存储脚本操作、域名、邮箱、存储语言参数和国际化数据的全局变量
 declare ACTION=''        # 存储用户请求的操作 (如 install, issue)
 declare DOMAIN=''        # 存储要操作的域名
 declare ACCOUNT_EMAIL='' # 存储 acme.sh 账户邮箱
+declare DELETE_DEPLOYED_CERT=0 # 停止续签时是否同时删除已部署证书
 declare LANG_PARAM=''    # (未在脚本中实际使用，可能是预留)
 declare I18N_DATA=''     # 存储从 i18n JSON 文件中读取的全部数据
 
@@ -141,6 +145,12 @@ function print_error() {
     exit 1
 }
 
+function valid_certificate_domain() {
+    local domain="$1"
+
+    ((${#domain} <= 253)) && [[ "${domain}" =~ ${DOMAIN_REGEX} ]]
+}
+
 # =============================================================================
 # 函数名称: install_acme_sh
 # 功能描述: 安装 acme.sh 脚本。
@@ -199,8 +209,9 @@ function purge_acme_sh() {
         "${HOME}/.acme.sh/acme.sh" --uninstall || print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.fail_uninstall_cmd")"
     fi
 
-    # 删除 acme.sh 相关目录和文件
-    rm -rf "${HOME}/.acme.sh" "${ACME_WEBROOT_PATH}" "${NGINX_CONFIG_PATH}/certs"
+    # 只卸载 ACME 客户端和挑战目录。部署目录可能同时包含用户提供的
+    # 自定义证书；卸载续签工具不应让仍在运行的 Nginx 站点立即失效。
+    rm -rf -- "${HOME}/.acme.sh" "${ACME_WEBROOT_PATH}"
     # 打印删除成功信息
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.success")"
 }
@@ -211,7 +222,47 @@ function purge_acme_sh() {
 # 参数: 无 (使用全局变量 DOMAIN)
 # 返回值: 无 (签发成功或失败后退出)
 # =============================================================================
-function issue_certificate() {
+function report_issue_error() {
+    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
+}
+
+function validate_installed_certificate_pair() {
+    local fullchain="$1"
+    local privkey="$2"
+    local cert_public_key key_public_key
+
+    [[ -r "${fullchain}" && -r "${privkey}" ]] || return 1
+    cert_public_key="$(openssl x509 -in "${fullchain}" -pubkey -noout 2>/dev/null |
+        openssl pkey -pubin -outform PEM 2>/dev/null)" || return 1
+    key_public_key="$(openssl pkey -in "${privkey}" -pubout -outform PEM 2>/dev/null)" || return 1
+    [[ -n "${cert_public_key}" && "${cert_public_key}" == "${key_public_key}" ]] ||
+        return 1
+    openssl x509 -in "${fullchain}" -noout -checkend 0 >/dev/null 2>&1
+}
+
+function restore_certificate_pair() {
+    local cert_path="$1"
+    local backup_dir="$2"
+    local had_fullchain="$3"
+    local had_privkey="$4"
+    local restore_status=0
+
+    if [[ "${had_fullchain}" -eq 1 ]]; then
+        cp -p -- "${backup_dir}/fullchain.pem" "${cert_path}/fullchain.pem" ||
+            restore_status=1
+    else
+        rm -f -- "${cert_path}/fullchain.pem" || restore_status=1
+    fi
+    if [[ "${had_privkey}" -eq 1 ]]; then
+        cp -p -- "${backup_dir}/privkey.pem" "${cert_path}/privkey.pem" ||
+            restore_status=1
+    else
+        rm -f -- "${cert_path}/privkey.pem" || restore_status=1
+    fi
+    return "${restore_status}"
+}
+
+function issue_certificate() (
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -eq 0 ]]; then
         print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.no_domain")"
@@ -219,26 +270,196 @@ function issue_certificate() {
 
     # 定义证书存储路径
     local cert_path="${SSL_CERT_PATH}/${DOMAIN}"
+    local fullchain_path="${cert_path}/fullchain.pem"
+    local privkey_path="${cert_path}/privkey.pem"
+    local nginx_conf="${NGINX_CONFIG_PATH}/nginx.conf"
+    local nginx_conf_backup=''
+    local nginx_conf_temp=''
+    local cert_backup=''
+    local nginx_had_config=0
+    local nginx_was_active=0
+    local had_fullchain=0
+    local had_privkey=0
+    local certificate_touched=0
+    local certificate_restored=0
+    local operation_failed=0
+    local cleanup_failed=0
+    local config_restored=0
+    local nginx_state_captured=0
+    local nginx_conf_mutated=0
+    local runtime_dirty=0
+    local transaction_committed=0
+    local transaction_cleanup_finished=0
+    local error_message=''
+    local reload_command
+
+    printf -v reload_command \
+        'if %q is-active --quiet nginx; then %q -t && %q reload nginx; fi' \
+        "${SSL_SYSTEMCTL_COMMAND}" \
+        "${SSL_NGINX_COMMAND}" \
+        "${SSL_SYSTEMCTL_COMMAND}"
+
+    # These helpers and traps live only in this function's subshell, so an
+    # embedding caller's EXIT/signal handlers are never replaced.
+    function restore_issue_nginx_runtime() {
+        [[ "${runtime_dirty}" -eq 1 ]] || return 0
+        [[ "${nginx_state_captured}" -eq 1 ]] || return 1
+
+        if [[ "${nginx_was_active}" -eq 1 ]]; then
+            [[ "${config_restored}" -eq 1 ]] || return 1
+            "${SSL_NGINX_COMMAND}" -t || return 1
+            if "${SSL_SYSTEMCTL_COMMAND}" is-active --quiet nginx; then
+                "${SSL_SYSTEMCTL_COMMAND}" reload nginx
+            else
+                "${SSL_SYSTEMCTL_COMMAND}" start nginx
+            fi
+        elif "${SSL_SYSTEMCTL_COMMAND}" is-active --quiet nginx; then
+            "${SSL_SYSTEMCTL_COMMAND}" stop nginx
+        fi
+    }
+
+    function cleanup_interrupted_issue() {
+        local cleanup_status=0
+
+        # Until the commit flag is set, the certificate destination belongs
+        # to the transaction and must be restored as one pair.
+        if [[ "${transaction_committed}" -eq 0 &&
+            "${certificate_touched}" -eq 1 &&
+            "${certificate_restored}" -eq 0 ]]; then
+            if [[ -n "${cert_backup}" && -d "${cert_backup}" ]] &&
+                restore_certificate_pair \
+                    "${cert_path}" "${cert_backup}" \
+                    "${had_fullchain}" "${had_privkey}"; then
+                certificate_restored=1
+                [[ "${nginx_was_active}" -eq 0 ]] || runtime_dirty=1
+            else
+                cleanup_status=1
+            fi
+        fi
+
+        if [[ "${nginx_conf_mutated}" -eq 1 ]]; then
+            if [[ "${nginx_had_config}" -eq 1 ]]; then
+                if [[ -n "${nginx_conf_backup}" &&
+                    -f "${nginx_conf_backup}" ]] &&
+                    mv -f -- "${nginx_conf_backup}" "${nginx_conf}"; then
+                    nginx_conf_backup=''
+                    nginx_conf_mutated=0
+                    config_restored=1
+                elif [[ -n "${nginx_conf_backup}" &&
+                    -f "${nginx_conf_backup}" ]] &&
+                    cp -p -- "${nginx_conf_backup}" "${nginx_conf}"; then
+                    nginx_conf_mutated=0
+                    config_restored=1
+                else
+                    cleanup_status=1
+                fi
+            elif rm -f -- "${nginx_conf}"; then
+                nginx_conf_mutated=0
+                config_restored=1
+            else
+                cleanup_status=1
+            fi
+        fi
+
+        if [[ "${runtime_dirty}" -eq 1 ]]; then
+            if restore_issue_nginx_runtime; then
+                runtime_dirty=0
+            else
+                cleanup_status=1
+            fi
+        fi
+
+        if [[ -n "${nginx_conf_temp}" ]]; then
+            rm -f -- "${nginx_conf_temp}" || cleanup_status=1
+            nginx_conf_temp=''
+        fi
+        if [[ -n "${nginx_conf_backup}" ]]; then
+            if [[ "${nginx_conf_mutated}" -eq 0 ]]; then
+                rm -f -- "${nginx_conf_backup}" || cleanup_status=1
+                nginx_conf_backup=''
+            else
+                cleanup_status=1
+            fi
+        fi
+        if [[ -n "${cert_backup}" && -d "${cert_backup}" ]]; then
+            if [[ "${transaction_committed}" -eq 1 ||
+                "${certificate_touched}" -eq 0 ||
+                "${certificate_restored}" -eq 1 ]]; then
+                rm -f -- \
+                    "${cert_backup}/fullchain.pem" \
+                    "${cert_backup}/privkey.pem" ||
+                    cleanup_status=1
+                rmdir -- "${cert_backup}" 2>/dev/null ||
+                    cleanup_status=1
+                cert_backup=''
+            else
+                cleanup_status=1
+            fi
+        fi
+
+        [[ "${cleanup_status}" -ne 0 ]] ||
+            transaction_cleanup_finished=1
+        return "${cleanup_status}"
+    }
+
+    function handle_issue_transaction_exit() {
+        local original_status="$1"
+        local trap_cleanup_status=0
+
+        trap - EXIT
+        trap '' HUP INT TERM
+        if [[ "${transaction_cleanup_finished}" -eq 0 ]]; then
+            cleanup_interrupted_issue || trap_cleanup_status=$?
+        fi
+        if [[ "${original_status}" -eq 0 &&
+            "${transaction_committed}" -eq 0 ]]; then
+            original_status=1
+        fi
+        [[ "${trap_cleanup_status}" -eq 0 ]] || original_status=1
+        exit "${original_status}"
+    }
+
+    trap 'handle_issue_transaction_exit "$?"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     # 打印签发信息
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.start")"
 
     # 创建 ACME 验证目录
-    [[ -d "${ACME_WEBROOT_PATH}" ]] || mkdir -vp "${ACME_WEBROOT_PATH}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_acme_dir" | sed "s|\${ACME_WEBROOT_PATH}|${ACME_WEBROOT_PATH}|")"
+    [[ -d "${ACME_WEBROOT_PATH}" ]] || mkdir -vp "${ACME_WEBROOT_PATH}" ||
+        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_acme_dir" | sed "s|\${ACME_WEBROOT_PATH}|${ACME_WEBROOT_PATH}|")"
     # 创建证书存储目录
-    [[ -d "${cert_path}" ]] || mkdir -vp "${cert_path}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_cert_dir" | sed "s|\${cert_path}|${cert_path}|")"
-
-    # 定义 Nginx 配置文件及其备份路径
-    local nginx_conf="${NGINX_CONFIG_PATH}/nginx.conf"
-    local nginx_conf_bak="${nginx_conf}.ssl_script.bak"
+    [[ -d "${cert_path}" ]] || mkdir -vp "${cert_path}" ||
+        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_cert_dir" | sed "s|\${cert_path}|${cert_path}|")"
+    if [[ -L "${cert_path}" || -L "${fullchain_path}" || -L "${privkey_path}" ]]; then
+        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        return 1
+    fi
 
     # 如果原 Nginx 配置文件存在，则备份
     if [[ -f "${nginx_conf}" ]]; then
-        cp -f "${nginx_conf}" "${nginx_conf_bak}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        nginx_had_config=1
+        nginx_conf_backup="$(mktemp "${nginx_conf}.ssl_script.XXXXXX")" ||
+            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        if ! cp -p -- "${nginx_conf}" "${nginx_conf_backup}"; then
+            rm -f -- "${nginx_conf_backup}"
+            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        fi
     fi
+    if "${SSL_SYSTEMCTL_COMMAND}" is-active --quiet nginx; then
+        nginx_was_active=1
+    fi
+    nginx_state_captured=1
 
     # 生成一个临时的 Nginx 配置文件，用于 ACME HTTP-01 验证
-    cat >"${nginx_conf}" <<EOF
+    nginx_conf_temp="$(mktemp "${nginx_conf}.challenge.XXXXXX")" || {
+        rm -f -- "${nginx_conf_backup}"
+        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        return 1
+    }
+    if ! cat >"${nginx_conf_temp}" <<EOF
 user                 root;
 pid                  /run/nginx.pid;
 worker_processes     1;
@@ -258,59 +479,221 @@ http {
     }
 }
 EOF
+    then
+        rm -f -- "${nginx_conf_temp}" "${nginx_conf_backup}"
+        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        return 1
+    fi
+    if [[ "${nginx_had_config}" -eq 1 ]]; then
+        chmod --reference="${nginx_conf}" "${nginx_conf_temp}" 2>/dev/null || true
+        chown --reference="${nginx_conf}" "${nginx_conf_temp}" 2>/dev/null || true
+    else
+        chmod 644 "${nginx_conf_temp}" 2>/dev/null || true
+    fi
+    # Mark the config/runtime dirty before the atomic replacement so a signal
+    # delivered immediately after mv cannot pass through the EXIT trap as if
+    # the original file were still installed.
+    nginx_conf_mutated=1
+    runtime_dirty=1
+    if ! mv -f -- "${nginx_conf_temp}" "${nginx_conf}"; then
+        nginx_conf_mutated=0
+        runtime_dirty=0
+        rm -f -- "${nginx_conf_temp}" "${nginx_conf_backup}"
+        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        return 1
+    fi
+    nginx_conf_temp=''
 
     # 检查 Nginx 是否正在运行
-    if systemctl is-active --quiet nginx; then
+    if [[ "${nginx_was_active}" -eq 1 ]]; then
         # 如果运行，则测试配置并重载
-        nginx -t && systemctl reload nginx || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+        if ! "${SSL_NGINX_COMMAND}" -t ||
+            ! "${SSL_SYSTEMCTL_COMMAND}" reload nginx; then
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+        fi
     else
         # 如果未运行，则测试配置并启动
-        nginx -t && systemctl start nginx || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_start_nginx")"
+        if ! "${SSL_NGINX_COMMAND}" -t ||
+            ! "${SSL_SYSTEMCTL_COMMAND}" start nginx; then
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_start_nginx")"
+        fi
     fi
 
     # 使用 acme.sh 签发 ECC 证书
-    "${HOME}/.acme.sh/acme.sh" --issue -d ${DOMAIN} \
-        --webroot "${ACME_WEBROOT_PATH}" \
-        --keylength ec-256 \
-        --accountkeylength ec-256 \
-        --server zerossl \
-        --ocsp
-
-    # 检查签发命令的退出状态
-    local issue_status=$?
-    if [[ ${issue_status} -ne 0 ]]; then
-        # 如果首次签发失败，则尝试启用调试模式重新签发
-        print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_first_attempt")"
-        "${HOME}/.acme.sh/acme.sh" --issue -d ${DOMAIN} \
+    if [[ "${operation_failed}" -eq 0 ]] &&
+        ! "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
             --webroot "${ACME_WEBROOT_PATH}" \
             --keylength ec-256 \
             --accountkeylength ec-256 \
             --server zerossl \
-            --ocsp \
-            --debug
-        # 恢复原始 Nginx 配置
-        mv -f "${nginx_conf_bak}" "${nginx_conf}"
-        # 打印错误并退出
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_ecc_issue")"
+            --ocsp; then
+        # 如果首次签发失败，则尝试启用调试模式重新签发
+        print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_first_attempt")"
+        if ! "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
+                --webroot "${ACME_WEBROOT_PATH}" \
+                --keylength ec-256 \
+                --accountkeylength ec-256 \
+                --server zerossl \
+                --ocsp \
+                --debug; then
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_ecc_issue")"
+        fi
     fi
 
-    # 签发成功后，恢复原始 Nginx 配置
-    mv -f "${nginx_conf_bak}" "${nginx_conf}"
+    if [[ "${operation_failed}" -eq 0 ]]; then
+        cert_backup="$(mktemp -d "${cert_path}.ssl-backup.XXXXXX")" || {
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        }
+    fi
+    if [[ "${operation_failed}" -eq 0 && -e "${fullchain_path}" ]]; then
+        if cp -p -- "${fullchain_path}" "${cert_backup}/fullchain.pem"; then
+            had_fullchain=1
+        else
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        fi
+    fi
+    if [[ "${operation_failed}" -eq 0 && -e "${privkey_path}" ]]; then
+        if cp -p -- "${privkey_path}" "${cert_backup}/privkey.pem"; then
+            had_privkey=1
+        else
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        fi
+    fi
 
-    # 安装签发的证书到指定路径，并设置 Nginx 重载命令
-    "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d ${DOMAIN} \
-        --key-file "${cert_path}/privkey.pem" \
-        --fullchain-file "${cert_path}/fullchain.pem" \
-        --reloadcmd "nginx -t && systemctl reload nginx" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+    # Keep the challenge configuration loaded while acme.sh performs its
+    # immediate reload callback. The original site may reference certificate
+    # files that do not exist yet on a first installation.
+    if [[ "${operation_failed}" -eq 0 ]]; then
+        certificate_touched=1
+        if ! "${HOME}/.acme.sh/acme.sh" --install-cert --ecc -d "${DOMAIN}" \
+                --key-file "${privkey_path}" \
+                --fullchain-file "${fullchain_path}" \
+                --reloadcmd "${reload_command}" ||
+            ! validate_installed_certificate_pair "${fullchain_path}" "${privkey_path}"; then
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        fi
+    fi
 
     # 设置证书目录权限，确保 nginx worker 可读
-    if getent group xray-nginx >/dev/null 2>&1; then
-        chown -R nginx:xray-nginx "${cert_path}" 2>/dev/null || true
-    else
-        chown -R nginx:nginx "${cert_path}" 2>/dev/null || true
+    if [[ "${operation_failed}" -eq 0 ]]; then
+        if getent group xray-nginx >/dev/null 2>&1; then
+            chown -R nginx:xray-nginx "${cert_path}" 2>/dev/null || true
+        else
+            chown -R nginx:nginx "${cert_path}" 2>/dev/null || true
+        fi
+        if ! chmod 750 "${cert_path}" 2>/dev/null ||
+            ! chmod 640 "${fullchain_path}" "${privkey_path}" 2>/dev/null; then
+            operation_failed=1
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        fi
     fi
-    chmod 750 "${cert_path}" 2>/dev/null || true
-}
+
+    # A failed install/validation must put the previous pair back before the
+    # original Nginx configuration is made active again.
+    if [[ "${operation_failed}" -ne 0 && "${certificate_touched}" -eq 1 ]]; then
+        if restore_certificate_pair \
+            "${cert_path}" "${cert_backup}" \
+            "${had_fullchain}" "${had_privkey}"; then
+            certificate_restored=1
+        else
+            cleanup_failed=1
+        fi
+    fi
+
+    # Restore the exact configuration file regardless of issuance/install
+    # status. If there was no original file, remove the challenge config.
+    if [[ "${nginx_had_config}" -eq 1 ]]; then
+        # Keep the backup until all bookkeeping has been updated. This closes
+        # the signal window that an mv followed by flag assignments would
+        # otherwise create.
+        if cp -p -- "${nginx_conf_backup}" "${nginx_conf}"; then
+            nginx_conf_mutated=0
+            config_restored=1
+        else
+            operation_failed=1
+            cleanup_failed=1
+            [[ -n "${error_message}" ]] ||
+                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+        fi
+    elif rm -f -- "${nginx_conf}"; then
+        nginx_conf_mutated=0
+        config_restored=1
+    else
+        operation_failed=1
+        cleanup_failed=1
+        [[ -n "${error_message}" ]] ||
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+    fi
+
+    if [[ "${config_restored}" -eq 1 ]]; then
+        if ! restore_issue_nginx_runtime; then
+            # A service-restore failure after a successful installation is
+            # still a failed transaction: restore the previous pair and retry
+            # the original configuration/state once.
+            if [[ "${operation_failed}" -eq 0 &&
+                "${certificate_touched}" -eq 1 &&
+                "${certificate_restored}" -eq 0 ]]; then
+                if restore_certificate_pair \
+                    "${cert_path}" "${cert_backup}" \
+                    "${had_fullchain}" "${had_privkey}"; then
+                    certificate_restored=1
+                else
+                    cleanup_failed=1
+                fi
+            fi
+            operation_failed=1
+            if [[ "${nginx_was_active}" -eq 1 ]]; then
+                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+            else
+                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_start_nginx")"
+            fi
+            if restore_issue_nginx_runtime; then
+                runtime_dirty=0
+            else
+                cleanup_failed=1
+            fi
+        else
+            runtime_dirty=0
+        fi
+    fi
+
+    if [[ "${operation_failed}" -eq 0 && "${cleanup_failed}" -eq 0 &&
+        "${nginx_conf_mutated}" -eq 0 && "${runtime_dirty}" -eq 0 ]]; then
+        transaction_committed=1
+    fi
+
+    if [[ -n "${cert_backup}" && -d "${cert_backup}" &&
+        "${cleanup_failed}" -eq 0 ]]; then
+        rm -f -- "${cert_backup}/fullchain.pem" "${cert_backup}/privkey.pem"
+        rmdir -- "${cert_backup}" 2>/dev/null || true
+        cert_backup=''
+    fi
+    if [[ "${config_restored}" -eq 1 && -n "${nginx_conf_backup}" ]]; then
+        rm -f -- "${nginx_conf_backup}"
+        nginx_conf_backup=''
+    fi
+
+    if [[ "${operation_failed}" -ne 0 || "${cleanup_failed}" -ne 0 ]]; then
+        [[ -n "${error_message}" ]] ||
+            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        report_issue_error "${error_message}"
+        if [[ "${cleanup_failed}" -eq 0 ]]; then
+            transaction_cleanup_finished=1
+            trap - EXIT HUP INT TERM
+        fi
+        return 1
+    fi
+    transaction_cleanup_finished=1
+    trap - EXIT HUP INT TERM
+    return 0
+)
 
 # =============================================================================
 # 函数名称: renew_certificates
@@ -339,11 +722,17 @@ function stop_renew_certificates() {
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -gt 0 ]]; then
         # 执行 acme.sh 的移除命令（停止续期）
-        "${HOME}/.acme.sh/acme.sh" --remove -d ${DOMAIN} --ecc || print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
+        if ! "${HOME}/.acme.sh/acme.sh" --remove -d "${DOMAIN}" --ecc; then
+            print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
+            return 1
+        fi
         # 删除该域名的 acme.sh 本地存储目录
-        rm -rf "${HOME}/.acme.sh/${DOMAIN}_ecc" # 更健壮的路径处理
-        # 删除该域名的本地证书目录
-        rm -rf "${NGINX_CONFIG_PATH}/certs/${DOMAIN}" # 更健壮的路径处理
+        rm -rf -- "${HOME}/.acme.sh/${DOMAIN}_ecc" || return 1
+        # “停止续签”的公开操作默认保留正在被服务加载的证书。只有调用方
+        # 已经成功切换到其他域名后，才显式要求清理旧部署目录。
+        if [[ "${DELETE_DEPLOYED_CERT}" -eq 1 ]]; then
+            rm -rf -- "${NGINX_CONFIG_PATH}/certs/${DOMAIN}" || return 1
+        fi
     else
         # 如果未提供域名，则打印警告
         print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.no_domain")"
@@ -379,8 +768,7 @@ function check_certificate_status() {
     # 从 acme.sh 列表中查找匹配的域名
     local main_domain=$(
         "${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" |
-            grep -E "^${DOMAIN}" |
-            awk '{print $1}'
+            awk -v domain="${DOMAIN}" 'NR > 1 && $1 == domain {print $1; exit}'
     )
 
     # 比较找到的域名与提供的域名
@@ -403,7 +791,7 @@ function show_certificate_info() {
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.info.start")"
 
     # 执行 acme.sh 的信息显示命令
-    "${HOME}/.acme.sh/acme.sh" --info -d ${DOMAIN}
+    "${HOME}/.acme.sh/acme.sh" --info -d "${DOMAIN}"
 }
 
 # =============================================================================
@@ -481,6 +869,15 @@ function main() {
         --email=*)
             ACCOUNT_EMAIL="${1#*=}" # 提取邮箱
             ;;
+        # 同域名证书来源切换的内部事务选项：只停止 acme.sh
+        # 续签，不删除已部署证书。
+        --keep-cert)
+            DELETE_DEPLOYED_CERT=0
+            ;;
+        # 域名迁移提交后的内部清理选项。
+        --delete-cert)
+            DELETE_DEPLOYED_CERT=1
+            ;;
         # 匹配帮助或未知选项
         --help | *)
             show_help # 显示帮助并退出
@@ -491,6 +888,12 @@ function main() {
 
     # 如果没有提供操作命令，则显示帮助
     [[ -z ${ACTION} ]] && show_help
+    case "${ACTION}" in
+    issue|stop-renew|status|info)
+        valid_certificate_domain "${DOMAIN}" ||
+            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain_invalid")"
+        ;;
+    esac
 
     # 根据 ACTION 变量的值调用相应的函数
     case "${ACTION}" in

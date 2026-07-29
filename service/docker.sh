@@ -359,7 +359,7 @@ function install_cloudreve_v3() {
         # 打印启动服务的信息
         print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.start')"
         # 切换到 Cloudreve v3 目录并启动服务
-        cd "${CLOUDREVE_V3_DIR}"
+        cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
         docker compose up -d
         # 等待服务启动
         sleep 5
@@ -416,7 +416,7 @@ function reset_cloudreve_v3_admin() {
         # 打印重置账户的信息
         print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.reset')"
         # 切换到 Cloudreve v3 目录
-        cd "${CLOUDREVE_V3_DIR}"
+        cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
         # 停止服务
         docker compose down
         # 删除数据库文件
@@ -444,11 +444,11 @@ function purge_cloudreve_v3() {
         # 打印彻底卸载的警告信息
         print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.purge')"
         # 切换到 Cloudreve v3 目录
-        cd "${CLOUDREVE_V3_DIR}"
+        cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
         # 停止服务
         docker compose down
         # 切换到用户主目录
-        cd "${HOME}"
+        cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
         # 删除整个 Cloudreve v3 目录
         rm -rf "${CLOUDREVE_V3_DIR}"
     fi
@@ -469,7 +469,7 @@ function start_cloudreve_v3() {
             # 打印启动服务的信息
             print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.start_service')"
             # 切换到 Cloudreve v3 目录并启动服务
-            cd "${CLOUDREVE_V3_DIR}"
+            cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
             docker compose up -d
         else
             # 如果目录不存在，打印回退安装的信息
@@ -492,7 +492,7 @@ function stop_cloudreve_v3() {
         # 打印停止服务的警告信息
         print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.stop')"
         # 切换到 Cloudreve v3 目录
-        cd "${CLOUDREVE_V3_DIR}"
+        cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
         # 停止服务
         docker compose down
     fi
@@ -522,7 +522,7 @@ function install_cloudreve_v4() {
         # 打印启动服务的信息
         print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.start')"
         # 切换到 Cloudreve v4 目录并启动服务
-        cd "${CLOUDREVE_V4_DIR}"
+        cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         docker compose up -d
     fi
 }
@@ -540,7 +540,7 @@ function update_cloudreve_v4() {
         # 打印更新服务的信息
         print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.update')"
         # 切换到 Cloudreve v4 目录
-        cd "${CLOUDREVE_V4_DIR}"
+        cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         # 停止服务
         docker compose down
         # 拉取最新的镜像
@@ -562,11 +562,11 @@ function purge_cloudreve_v4() {
         # 打印彻底卸载的警告信息
         print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.purge')"
         # 切换到 Cloudreve v4 目录
-        cd "${CLOUDREVE_V4_DIR}"
+        cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         # 停止服务
         docker compose down
         # 切换到用户主目录
-        cd "${HOME}"
+        cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
         # 删除整个 Cloudreve v4 目录
         rm -rf "${CLOUDREVE_V4_DIR}"
     fi
@@ -587,7 +587,7 @@ function start_cloudreve_v4() {
             # 打印启动服务的信息
             print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.start_service')"
             # 切换到 Cloudreve v4 目录并启动服务
-            cd "${CLOUDREVE_V4_DIR}"
+            cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
             docker compose up -d
         else
             # 如果目录不存在，打印回退安装的信息
@@ -610,7 +610,7 @@ function stop_cloudreve_v4() {
         # 打印停止服务的警告信息
         print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.stop')"
         # 切换到 Cloudreve v4 目录
-        cd "${CLOUDREVE_V4_DIR}"
+        cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         # 停止服务
         docker compose down
     fi

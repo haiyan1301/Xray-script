@@ -12,7 +12,11 @@
     "multiple_values": "Multiple values separated by commas"
   },
   "main": {
-    "not_support": "This feature is available only when CDN or SNI mode is currently installed"
+    "not_support": "This feature is available only when CDN or SNI mode is currently installed",
+    "rollback_fail": "The previous runtime could not be fully restored after the new configuration failed; check Xray and Nginx immediately",
+    "install_busy": "Another protocol installation or reconfiguration is already running",
+    "post_install_cleanup_fail": "Installation succeeded, but a recovery journal could not be cleaned up and was retained at:",
+    "share_after_install_fail": "Installation succeeded, but share-link generation failed; retry from the Share menu"
   },
   "menu": {
     "choose": "Please choose an option",
@@ -74,7 +78,7 @@
       "option10": "Multi-node Composite",
       "option0": "Cancel",
       "note_hy2": "Note: HY2 uses UDP and requires a domain, IP, or custom TLS certificate.",
-      "note_web": "Note: CDN/SNI always use Nginx on port 443; site certificates are configured separately.",
+      "note_web": "Note: SNI uses Nginx; CDN can use Nginx or the low-resource direct Xray TLS backend.",
       "note_multi": "Note: Multi-node mode does not include CDN or SNI.",
       "info1": "mKCP sacrifices bandwidth to reduce latency.",
       "info2": "XTLS(Vision) solves TLS in TLS issue",
@@ -97,6 +101,15 @@
       "option0": "Cancel",
       "info1": "Cloudreve v3 auto-generates admin account",
       "info2": "First registered user in Cloudreve v4 becomes admin"
+    },
+    "cdn_backend": {
+      "title": "Select CDN Origin Backend",
+      "option1": "Nginx TLS reverse proxy (with camouflage site)",
+      "option2": "Direct Xray TLS (low-resource VPS)",
+      "option0": "Cancel",
+      "info1": "Keeps camouflage sites, Cloudreve, and Nginx management features",
+      "info2": "Stops and disables Nginx; Xray listens on 443 directly to reduce memory and background processes",
+      "warning": "Direct mode requires HTTPS origin mode (Full/Strict, not Flexible); enable HTTP/2/gRPC at the CDN for streaming XHTTP, and restrict origin port 443 to CDN source IPs where possible."
     },
     "config_management": {
       "title": "Configuration Management",
@@ -154,6 +167,11 @@
       "option5": "Change camouflage site content",
       "option6": "Reset Cloudreve v3 admin data"
     },
+    "cdn_direct_config": {
+      "title": "Low-resource CDN Management",
+      "option1": "Reconfigure the CDN node or switch backend",
+      "option2": "Renew/reload the Xray TLS certificate"
+    },
     "reverse": {
       "title": "Reverse Proxy (NAT Traversal)",
       "option1": "Enable Reverse Proxy",
@@ -184,6 +202,16 @@
     "xray_version": {
       "fetch_fail": "Could not obtain a valid Xray version; check GitHub connectivity and retry"
     },
+    "x25519": {
+      "generate_fail": "Failed to generate a complete X25519 key pair; the existing configuration was not changed",
+      "generated": "X25519 key pair generated"
+    },
+    "xray_service": {
+      "start_fail": "Failed to start the Xray service",
+      "restart_fail": "Failed to restart the Xray service",
+      "enable_fail": "Failed to enable the Xray service at boot",
+      "active_fail": "The Xray service did not become active"
+    },
     "port": {
       "fixed": "This mode uses a fixed entry point or per-node ports and cannot be changed here"
     },
@@ -207,11 +235,21 @@
       "install_mode_prompt": "Choose Nginx installation mode (default 1):",
       "install_mode_prebuilt": "Download pre-compiled binary from GitHub Releases (fast, recommended)",
       "install_mode_compile": "Compile from source locally (slow, requires build tools)",
-      "install_mode_invalid": "Select 1 or 2"
+      "install_mode_invalid": "Select 1 or 2",
+      "path_invalid": "The configured XHTTP path is invalid; Nginx was not changed",
+      "path_sync_fail": "Failed to synchronize the managed Nginx XHTTP path:",
+      "config_invalid": "Nginx configuration validation failed",
+      "start_fail": "Failed to start the Nginx service",
+      "restart_fail": "Failed to restart the Nginx service",
+      "enable_fail": "Failed to enable the Nginx service at boot",
+      "active_fail": "The Nginx service did not become active"
     },
     "gh_proxy": {
       "prompt": "In mainland China, use GitHub proxy for download [y/N]: ",
-      "fetch_fail": "Failed to download Xray install script, check network or retry later"
+      "fetch_fail": "Failed to download Xray install script, check network or retry later",
+      "invalid_script": "The downloaded Xray install script is empty or invalid",
+      "install_fail": "Xray installation failed",
+      "xray_missing": "The installer finished, but the xray command is still unavailable"
     },
     "multi": {
       "protocol_title": "Multi-node Protocol",
@@ -220,6 +258,7 @@
     },
     "cert_source": {
       "prompt_cdn": "CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
+      "prompt_cdn_direct": "Direct Xray CDN TLS certificate [1. Standalone ACME / 2. Custom certificate paths] (default 1): ",
       "prompt_sni_domain": "SNI direct-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
       "prompt_sni_cdn": "SNI mode CDN-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
       "source_invalid": "Certificate source must be 1 or 2",
@@ -228,6 +267,22 @@
       "path_invalid": "File not found or not readable",
       "install_ok": "Using your provided certificate",
       "cert_invalid": "The certificate and key do not match, or the certificate does not cover this site name"
+    },
+    "cdn_direct": {
+      "backend_invalid": "The CDN origin backend must be nginx or xray",
+      "release_port_fail": "Could not stop the old Xray service and release port 443",
+      "domain_invalid": "The CDN domain is empty or invalid",
+      "cert_invalid": "The Xray CDN certificate is invalid, expired, mismatched, or does not cover the CDN domain",
+      "cert_restore_fail": "Failed to restore the previous certificate pair; inspect this directory before restarting services:",
+      "apply_fail": "Failed to issue or install the Xray CDN certificate; runtime config generation was stopped",
+      "renew_fail": "Failed to renew the Xray CDN certificate",
+      "ready": "The Xray CDN TLS certificate is verified and ready",
+      "nginx_stop_fail": "Could not stop Nginx; the required certificate challenge or listener port may still be occupied",
+      "nginx_restore_fail": "The certificate operation finished, but the previously active Nginx service could not be restored",
+      "nginx_disable_fail": "Could not disable Nginx at boot",
+      "use_reconfigure": "Direct CDN mode cannot use Nginx domain management; choose Reconfigure CDN node",
+      "nginx_not_used": "This CDN node is using the no-Nginx low-resource backend; reconfigure it with the Nginx backend before using this action",
+      "cleanup_incomplete": "The Xray runtime is healthy, but an Nginx cron job or old Cloudreve container could not be stopped; check crontab and Docker manually"
     },
     "hy2_cert": {
       "prompt": "Certificate source [1. acme.sh domain cert / 2. acme.sh IP cert / 3. Custom cert path] (default 1): ",
@@ -247,9 +302,14 @@
       "name_mismatch": "The name is not covered by the certificate SAN/CN; please try again",
       "source_invalid": "Select 1, 2, or 3",
       "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry",
-      "firewall_open": "Opening UDP port in firewall",
-      "firewall_ok": "UDP port opened in firewall",
+      "email_invalid": "The saved ACME account email is invalid; enter a valid address and retry",
+      "firewall_open": "Opening firewall port",
+      "firewall_ok": "Firewall port is open",
+      "firewall_skip": "No supported firewall manager was found; no local firewall rule was changed",
+      "firewall_inactive": "The installed firewall manager is inactive; no local firewall rule was changed",
+      "firewall_fail": "Failed to open firewall port",
       "cron_setup": "Setting up certificate auto-renewal cron job",
+      "cron_fail": "Failed to configure certificate auto-renewal",
       "cron_ok": "Certificate auto-renewal configured"
     },
     "cert_reuse": {
@@ -261,7 +321,9 @@
       "reuse_ok": "Certificate reused successfully"
     },
     "mldsa": {
-      "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)"
+      "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)",
+      "generate_fail": "Failed to generate a complete ML-DSA-65 key pair; the existing configuration was not changed",
+      "generated": "ML-DSA-65 key pair generated"
     },
     "reverse": {
       "enabled": "Reverse proxy enabled",
@@ -270,7 +332,8 @@
       "bridge_title": "===== Bridge Config Template =====",
       "bridge_hint": "Save the following config as Xray config.json on the internal network device",
       "bridge_info": "The bridge device needs Xray installed and running with this config",
-      "no_reverse": "Reverse proxy is not enabled, please enable it first"
+      "no_reverse": "Reverse proxy is not enabled, please enable it first",
+      "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry"
     },
     "lan": {
       "error": "Error",
@@ -326,7 +389,7 @@
     "only_change_domain": "Only change domain [Y/n]: ",
     "domain": "Enter website domain (for Reality): ",
     "cdn": "Enter website domain (for CDN): ",
-    "email": "Enter email for ZeroSSL registration: ",
+    "email": "Enter ACME account email: ",
     "short": "Enter shortId (comma separated, default auto-generated): ",
     "short_id_tip": "Supports input 0 to 8 to automatically generate shortId of corresponding length",
     "path": "Enter path (default auto-generated): ",
@@ -418,7 +481,7 @@
     },
     "tls": {
       "info": "Fetching TLS information: ",
-      "version_error": "TLS connection failed, may not support TLS 1.3: ",
+      "error": "TLS connection failed, may not support TLS 1.3: ",
       "pass": "Supports TLS 1.3",
       "key_exchange_warn": "Does not use X25519 key exchange: ",
       "key_exchange_pass": "Uses X25519 key exchange"
@@ -494,6 +557,7 @@
     }
   },
   "ssl": {
+    "domain_invalid": "The certificate domain is empty or invalid.",
     "install": {
       "already_installed": "acme.sh is already installed.",
       "start": "Installing acme.sh...",

@@ -46,12 +46,12 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置
 
 # --- 正则表达式常量 ---
 # 定义各种数据格式的正则表达式，用于验证输入
-readonly DOMAIN_REGEX="^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"                      # 域名
+readonly DOMAIN_REGEX="^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"                   # 域名
 readonly IPV4_REGEX='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$' # IPv4
 readonly IPV6_REGEX='^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'                                            # IPv6 (简化版)
 readonly HEX_REGEX='^[0-9a-fA-F]+$'                                                                         # 十六进制字符串
 readonly UUID_REGEX='^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$' # UUID
-readonly EMAIL_REGEX='^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'                                     # 邮箱地址
+readonly EMAIL_LOCAL_REGEX='^[a-zA-Z0-9_%+-]+(\.[a-zA-Z0-9_%+-]+)*$'                                       # 邮箱本地部分（点分原子）
 
 # --- 全局变量声明 ---
 # 声明用于存储语言参数和国际化数据的全局变量
@@ -161,7 +161,7 @@ function valid_domain() {
     local domain="$1" # 获取域名参数
 
     # 使用正则表达式匹配域名格式，成功匹配返回 0，否则返回 1
-    [[ "$domain" =~ $DOMAIN_REGEX ]] && return 0 || return 1
+    ((${#domain} <= 253)) && [[ "$domain" =~ $DOMAIN_REGEX ]]
 }
 
 # =============================================================================
@@ -712,6 +712,7 @@ function check_xray_version_exists() {
 # =============================================================================
 function validate_email() {
     local email="$1" # 获取邮箱地址参数
+    local local_part domain_part
 
     # 打印正在检查的信息
     _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.check")${email}"
@@ -722,14 +723,20 @@ function validate_email() {
         return 1
     fi
 
-    # 使用正则表达式检查邮箱格式
-    if [[ "$email" =~ $EMAIL_REGEX ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.valid")$email"
-        return 0
-    else
+    # ACME 服务不接受本地部分以点开头/结尾或包含连续点的地址；
+    # 域名部分复用严格的域名标签校验，避免首尾连字符等无效格式。
+    local_part="${email%@*}"
+    domain_part="${email#*@}"
+    if ((${#email} > 254 || ${#local_part} > 64)) ||
+        [[ "${email}" != *@* || "${domain_part}" == *"@"* ]] ||
+        [[ ! "${local_part}" =~ ${EMAIL_LOCAL_REGEX} ]] ||
+        ! valid_domain "${domain_part}"; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.format_error")$email"
         return 1
     fi
+
+    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.valid")$email"
+    return 0
 }
 
 # =============================================================================

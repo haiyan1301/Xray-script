@@ -29,7 +29,7 @@ readonly RED='\033[31m'    # 红色
 readonly NC='\033[0m'      # 无颜色（重置）
 
 # 获取当前脚本的目录和项目根目录的绝对路径
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" # 当前脚本所在目录
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
 
 # 定义配置文件和相关目录的路径
@@ -155,25 +155,47 @@ function generate_target() {
 # 注意: 会修改 ${SCRIPT_CONFIG_PATH} 文件内容
 # =============================================================================
 function generate_server_names() {
-    local target=${1} # 获取目标名称参数
+    local target="${1:-}" # 获取目标名称参数
+    local script_config=''
+    local temp_file=''
 
-    # 使用 jq 读取并可能修改配置文件内容：
-    # 如果 .target 对象中已存在 $key (即 $target)，
-    # 则返回原配置；
-    # 否则，将新的键值对 ($target: [$target]) 添加到 .target 对象中
-    local SCRIPT_CONFIG=$(jq --arg key "${target}" '
-    if .target | has($key) then
-        .
-    else
-        .target += { ($key): [$key] }
-    end
-    ' "${SCRIPT_CONFIG_PATH}")
+    [[ -n "${target}" && -f "${SCRIPT_CONFIG_PATH}" ]] || return 1
+    # 分离 local 声明与命令替换，确保 jq 解析/更新失败不会被 local
+    # 的成功状态吞掉，更不能把配置文件截断为空。
+    if ! script_config="$(jq --arg key "${target}" '
+        .target //= {} |
+        if .target | has($key) then
+            .
+        else
+            .target += { ($key): [$key] }
+        end
+    ' "${SCRIPT_CONFIG_PATH}")"; then
+        return 1
+    fi
 
-    # 将修改后的配置内容写回配置文件
-    echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
+    [[ -n "${script_config}" ]] &&
+        printf '%s\n' "${script_config}" | jq empty >/dev/null 2>&1 ||
+        return 1
+    temp_file="$(mktemp "${SCRIPT_CONFIG_PATH}.tmp.XXXXXX")" || return 1
+    if ! printf '%s\n' "${script_config}" >"${temp_file}"; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
+    chmod --reference="${SCRIPT_CONFIG_PATH}" "${temp_file}" 2>/dev/null ||
+        chmod 600 "${temp_file}" || {
+        rm -f -- "${temp_file}"
+        return 1
+    }
+    chown --reference="${SCRIPT_CONFIG_PATH}" "${temp_file}" 2>/dev/null || true
+    if ! mv -f -- "${temp_file}" "${SCRIPT_CONFIG_PATH}"; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
+    sync
 
     # 从修改后的配置中提取并输出指定 target 的服务器名称列表
-    echo "${SCRIPT_CONFIG}" | jq --arg key "${target}" '.target[$key]'
+    printf '%s\n' "${script_config}" |
+        jq -e --arg key "${target}" '.target[$key]'
 }
 
 # =============================================================================
@@ -184,20 +206,40 @@ function generate_server_names() {
 # 注意: 需要确保系统已安装 xray 命令
 # =============================================================================
 function generate_x25519() {
-    # 调用 xray x25519 命令生成密钥对，输出通常为两行：
-    # Private key: <private_key>
-    # Public key: <public_key>
-    local X25519_KEY=$(xray x25519)
+    if ! command -v xray >/dev/null 2>&1; then
+        echo "xray command is required to generate X25519 keys" >&2
+        return 1
+    fi
 
-    # 使用 sed 提取第一行中的私钥部分
-    local PRIVATE_KEY=$(echo "${X25519_KEY}" | sed -ne '1s/.*:\s*//p')
-    # 使用 sed 提取第二行中的公钥部分
-    local PUBLIC_KEY=$(echo "${X25519_KEY}" | sed -ne '2s/.*:\s*//p')
-    # 使用 sed 提取第三行中的哈希部分
-    local HASH32=$(echo "${X25519_KEY}" | sed -ne '3s/.*:\s*//p')
+    local x25519_output
+    if ! x25519_output="$(xray x25519 2>&1)"; then
+        echo "xray x25519 failed" >&2
+        return 1
+    fi
 
-    # 将私钥和公钥，以及哈希用逗号连接后输出
-    echo "${PRIVATE_KEY},${PUBLIC_KEY},${HASH32}"
+    # Xray 的标签曾从 "Private key/Public key" 调整为
+    # "PrivateKey/Password (PublicKey)/Hash32"。按标签解析，避免版本变化
+    # 或额外输出导致固定行号错位。
+    local private_key=''
+    local public_key=''
+    local hash32=''
+    local label value normalized_label
+    while IFS=: read -r label value; do
+        normalized_label="$(printf '%s' "${label}" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')"
+        value="$(printf '%s' "${value}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        case "${normalized_label}" in
+        privatekey) private_key="${value}" ;;
+        publickey | password | passwordpublickey) public_key="${value}" ;;
+        hash32) hash32="${value}" ;;
+        esac
+    done <<<"${x25519_output}"
+
+    if [[ -z "${private_key}" || -z "${public_key}" ]]; then
+        echo "Unable to parse X25519 private/public key output" >&2
+        return 1
+    fi
+
+    printf '%s,%s,%s\n' "${private_key}" "${public_key}" "${hash32}"
 }
 
 # =============================================================================
@@ -369,4 +411,6 @@ function generate_ss2022_key() {
 
 # --- 脚本执行入口 ---
 # 将脚本接收到的所有参数传递给 main 函数开始执行
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

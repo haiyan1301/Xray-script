@@ -596,7 +596,7 @@ function prebuilt_install() {
     archive_name="$(basename "${download_url}")"
     local release_dir="${archive_name%.tar.gz}"
 
-    cd "${TMPFILE_DIR}"
+    cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading') ${archive_name}"
     _error_detect "curl -fsSL -o ${archive_name} ${download_url}"
     _error_detect "tar -zxf ${archive_name}"
@@ -654,7 +654,7 @@ CONFEOF
 # 返回值: 无 (执行下载、配置和编译过程)
 # =============================================================================
 function source_compile() {
-    cd "${TMPFILE_DIR}" # 切换到临时目录
+    cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}" # 切换到临时目录
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions')"
     # 从官方下载页获取最新的 Nginx 源码版本，BoringSSL 使用 main 分支源码。
     local nginx_version="$(fetch_latest_nginx_version)"
@@ -673,11 +673,11 @@ function source_compile() {
     # 下载并编译 BoringSSL。Nginx 直接通过 include/lib 链接到已构建的 BoringSSL，
     # 不使用 --with-openssl，因为该参数要求 OpenSSL 源码树并会尝试执行 Configure/make。
     _error_detect "git clone --depth=1 https://github.com/google/boringssl"
-    mkdir -p boringssl/build
-    cd boringssl/build
+    mkdir -p boringssl/build || print_error "Failed to create directory: boringssl/build"
+    cd boringssl/build || print_error "Failed to enter directory: boringssl/build"
     _error_detect "cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 .."
     _error_detect "ninja -j$(nproc)"
-    cd "${TMPFILE_DIR}"
+    cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
 
     # 查找 BoringSSL 静态库（兼容不同版本/生成器的输出路径）。
     local libssl_path="$(find "${TMPFILE_DIR}/boringssl/build" -name 'libssl.a' -print -quit 2>/dev/null)"
@@ -703,11 +703,11 @@ function source_compile() {
     if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_brotli')"
         _error_detect "git clone --recursive https://github.com/google/ngx_brotli"
-        cd "${TMPFILE_DIR}" # 返回临时目录
+        cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}" # 返回临时目录
     fi
 
     # 进入 Nginx 源码目录
-    cd "${nginx_version}"
+    cd "${nginx_version}" || print_error "Failed to enter directory: ${nginx_version}"
 
     # 对 Nginx 源码进行一些 sed 修改，以优化 Perl 模块的编译
     sed -i "s/OPTIMIZE[ \\t]*=>[ \\t]*'-O'/OPTIMIZE          => '-O3'/g" src/http/modules/perl/Makefile.PL

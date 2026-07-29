@@ -12,7 +12,11 @@
     "multiple_values": "多个值请用英文逗号分隔"
   },
   "main": {
-    "not_support": "该功能仅适用于当前已安装的 CDN 或 SNI 模式"
+    "not_support": "该功能仅适用于当前已安装的 CDN 或 SNI 模式",
+    "rollback_fail": "新配置失败后未能完整恢复旧运行状态，请立即检查 Xray 与 Nginx 服务",
+    "install_busy": "已有协议安装或重配任务正在运行",
+    "post_install_cleanup_fail": "安装已成功，但恢复日志未能清理，已保留在：",
+    "share_after_install_fail": "安装已成功，但分享链接生成失败，请稍后从分享菜单重试"
   },
   "menu": {
     "choose": "请选择操作",
@@ -74,7 +78,7 @@
       "option10": "多节点组合配置",
       "option0": "取消",
       "note_hy2": "提示：HY2 使用 UDP，需要域名证书、IP 证书或自定义证书。",
-      "note_web": "提示：CDN/SNI 固定由 Nginx 监听 443，并在后续单独配置站点证书。",
+      "note_web": "提示：SNI 使用 Nginx；CDN 可选择 Nginx 或 Xray 直接 TLS 低资源模式。",
       "note_multi": "提示：多节点模式不包含 CDN/SNI。",
       "info1": "mKCP 牺牲带宽来降低延迟。传输同样的内容，mKCP 一般比 TCP 消耗更多的流量",
       "info2": "XTLS(Vision) 解决 TLS in TLS 问题",
@@ -97,6 +101,15 @@
       "option0": "取消",
       "info1": "Cloudreve v3 版本自动生成管理员账号",
       "info2": "Cloudreve v4 版本首个注册的账户会被设置为管理员"
+    },
+    "cdn_backend": {
+      "title": "选择 CDN 回源后端",
+      "option1": "Nginx TLS 反向代理（含伪装站点）",
+      "option2": "Xray 直接 TLS（低资源 VPS）",
+      "option0": "取消",
+      "info1": "保留伪装站点、Cloudreve 和 Nginx 管理功能",
+      "info2": "停止并禁用 Nginx，由 Xray 直接监听 443，可减少内存和后台进程",
+      "warning": "直连模式要求 CDN 使用 HTTPS 回源（Full/Strict，不能用 Flexible）；流式 XHTTP 请在 CDN 开启 HTTP/2/gRPC，并建议将源站 443 仅放行 CDN 回源 IP。"
     },
     "config_management": {
       "title": "管理配置",
@@ -154,6 +167,11 @@
       "option5": "修改伪装站点内容",
       "option6": "重置 Cloudreve v3 管理员数据"
     },
+    "cdn_direct_config": {
+      "title": "CDN 低资源模式管理",
+      "option1": "重新配置 CDN 节点或切换后端",
+      "option2": "续签/重新加载 Xray TLS 证书"
+    },
     "reverse": {
       "title": "反向代理(内网穿透)",
       "option1": "启用反向代理",
@@ -184,6 +202,16 @@
     "xray_version": {
       "fetch_fail": "无法获取有效的 Xray 版本，请检查 GitHub 网络连接后重试"
     },
+    "x25519": {
+      "generate_fail": "无法生成完整的 X25519 密钥对，原配置未被修改",
+      "generated": "X25519 密钥对已生成"
+    },
+    "xray_service": {
+      "start_fail": "Xray 服务启动失败",
+      "restart_fail": "Xray 服务重启失败",
+      "enable_fail": "设置 Xray 服务开机自启失败",
+      "active_fail": "Xray 服务未进入运行状态"
+    },
     "port": {
       "fixed": "当前模式使用固定入口或多节点端口，不能在此统一修改"
     },
@@ -207,11 +235,21 @@
       "install_mode_prompt": "请选择 Nginx 安装模式 (默认 1)：",
       "install_mode_prebuilt": "从 GitHub Releases 下载预编译二进制 (快速，推荐)",
       "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)",
-      "install_mode_invalid": "请选择 1 或 2"
+      "install_mode_invalid": "请选择 1 或 2",
+      "path_invalid": "配置的 XHTTP 路径无效，未修改 Nginx",
+      "path_sync_fail": "同步受管 Nginx XHTTP 路径失败：",
+      "config_invalid": "Nginx 配置校验失败",
+      "start_fail": "Nginx 服务启动失败",
+      "restart_fail": "Nginx 服务重启失败",
+      "enable_fail": "设置 Nginx 服务开机自启失败",
+      "active_fail": "Nginx 服务未进入运行状态"
     },
     "gh_proxy": {
       "prompt": "是否在中国大陆，使用 GitHub 加速下载 [y/N]: ",
-      "fetch_fail": "下载 Xray 安装脚本失败，请检查网络或稍后重试"
+      "fetch_fail": "下载 Xray 安装脚本失败，请检查网络或稍后重试",
+      "invalid_script": "下载到的 Xray 安装脚本为空或格式无效",
+      "install_fail": "Xray 安装失败",
+      "xray_missing": "安装器已结束，但系统中仍找不到 xray 命令"
     },
     "multi": {
       "protocol_title": "选择多节点协议",
@@ -220,6 +258,7 @@
     },
     "cert_source": {
       "prompt_cdn": "CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "prompt_cdn_direct": "Xray 直连 CDN 的 TLS 证书 [1. standalone 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "prompt_sni_domain": "SNI 直连站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "prompt_sni_cdn": "SNI 模式的 CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "source_invalid": "证书来源只能选择 1 或 2",
@@ -228,6 +267,22 @@
       "path_invalid": "文件不存在或不可读，请重新输入",
       "install_ok": "已使用您提供的证书",
       "cert_invalid": "证书与私钥不匹配，或证书不包含当前站点域名"
+    },
+    "cdn_direct": {
+      "backend_invalid": "CDN 回源后端只能是 nginx 或 xray",
+      "release_port_fail": "无法停止旧 Xray 服务并释放 443 端口",
+      "domain_invalid": "CDN 域名为空或格式无效",
+      "cert_invalid": "Xray CDN 证书无效、已过期、与私钥不匹配，或不包含 CDN 域名",
+      "cert_restore_fail": "恢复原证书对失败，请在重启服务前检查此目录：",
+      "apply_fail": "申请或安装 Xray CDN 证书失败，已中止配置生成",
+      "renew_fail": "续签 Xray CDN 证书失败",
+      "ready": "Xray CDN TLS 证书已验证并就绪",
+      "nginx_stop_fail": "无法停止 Nginx，证书验证或新监听器所需端口仍可能被占用",
+      "nginx_restore_fail": "证书操作已结束，但无法恢复此前运行中的 Nginx 服务",
+      "nginx_disable_fail": "无法禁用 Nginx 开机自启",
+      "use_reconfigure": "低资源 CDN 模式不能使用 Nginx 域名管理，请选择“重新配置 CDN 节点”",
+      "nginx_not_used": "当前为无 Nginx 的 CDN 低资源模式；如需此功能，请先重新配置 CDN 节点并切换到 Nginx 后端",
+      "cleanup_incomplete": "Xray 运行配置已正常启动，但 Nginx 定时任务或旧 Cloudreve 容器未能全部停止，请手动检查 crontab 和 Docker"
     },
     "hy2_cert": {
       "prompt": "证书来源 [1. acme.sh 申请域名证书 / 2. acme.sh 申请 IP 证书 / 3. 自定义证书路径] (默认 1): ",
@@ -247,9 +302,14 @@
       "name_mismatch": "该名称不在证书的 SAN/CN 中，请重新输入",
       "source_invalid": "请选择 1、2 或 3",
       "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试",
-      "firewall_open": "正在开放 UDP 端口",
-      "firewall_ok": "UDP 端口已开放",
+      "email_invalid": "保存的 ACME 账户邮箱无效，请输入合法邮箱后重试",
+      "firewall_open": "正在开放防火墙端口",
+      "firewall_ok": "防火墙端口已开放",
+      "firewall_skip": "未发现受支持的防火墙管理工具，未修改本机防火墙规则",
+      "firewall_inactive": "已安装的防火墙管理工具未启用，未修改本机防火墙规则",
+      "firewall_fail": "防火墙端口开放失败",
       "cron_setup": "正在设置证书自动续签定时任务",
+      "cron_fail": "证书自动续签任务配置失败",
       "cron_ok": "证书自动续签已配置"
     },
     "cert_reuse": {
@@ -261,7 +321,9 @@
       "reuse_ok": "已成功复用证书"
     },
     "mldsa": {
-      "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)"
+      "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)",
+      "generate_fail": "无法生成完整的 ML-DSA-65 密钥对，原配置未被修改",
+      "generated": "ML-DSA-65 密钥对已生成"
     },
     "reverse": {
       "enabled": "反向代理已启用",
@@ -270,7 +332,8 @@
       "bridge_title": "===== 内网端配置模板 =====",
       "bridge_hint": "请将以下配置保存为内网设备的 Xray config.json",
       "bridge_info": "内网端需要安装 Xray 并使用此配置运行",
-      "no_reverse": "反向代理未启用，请先启用反向代理"
+      "no_reverse": "反向代理未启用，请先启用反向代理",
+      "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试"
     },
     "lan": {
       "error": "错误",
@@ -326,7 +389,7 @@
     "only_change_domain": "仅更新域名 [Y/n]: ",
     "domain": "请输入网站域名 (供 Reality 使用): ",
     "cdn": "请输入网站域名 (供 CDN 使用): ",
-    "email": "请输入用于注册 ZeroSSL 的邮箱: ",
+    "email": "请输入 ACME 账户邮箱: ",
     "short": "请输入 shortId (多个值请用英文逗号分隔，默认自动生成): ",
     "short_id_tip": "支持输入 0 到 8 自动生成对应倍数长度的 shortId",
     "path": "请输入 path (默认自动生成): ",
@@ -494,6 +557,7 @@
     }
   },
   "ssl": {
+    "domain_invalid": "证书域名为空或格式无效。",
     "install": {
       "already_installed": "acme.sh 已安装。",
       "start": "正在安装 acme.sh...",

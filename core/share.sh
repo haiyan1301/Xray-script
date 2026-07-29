@@ -35,8 +35,8 @@ readonly RED='\033[31m'    # 红色
 readonly NC='\033[0m'      # 无颜色（重置）
 
 # 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
-readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" # 当前脚本所在目录
+readonly CUR_FILE="$(basename "${BASH_SOURCE[0]}" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
 
 # 定义配置文件和相关目录的路径
@@ -44,8 +44,8 @@ readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件
 readonly I18N_DIR="${PROJECT_ROOT}/i18n"                       # 国际化文件目录
 readonly CONFIG_DIR="${PROJECT_ROOT}/config"                   # 脚本配置文件目录
 readonly GENERATE_PATH="${CUR_DIR}/generate.sh"                # 项目中的 generate.sh 脚本路径
-readonly XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"    # Xray 服务端配置文件路径
-readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
+readonly XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH_OVERRIDE:-/usr/local/etc/xray/config.json}" # Xray 服务端配置文件路径
+readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_PATH_OVERRIDE:-${SCRIPT_CONFIG_DIR}/config.json}" # 脚本主要配置文件路径
 
 # --- 全局变量声明 ---
 # 声明用于存储语言参数、国际化数据和配置信息的全局变量
@@ -57,6 +57,8 @@ declare SCRIPT_CONFIG       # 存储脚本配置文件的全部 JSON 内容
 declare XHTTP_EXTRA         # 存储额外的 XHTTP 下行设置 JSON 字符串
 declare XHTTP_EXTRA_ENCODED # 存储经过 URL 编码的 XHTTP_EXTRA 字符串
 declare SHARE_LINK          # 存储最终生成的分享链接
+declare PUBLIC_HOST_LOOKUP_STATE='unattempted'
+declare PUBLIC_HOST_CACHE=''
 # 声明一系列变量用于存储分享链接的各个组成部分，便于拼接不同类型的链接
 declare SHARE_LINK_COMPONENT_VLESS   # VLESS 协议的基础部分
 declare SHARE_LINK_COMPONENT_TROJAN  # Trojan 协议的基础部分
@@ -168,6 +170,99 @@ function format_uri_host() {
     fi
 }
 
+function is_valid_ipv4_literal() {
+    local value="$1"
+    local octet numeric
+    local -a octets=()
+
+    [[ "${value}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+    IFS='.' read -r -a octets <<<"${value}"
+    [[ "${#octets[@]}" -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "${#octet}" -le 3 ]] || return 1
+        numeric=$((10#${octet}))
+        ((numeric <= 255)) || return 1
+    done
+}
+
+function is_valid_ipv6_literal() {
+    local value="$1"
+    local ipv4_tail normalized suffix part
+    local has_compression=0
+    local group_count=0
+    local -a groups=()
+
+    [[ "${value}" == *:* ]] || return 1
+
+    # IPv4-mapped IPv6 addresses use the final IPv4 literal as two hextets.
+    if [[ "${value}" == *.* ]]; then
+        ipv4_tail="${value##*:}"
+        is_valid_ipv4_literal "${ipv4_tail}" || return 1
+        value="${value%:*}:0:0"
+    fi
+
+    [[ "${value}" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "${value}" != *:::* ]] || return 1
+
+    if [[ "${value}" == *::* ]]; then
+        has_compression=1
+        suffix="${value#*::}"
+        [[ "${suffix}" != *::* ]] || return 1
+        normalized="${value/::/:__compressed__:}"
+    else
+        [[ "${value}" != :* && "${value}" != *: ]] || return 1
+        normalized="${value}"
+    fi
+
+    IFS=':' read -r -a groups <<<"${normalized}"
+    for part in "${groups[@]}"; do
+        [[ -z "${part}" || "${part}" == '__compressed__' ]] && continue
+        [[ "${part}" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        group_count=$((group_count + 1))
+    done
+
+    if [[ "${has_compression}" -eq 1 ]]; then
+        ((group_count < 8))
+    else
+        ((group_count == 8))
+    fi
+}
+
+function is_valid_ip_literal() {
+    is_valid_ipv4_literal "$1" || is_valid_ipv6_literal "$1"
+}
+
+function resolve_public_host() {
+    local candidate=''
+
+    case "${PUBLIC_HOST_LOOKUP_STATE}" in
+    resolved) return 0 ;;
+    failed) return 1 ;;
+    esac
+
+    # Mark the attempt before making network calls so every later node reuses
+    # this result, including a failed lookup.
+    PUBLIC_HOST_LOOKUP_STATE='failed'
+    PUBLIC_HOST_CACHE=''
+
+    if candidate="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null)" &&
+        is_valid_ip_literal "${candidate}"; then
+        PUBLIC_HOST_CACHE="${candidate}"
+        PUBLIC_HOST_LOOKUP_STATE='resolved'
+        return 0
+    fi
+
+    if candidate="$(curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)" &&
+        is_valid_ip_literal "${candidate}"; then
+        PUBLIC_HOST_CACHE="${candidate}"
+        PUBLIC_HOST_LOOKUP_STATE='resolved'
+        return 0
+    fi
+
+    echo -e "${RED}[Error]${NC} Unable to determine a valid public IPv4 or IPv6 address." >&2
+    return 1
+}
+
 # =============================================================================
 # 函数名称: cache_json_data
 # 功能描述: 将 Xray 和脚本的配置文件内容读取到全局变量中进行缓存，
@@ -192,10 +287,15 @@ function cache_json_data() {
 # =============================================================================
 function get_common_config() {
     local inbound_index=$1 # 获取 inbound 索引参数
+    local remote_host_override="${2:-}"
     local inbound_port
 
-    # 优先使用公网 IPv4；仅有 IPv6 时也能生成符合 URI 语法的分享链接。
-    CLIENT_CONFIG[remote_host]="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
+    if [[ -n "${remote_host_override}" ]]; then
+        CLIENT_CONFIG[remote_host]="${remote_host_override}"
+    else
+        resolve_public_host || return 1
+        CLIENT_CONFIG[remote_host]="${PUBLIC_HOST_CACHE}"
+    fi
     # 优先使用当前 inbound 的真实监听端口；无端口的内部监听回退到脚本主端口
     inbound_port="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].port? // empty')"
     if [[ -n "${inbound_port}" ]]; then
@@ -449,14 +549,16 @@ function show_client_config() {
 # 返回值: 无 (直接修改一系列 SHARE_LINK_COMPONENT_* 全局变量)
 # =============================================================================
 function get_share_link_component() {
-    local uri_host
+    local uri_host encoded_trojan_password encoded_mkcp_seed
     uri_host="$(format_uri_host "${CLIENT_CONFIG[remote_host]}")"
+    encoded_trojan_password="$(urlencode "${CLIENT_CONFIG[password]}")"
+    encoded_mkcp_seed="$(urlencode "${CLIENT_CONFIG[seed]}")"
     # 生成 VLESS 协议基础链接部分 (协议://UUID@地址:端口?网络类型=...)
     SHARE_LINK_COMPONENT_VLESS="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[uuid]}@${uri_host}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
     # 生成 Trojan 协议基础链接部分 (协议://密码@地址:端口?网络类型=...)
-    SHARE_LINK_COMPONENT_TROJAN="${CLIENT_CONFIG[protocol]}://${CLIENT_CONFIG[password]}@${uri_host}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
+    SHARE_LINK_COMPONENT_TROJAN="${CLIENT_CONFIG[protocol]}://${encoded_trojan_password}@${uri_host}:${CLIENT_CONFIG[port]}?type=${CLIENT_CONFIG[type]}"
     # 生成 mKCP 网络传输参数部分 (&seed=...&headerType=none)
-    SHARE_LINK_COMPONENT_MKCP="&seed=${CLIENT_CONFIG[seed]}&headerType=none"
+    SHARE_LINK_COMPONENT_MKCP="&seed=${encoded_mkcp_seed}&headerType=none"
     # 生成 TLS 安全传输参数部分 (&security=tls&sni=...&alpn=h2&fp=chrome)
     SHARE_LINK_COMPONENT_TLS="&security=${CLIENT_CONFIG[security]}&sni=${CLIENT_CONFIG[server_name]}&alpn=h2&fp=chrome"
     # 生成 Reality 安全传输参数部分 (&security=reality&sni=...&pbk=...&sid=...&spx=%2F&fp=chrome)
@@ -708,7 +810,7 @@ function show_multi_config() {
         span="$(multi_inbound_span "${node_tag_lower}")"
 
         reset_share_state
-        get_common_config "${inbound_index}"
+        get_common_config "${inbound_index}" || return 1
         apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}" "${node_port}"
 
         if [[ "${node_tag_lower}" == "fallback" ]]; then
@@ -716,7 +818,7 @@ function show_multi_config() {
             show_config
 
             reset_share_state
-            get_common_config "$((inbound_index + 1))"
+            get_common_config "$((inbound_index + 1))" || return 1
             apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}-xhttp" "${node_port}"
             get_fallback_xhttp_share_link "${inbound_index}" "$((inbound_index + 1))"
             show_config
@@ -825,7 +927,7 @@ function show_fallback_config() {
     show_config
 
     # 重新获取第二个 inbound (index 2) 的通用配置
-    get_common_config 2
+    get_common_config 2 || return 1
     # 设置第二个配置的标签为 'fallbak_xhttp_reality'
     CLIENT_CONFIG[tag]='fallbak_xhttp_reality'
     # 生成 fallback 的 XHTTP 分享链接
@@ -840,6 +942,9 @@ function show_fallback_config() {
 # 返回值: 无 (调用其他函数进行显示)
 # =============================================================================
 function show_sni_config() {
+    local origin_host="${CLIENT_CONFIG[remote_host]}"
+
+    [[ -n "${origin_host}" ]] || return 1
     # 设置第一个配置的标签为 'sni_vision_reality'
     CLIENT_CONFIG[tag]='sni_vision_reality'
     # 生成 Vision 分享链接
@@ -848,7 +953,7 @@ function show_sni_config() {
     show_config
 
     # 重新获取第二个 inbound (index 2) 的通用配置
-    get_common_config 2
+    get_common_config 2 "${origin_host}" || return 1
     # 设置第二个配置的标签为 'sni_xhttp_reality'
     CLIENT_CONFIG[tag]='sni_xhttp_reality'
     # 生成 fallback 的 XHTTP 分享链接
@@ -857,7 +962,7 @@ function show_sni_config() {
     show_config
 
     # 重新获取第二个 inbound (index 2) 的通用配置
-    get_common_config 2
+    get_common_config 2 "${origin_host}" || return 1
     # 设置第三个配置的标签为 'sni_tls_down'
     CLIENT_CONFIG[tag]='sni_tls_down'
     # 生成 TLS 下行的额外配置
@@ -868,7 +973,7 @@ function show_sni_config() {
     show_config
 
     # 重新获取第二个 inbound (index 2) 的通用配置
-    get_common_config 2
+    get_common_config 2 "${origin_host}" || return 1
     # 设置第四个配置的标签为 'sni_xhttp_cdn'
     CLIENT_CONFIG[tag]='sni_xhttp_cdn'
     # 清空额外配置
@@ -880,7 +985,7 @@ function show_sni_config() {
     show_config
 
     # 重新获取第二个 inbound (index 2) 的通用配置
-    get_common_config 2
+    get_common_config 2 "${origin_host}" || return 1
     # 设置第五个配置的标签为 'sni_reality_down'
     CLIENT_CONFIG[tag]='sni_reality_down'
     # 生成 Reality 下行的额外配置
@@ -902,27 +1007,49 @@ function show_sni_config() {
 # 返回值: 无 (协调调用其他函数完成整个流程)
 # =============================================================================
 function main() {
+    local config_tag common_host_override=''
+    local share_status=0
+
+    PUBLIC_HOST_LOOKUP_STATE='unattempted'
+    PUBLIC_HOST_CACHE=''
+
     # 加载国际化数据
     load_i18n
 
     # 缓存 Xray 和脚本配置数据
     cache_json_data
 
-    # 获取第一个 inbound (index 1) 的通用配置
-    get_common_config 1
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag | ascii_downcase')"
+    case "${config_tag}" in
+    cdn)
+        common_host_override="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // empty')"
+        ;;
+    sni)
+        common_host_override="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // empty')"
+        ;;
+    esac
+    if [[ "${config_tag}" =~ ^(cdn|sni)$ && -z "${common_host_override}" ]]; then
+        echo -e "${RED}[Error]${NC} Missing configured host for ${config_tag} share links." >&2
+        return 1
+    fi
 
-    case "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag | ascii_downcase')" in
+    # 获取第一个 inbound (index 1) 的通用配置
+    get_common_config 1 "${common_host_override}" || return 1
+
+    case "${config_tag}" in
     mkcp) get_mkcp_share_link ;;      # mKCP 模式
     xhttp) setup_xhttp_obfs_extra 1; get_xhttp_share_link ;;    # XHTTP 模式
     trojan) get_trojan_share_link ;;  # Trojan 模式
-    fallback) show_fallback_config ;; # Fallback 模式
-    sni) show_sni_config ;;           # SNI 模式
+    fallback) show_fallback_config || return 1 ;; # Fallback 模式
+    sni) show_sni_config || return 1 ;;           # SNI 模式
     cdn) get_cdn_share_link ;;        # CDN 模式
     hy2) get_hy2_share_link ;;        # Hysteria2 模式
     ss2022) get_ss2022_share_link ;;  # Shadowsocks-2022 模式
-    multi) show_multi_config >&2; return 0 ;;
+    multi) show_multi_config >&2 || return 1; return 0 ;;
     *) get_vision_share_link ;;       # 默认为 Vision 模式
     esac
+    share_status=$?
+    ((share_status == 0)) || return "${share_status}"
 
     # 显示最终的配置和链接信息 (重定向到标准错误输出 >&2，虽然不太常见)
     show_config >&2

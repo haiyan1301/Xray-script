@@ -65,9 +65,25 @@ function protocol_uses_reality() {
     esac
 }
 
-function protocol_uses_nginx() {
+function normalize_cdn_backend() {
+    # Missing and unknown values deliberately fall back to Nginx. This keeps
+    # old installations compatible and prevents a corrupted setting from
+    # unexpectedly exposing a public Xray TLS listener.
     case "${1,,}" in
-    sni | cdn) return 0 ;;
+    xray) echo 'xray' ;;
+    nginx | '') echo 'nginx' ;;
+    *) echo 'nginx' ;;
+    esac
+}
+
+function protocol_uses_nginx() {
+    local cdn_backend="${2:-}"
+
+    case "${1,,}" in
+    sni) return 0 ;;
+    cdn)
+        [[ "$(normalize_cdn_backend "${cdn_backend}")" == 'nginx' ]]
+        ;;
     *) return 1 ;;
     esac
 }
@@ -88,4 +104,29 @@ function protocol_reads_public_port() {
 
 function protocol_uses_hy2_certificate() {
     [[ "${1,,}" == 'hy2' ]]
+}
+
+function normalize_xhttp_path() {
+    local path="${1:-}"
+
+    if [[ -z "${path}" || "${path}" == /* ]]; then
+        printf '%s\n' "${path}"
+    else
+        printf '/%s\n' "${path}"
+    fi
+}
+
+# Validate an XHTTP path against the same rules used by handler_sync_nginx_xhttp_path
+# (mirroring check_path in core/check.sh). An empty path is treated as valid:
+# non-xhttp protocols legitimately carry an empty .xray.path, and callers that
+# require a non-empty path enforce that separately. Returns 0 for a usable path,
+# 1 for a root path ("/"), disallowed characters, or consecutive slashes ("//").
+function validate_xhttp_path() {
+    local path="${1:-}"
+
+    [[ -z "${path}" ]] && return 0
+    [[ "${path}" == '/' ]] && return 1
+    [[ "${path}" =~ [^a-zA-Z0-9_/.\-] ]] && return 1
+    [[ "${path}" =~ // ]] && return 1
+    return 0
 }

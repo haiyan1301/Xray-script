@@ -15,10 +15,10 @@
   * SNI (包含 Vision_REALITY、XHTTP_REALITY、XHTTP_TLS)
   * 多节点组合配置
 * 支持 VLESS enc（ML-KEM-768 后量子）可选启用
-* CDN 与 SNI 是两个独立安装模式：CDN 只部署 XHTTP over TLS；SNI 才启用 REALITY 与 SNI 分流
+* CDN 与 SNI 是两个独立安装模式：CDN 只部署 XHTTP over TLS，并可选择 Nginx 或 Xray 直接 TLS 低资源后端；SNI 才启用 REALITY 与 SNI 分流
 * HY2 支持域名证书、短期 IP 证书和自定义证书，自定义证书会校验私钥及 SAN/CN
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
-* CDN/SNI 的站点证书分别保存，均支持自动申请或自行填写证书路径
+* CDN/SNI 的站点证书分别保存，均支持自动申请或自行填写证书路径；Xray 直连 CDN 与 HY2 还会按域名/IP、自动/自定义来源隔离证书目录，避免旧续签任务覆盖当前证书
 * Nginx 模板默认启用 limit.conf 基础防护（常见扫描与恶意 UA 拦截）
 * 规则配置与自填:
   * 禁止 bittorrent 流量(可选)
@@ -58,15 +58,17 @@
 ## 问题
 
 1. 如果安装成功，但无法使用，请检查服务器是否开启对应端口，可通过 `https://tcp.ping.pe/ip:port` 验证服务器端口是否开放。
-2. CDN/SNI 自动申请证书时，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放，并暂时关闭 CDN 代理。
+2. CDN/SNI 自动申请证书时，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放，并暂时关闭 CDN 代理。证书失败会立即中止，不会生成不可用配置。
 3. HY2 使用 UDP；除开放所选 UDP 端口外，还需确认服务商安全组允许 UDP。
 4. 选择自行填写证书路径时，请确保 fullchain/privkey 文件存在可读，否则流程会中止且不会自动回退到 ACME 申请。
-5. 安装或重装 CDN/SNI 时，脚本会按所选模式重建其托管的 Nginx 站点；从 SNI 切换到 CDN 会停用旧的 SNI 直连站点。
+5. CDN 的 Nginx 后端会重建托管站点；Xray 直连后端会停止并禁用 Nginx、移除其自动更新任务，由 Xray 直接监听 443，以节省低配 VPS 的内存和后台进程。
 6. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
 7. 使用 SNI 获取证书时遇到 【Could not get nonce, let's try again】 请查看 [ZeroSSL 状态页](https://status.zerossl.com/)，大概率是 ZeroSSL 的【Free ACME Service】处于 【Service disruption】或【Service outage】状态。
 8. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
    1. 已启动 WARP 分流的用户可以在【管理配置】->【分流管理】中选择【重置 WARP Proxy】选项，该选项实现清空容器日志与重置 WARP Proxy。
    2. 已添加日志限制，如需使用 WARP 功能直接启用即可。
+9. Xray 直连 CDN 要求 CDN 使用 HTTPS 回源（Cloudflare 为 Full 或 Full (strict)，不能使用 Flexible）；使用流式 XHTTP 时还需在 CDN 开启 HTTP/2/gRPC。建议在 VPS 防火墙/安全组中将源站 443 仅放行 CDN 回源 IP；该模式不提供伪装站点或 Cloudreve。
+10. v2026.07.28 修复 CDN 路径未同步 Nginx、多节点纯 HY2 误显示 VLESS enc、HY2 证书失败后仍生成配置，以及 ACME 邮箱误校验、X25519 新版输出解析、服务失败后仍继续分享和脚本自更新误降级等安装流程问题。
 
 ## 分享链接
 
@@ -167,13 +169,13 @@ WARP Proxy : 已启动
 
 ## 安装时长说明
 
-CDN/SNI 的域名、证书和伪装站点可在「管理配置 -> CDN / SNI 站点管理」中单独维护。
+CDN/SNI 的域名和证书可在「管理配置 -> CDN / SNI 站点管理」中维护；伪装站点仅在 Nginx 后端提供。低资源模式可重新配置后端或单独续签/加载 Xray 证书。
 
-更换为非 CDN/SNI 协议后，Nginx 将停止服务但继续保留；CDN 与 SNI 之间切换时则按新模式重建托管站点。
+更换为非 CDN/SNI 协议后，Nginx 将停止服务但继续保留；切换到 CDN 的 Xray 直连后端时也会停止并禁用 Nginx。
 
 ### 安装时长参考
 
-安装流程：选择协议 -> 输入该协议所需参数 -> 安装或复用 Xray -> CDN/SNI 可选伪装站点并安装或复用 Nginx -> 配置各自证书 -> 生成并校验配置 -> 启动服务 -> 输出分享链接。
+安装流程：选择协议 -> 输入所需参数 -> CDN 选择 Nginx 或 Xray 直连后端 -> 安装或复用 Xray -> 仅 Nginx 后端选择伪装站点并安装/复用 Nginx -> 配置并验证证书 -> 生成并校验配置 -> 启动服务 -> 输出分享链接。
 
 **这是一台单核1G的服务器的平均安装时长，仅供参考：**
 

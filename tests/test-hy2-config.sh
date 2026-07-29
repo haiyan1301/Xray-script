@@ -16,6 +16,7 @@ cp config.json "${TEST_DIR}/home/.xray-script/config.json"
 export HOME="${TEST_DIR}/home"
 export SCRIPT_CONFIG_PATH_OVERRIDE="${TEST_DIR}/script.json"
 export XRAY_CONFIG_PATH_OVERRIDE="${TEST_DIR}/xray.json"
+export XRAY_CERT_DIR_OVERRIDE="${TEST_DIR}/xray-certs"
 
 source core/handler.sh
 I18N_DATA="$(jq . i18n/en.json)"
@@ -55,12 +56,32 @@ SCRIPT_CONFIG="$(jq \
     .rules = []
 ' config.json)"
 write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+HY2_CERT_DIR="$(get_hy2_cert_dir 'hy2.example.com' '3')"
+HY2_AUTO_CERT_DIR="$(get_hy2_cert_dir 'hy2.example.com' '1')"
+HY2_OTHER_CERT_DIR="$(get_hy2_cert_dir 'other.example.com' '3')"
+[[ "${HY2_CERT_DIR}" != "${HY2_AUTO_CERT_DIR}" ]]
+[[ "${HY2_CERT_DIR}" != "${HY2_OTHER_CERT_DIR}" ]]
+install_custom_xray_certificate_pair_in_place \
+    "${TEST_DIR}/hy2.crt" \
+    "${TEST_DIR}/hy2.key" \
+    'hy2.example.com' \
+    "${HY2_CERT_DIR}"
 
-function open_xray_firewall_port() { :; }
+FIREWALL_LOG=()
+function open_xray_firewall_port() {
+    [[ -s "${XRAY_CONFIG_PATH}" ]] || {
+        echo 'firewall was changed before the validated Xray config was written' >&2
+        return 1
+    }
+    FIREWALL_LOG+=("$1/$2")
+}
 function handler_lan_open_firewall() { :; }
 handler_xray_config 1
+[[ "${FIREWALL_LOG[*]}" == '24443/udp' ]]
 
-jq -e '
+jq -e \
+    --arg cert "${HY2_CERT_DIR}/fullchain.pem" \
+    --arg key "${HY2_CERT_DIR}/privkey.pem" '
     .inbounds[1].protocol == "hysteria" and
     .inbounds[1].port == 24443 and
     .inbounds[1].settings.version == 2 and
@@ -72,6 +93,8 @@ jq -e '
     .inbounds[1].streamSettings.hysteriaSettings.udpIdleTimeout == 60 and
     .inbounds[1].streamSettings.tlsSettings.alpn == ["h3"] and
     .inbounds[1].streamSettings.tlsSettings.certificates[0].usage == "encipherment" and
+    .inbounds[1].streamSettings.tlsSettings.certificates[0].certificateFile == $cert and
+    .inbounds[1].streamSettings.tlsSettings.certificates[0].keyFile == $key and
     (.inbounds[1].streamSettings.tlsSettings | has("serverName") | not)
 ' "${XRAY_CONFIG_PATH}" >/dev/null
 

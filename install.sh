@@ -32,8 +32,8 @@ PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:${HOME}/bin:/
 export PATH
 
 # 获取当前脚本的目录绝对路径和文件名
-readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
-readonly CUR_FILE="$(basename "$0")"
+readonly CUR_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly CUR_FILE="$(basename "${BASH_SOURCE[0]}")"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.07.21"
+readonly SCRIPT_VERSION="v2026.07.28"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -111,6 +111,7 @@ declare -A I18N_DATA=(
     ['download']='正在下载'
     ['failed']='下载失败'
     ['downloaded']='文件已下载到'
+    ['path_invalid']='安装目录必须是安全的绝对路径，且不能是系统根目录'
 )
 declare PROJECT_ROOT=''
 declare I18N_DIR=''
@@ -170,8 +171,18 @@ EOF
 function parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+        --vision | --xhttp | --trojan | --fallback | --hy2 | --ss2022 | --mkcp | --cdn | --sni | --multi | --lan)
+            QUICK_INSTALL="$1"
+            ;;
         --lang=*)
             LANG_PARAM="${1}"
+            ;;
+        -d)
+            if [[ $# -lt 2 || -z "${2:-}" || "${2}" == -* ]]; then
+                _error "${I18N_DATA['path_invalid']}"
+            fi
+            PROJECT_ROOT="$2"
+            shift
             ;;
         --help)
             show_help
@@ -222,6 +233,7 @@ function load_i18n() {
             ['download']='Downloading'
             ['failed']='Download failed'
             ['downloaded']='The file has been downloaded to'
+            ['path_invalid']='The install directory must be a safe absolute path and not a system root directory'
         )
     fi
 }
@@ -408,6 +420,294 @@ function download_xray_script_files() {
     download_github_files "${target_dir}" "${script_github_api}"
 }
 
+function valid_script_version() {
+    [[ "$1" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]
+}
+
+function script_version_is_newer() {
+    local candidate="$1"
+    local current="$2"
+    local newest
+
+    valid_script_version "${candidate}" || return 1
+    valid_script_version "${current}" || return 1
+    [[ "${candidate}" != "${current}" ]] || return 1
+
+    newest="$(printf '%s\n%s\n' "${current#v}" "${candidate#v}" | sort -V | tail -n 1)"
+    [[ "${newest}" == "${candidate#v}" ]]
+}
+
+function normalize_project_root() {
+    local candidate="$1"
+    local normalized=''
+
+    [[ -n "${candidate}" && "${candidate}" == /* && "${candidate}" != *$'\n'* ]] || return 1
+    normalized="$(realpath -m -- "${candidate}" 2>/dev/null)" || return 1
+
+    case "${normalized}" in
+    / | /bin | /boot | /dev | /etc | /home | /lib | /lib64 | /media | /mnt | /opt | /proc | /root | /run | /sbin | /srv | /sys | /tmp | /usr | /usr/local | /var)
+        return 1
+        ;;
+    esac
+
+    # 配置目录中保存着独立于项目代码的持久状态，不能被项目更新覆盖或删除。
+    case "${SCRIPT_CONFIG_DIR}/" in
+    "${normalized%/}/"*) return 1 ;;
+    esac
+
+    printf '%s\n' "${normalized}"
+}
+
+function choose_project_root() {
+    local requested_path="$1"
+    local saved_path="$2"
+    local candidate=''
+
+    if [[ -n "${requested_path}" ]]; then
+        candidate="${requested_path}"
+    elif [[ -n "${saved_path}" && "${saved_path}" != 'null' ]]; then
+        candidate="${saved_path}"
+    else
+        candidate='/usr/local/xray-script'
+    fi
+
+    normalize_project_root "${candidate}"
+}
+
+function project_installation_complete() {
+    local project_root="$1"
+    local installed_version=''
+
+    installed_version="$(jq -r '.version // ""' "${project_root}/config.json" 2>/dev/null || true)"
+    validate_xray_script_archive "${project_root}" "${installed_version}"
+}
+
+function validate_xray_script_archive() {
+    local archive_root="$1"
+    local expected_version="$2"
+    local relative_path=''
+    local archive_version=''
+    local -a required_files=(
+        'install.sh'
+        'core/main.sh'
+        'core/handler.sh'
+        'core/generate.sh'
+        'core/share.sh'
+        'lib/common.sh'
+        'lib/protocols.sh'
+        'service/ssl.sh'
+        'config.json'
+        'i18n/zh.json'
+        'i18n/en.json'
+    )
+    local -a shell_files=(
+        'install.sh'
+        'core/main.sh'
+        'core/handler.sh'
+        'core/generate.sh'
+        'core/share.sh'
+        'lib/common.sh'
+        'lib/protocols.sh'
+        'service/ssl.sh'
+    )
+    local -a json_files=(
+        'config.json'
+        'i18n/zh.json'
+        'i18n/en.json'
+    )
+
+    valid_script_version "${expected_version}" || return 1
+    for relative_path in "${required_files[@]}"; do
+        [[ -f "${archive_root}/${relative_path}" &&
+            ! -L "${archive_root}/${relative_path}" &&
+            -s "${archive_root}/${relative_path}" ]] || return 1
+    done
+    for relative_path in "${shell_files[@]}"; do
+        bash -n "${archive_root}/${relative_path}" >/dev/null 2>&1 || return 1
+    done
+    for relative_path in "${json_files[@]}"; do
+        jq empty "${archive_root}/${relative_path}" >/dev/null 2>&1 || return 1
+    done
+
+    archive_version="$(jq -r '.version // ""' "${archive_root}/config.json" 2>/dev/null || true)"
+    [[ "${archive_version}" == "${expected_version}" ]]
+}
+
+function update_xray_script_transaction() (
+    local remote_version="$1"
+    local restart_script="$2"
+    local safe_project_root=''
+    local project_parent=''
+    local project_name=''
+    local staging_dir=''
+    local project_backup=''
+    local launcher_temp=''
+    local launcher_backup=''
+    local launcher_external=0
+    local launcher_original_exists=0
+    local launcher_touched=0
+    local config_snapshot_dir=''
+    local config_backup=''
+    local config_touched=0
+    local committed=0
+    local updated_config=''
+
+    function finish_xray_script_update_transaction() {
+        local status="$1"
+        local rollback_failed=0
+
+        trap - EXIT HUP INT TERM
+
+        if [[ "${committed}" -eq 0 ]]; then
+            if [[ "${config_touched}" -eq 1 && -n "${config_backup}" ]]; then
+                if [[ -e "${config_backup}" || -L "${config_backup}" ]]; then
+                    if mv -fT -- "${config_backup}" "${SCRIPT_CONFIG_PATH}"; then
+                        config_backup=''
+                    else
+                        rollback_failed=1
+                    fi
+                else
+                    rollback_failed=1
+                fi
+            fi
+
+            if [[ "${launcher_touched}" -eq 1 ]]; then
+                if [[ "${launcher_original_exists}" -eq 1 ]]; then
+                    if [[ -e "${launcher_backup}" || -L "${launcher_backup}" ]]; then
+                        if mv -fT -- "${launcher_backup}" "${restart_script}"; then
+                            launcher_backup=''
+                        else
+                            rollback_failed=1
+                        fi
+                    else
+                        rollback_failed=1
+                    fi
+                elif ! rm -f -- "${restart_script}"; then
+                    rollback_failed=1
+                fi
+            fi
+
+            if [[ -e "${project_backup}" || -L "${project_backup}" ]]; then
+                if [[ -e "${PROJECT_ROOT}" || -L "${PROJECT_ROOT}" ]]; then
+                    if [[ ! -e "${staging_dir}" && ! -L "${staging_dir}" ]]; then
+                        if ! mv -T -- "${PROJECT_ROOT}" "${staging_dir}"; then
+                            rollback_failed=1
+                        fi
+                    else
+                        rollback_failed=1
+                    fi
+                fi
+                if [[ ! -e "${PROJECT_ROOT}" && ! -L "${PROJECT_ROOT}" ]]; then
+                    if mv -T -- "${project_backup}" "${PROJECT_ROOT}"; then
+                        project_backup=''
+                    else
+                        rollback_failed=1
+                    fi
+                else
+                    rollback_failed=1
+                fi
+            fi
+        fi
+
+        if [[ "${committed}" -eq 1 || "${rollback_failed}" -eq 0 ]]; then
+            [[ -n "${launcher_temp}" ]] && rm -f -- "${launcher_temp}"
+            [[ -n "${launcher_backup}" ]] && rm -f -- "${launcher_backup}"
+            [[ -n "${config_snapshot_dir}" ]] && rm -rf -- "${config_snapshot_dir}"
+            [[ -n "${staging_dir}" ]] && rm -rf -- "${staging_dir}"
+            [[ -n "${project_backup}" ]] && rm -rf -- "${project_backup}"
+        else
+            printf 'Xray-script update rollback failed; transaction artifacts were retained:\n' >&2
+            [[ -n "${staging_dir}" ]] && printf '  staging: %s\n' "${staging_dir}" >&2
+            [[ -n "${project_backup}" ]] && printf '  project backup: %s\n' "${project_backup}" >&2
+            [[ -n "${launcher_backup}" ]] && printf '  launcher backup: %s\n' "${launcher_backup}" >&2
+            [[ -n "${config_snapshot_dir}" ]] && printf '  config snapshot: %s\n' "${config_snapshot_dir}" >&2
+            status=1
+        fi
+
+        exit "${status}"
+    }
+
+    trap 'finish_xray_script_update_transaction "$?"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    safe_project_root="$(normalize_project_root "${PROJECT_ROOT}")" || return 1
+    PROJECT_ROOT="${safe_project_root}"
+    valid_script_version "${remote_version}" || return 1
+    [[ "${restart_script}" == /* && "${restart_script}" != *$'\n'* ]] || return 1
+    [[ -d "${PROJECT_ROOT}" && ! -L "${PROJECT_ROOT}" ]] || return 1
+
+    case "${restart_script}" in
+    "${PROJECT_ROOT}/install.sh")
+        ;;
+    "${PROJECT_ROOT}/"*)
+        return 1
+        ;;
+    *)
+        launcher_external=1
+        ;;
+    esac
+
+    project_parent="$(dirname -- "${PROJECT_ROOT}")"
+    project_name="$(basename -- "${PROJECT_ROOT}")"
+    staging_dir="$(mktemp -d -- "${project_parent}/.${project_name}.update.XXXXXXXXXX")" || return 1
+    project_backup="${staging_dir}.backup"
+
+    download_xray_script_files "${staging_dir}" || return 1
+    if ! validate_xray_script_archive "${staging_dir}" "${remote_version}"; then
+        printf '%s\n' "${I18N_DATA['failed']}: invalid Xray-script archive" >&2
+        return 1
+    fi
+
+    if ! mv -T -- "${PROJECT_ROOT}" "${project_backup}"; then
+        return 1
+    fi
+    if ! mv -T -- "${staging_dir}" "${PROJECT_ROOT}"; then
+        return 1
+    fi
+
+    if [[ "${launcher_external}" -eq 1 ]]; then
+        local launcher_parent=''
+        local launcher_name=''
+        launcher_parent="$(dirname -- "${restart_script}")"
+        launcher_name="$(basename -- "${restart_script}")"
+        [[ -d "${launcher_parent}" ]] || return 1
+
+        launcher_temp="$(mktemp -- "${launcher_parent}/.${launcher_name}.update.XXXXXXXXXX")" || return 1
+        if ! cp -f -- "${PROJECT_ROOT}/install.sh" "${launcher_temp}"; then
+            return 1
+        fi
+        chmod --reference="${PROJECT_ROOT}/install.sh" "${launcher_temp}" 2>/dev/null ||
+            chmod 755 "${launcher_temp}" || return 1
+
+        if [[ -e "${restart_script}" || -L "${restart_script}" ]]; then
+            launcher_original_exists=1
+            launcher_backup="${launcher_temp}.backup"
+            cp -a -- "${restart_script}" "${launcher_backup}" || return 1
+        fi
+        launcher_touched=1
+        if ! mv -fT -- "${launcher_temp}" "${restart_script}"; then
+            return 1
+        fi
+        launcher_temp=''
+    fi
+
+    local config_parent=''
+    local config_name=''
+    config_parent="$(dirname -- "${SCRIPT_CONFIG_PATH}")"
+    config_name="$(basename -- "${SCRIPT_CONFIG_PATH}")"
+    config_snapshot_dir="$(mktemp -d -- "${config_parent}/.${config_name}.update.XXXXXXXXXX")" || return 1
+    config_backup="${config_snapshot_dir}/original"
+    cp -a -- "${SCRIPT_CONFIG_PATH}" "${config_backup}" || return 1
+
+    updated_config="$(jq --arg ver "${remote_version}" '.version = $ver' "${SCRIPT_CONFIG_PATH}")" || return 1
+    config_touched=1
+    write_config "${updated_config}" "${SCRIPT_CONFIG_PATH}" || return 1
+
+    committed=1
+)
+
 # =============================================================================
 # 函数名称: check_xray_script_version
 # 功能描述: 检查本地安装的 Xray-script 版本与 GitHub 上的最新版本是否一致。
@@ -419,14 +719,41 @@ function check_xray_script_version() {
     # 定义 GitHub API URL 和本地版本文件路径（使用本仓库）
     local script_config_github_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
     local is_update='n' # 初始化更新标志为 'n' (不更新)
+    local remote_config=''
+    local installed_config="${PROJECT_ROOT}/config.json"
+    local local_version=''
+    local remote_version=''
+    local state_version=''
 
-    # 读取本地版本号
-    local local_version="$(jq -r '.version' "${SCRIPT_CONFIG_PATH}")"
+    # 以实际安装代码快照的 config.json 为准，而不是可变的用户状态文件。
+    local_version="$(jq -r '.version // ""' "${installed_config}" 2>/dev/null || true)"
+    if ! valid_script_version "${local_version}"; then
+        echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['failed']}: invalid local script version" >&2
+        return 0
+    fi
+
+    # 菜单从用户状态文件显示版本；发现漂移时同步到实际安装版本。
+    state_version="$(jq -r '.version // ""' "${SCRIPT_CONFIG_PATH}" 2>/dev/null || true)"
+    if [[ "${state_version}" != "${local_version}" ]]; then
+        local synced_config=''
+        synced_config="$(jq --arg version "${local_version}" '.version = $version' "${SCRIPT_CONFIG_PATH}")" || return 1
+        write_config "${synced_config}" "${SCRIPT_CONFIG_PATH}" || return 1
+    fi
+
     # 从 GitHub API 获取远程版本号
-    local remote_version="$(curl -fsSL "$script_config_github_url" | jq -r '.version')"
+    if ! remote_config="$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 "${script_config_github_url}")"; then
+        echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['failed']}: ${script_config_github_url}" >&2
+        return 0
+    fi
+    remote_version="$(jq -er '.version | select(type == "string")' <<<"${remote_config}" 2>/dev/null || true)"
 
-    # 比较本地和远程版本号
-    if [[ "${local_version}" != "${remote_version}" ]]; then
+    if ! valid_script_version "${remote_version}"; then
+        echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['failed']}: invalid script version" >&2
+        return 0
+    fi
+
+    # 仅当远程版本严格更新时提示，避免网络异常或远端落后导致降级。
+    if script_version_is_newer "${remote_version}" "${local_version}"; then
         # 如果不一致，则提示用户有新版本
         echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['new']}"
         # 询问用户是否更新
@@ -436,31 +763,20 @@ function check_xray_script_version() {
         case "${is_update,,}" in # ${is_update,,} 转换为小写
         y | yes)
             # 如果用户选择更新
-            # 切换到 HOME 目录
-            cd "${HOME}"
-            # 定义临时目录
-            readonly temp_dir="${SCRIPT_CONFIG_DIR}/xray-script-temp"
-            # 创建临时目录
-            mkdir -vp "${temp_dir}"
-            # 下载最新文件到临时目录
-            download_xray_script_files "${temp_dir}"
-            # 删除旧的项目目录
-            rm -rf "${PROJECT_ROOT}"
-            # 移动临时目录成为新项目目录
-            mv -f "${temp_dir}" "${PROJECT_ROOT}"
-            # 删除旧的脚本文件
-            rm -f "${CUR_DIR}/${CUR_FILE}"
-            # 更新当前脚本文件
-            cp -f "${PROJECT_ROOT}/install.sh" "${CUR_DIR}/${CUR_FILE}"
-            # 更新版本号 (使用 jq 安全更新，避免 sed 空模式错误)
-            local _updated_config
-            _updated_config="$(jq --arg ver "${remote_version}" '.version = $ver' "${SCRIPT_CONFIG_PATH}")" \
-                && echo "${_updated_config}" > "${SCRIPT_CONFIG_PATH}" \
-                && sleep 1
+            local safe_project_root=''
+            safe_project_root="$(normalize_project_root "${PROJECT_ROOT}")" || _error "${I18N_DATA['path_invalid']}: ${PROJECT_ROOT}"
+            PROJECT_ROOT="${safe_project_root}"
+            local restart_script="${CUR_DIR}/${CUR_FILE}"
+            if [[ "${CUR_DIR}" == "${PROJECT_ROOT}" ]]; then
+                restart_script="${PROJECT_ROOT}/install.sh"
+            fi
+            update_xray_script_transaction "${remote_version}" "${restart_script}" ||
+                _error "${I18N_DATA['failed']}: ${PROJECT_ROOT}"
+            sleep 1
             # 打印更新完成信息
             echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['completed']}"
             # 重启脚本
-            bash "${CUR_DIR}/${CUR_FILE}"
+            bash "${restart_script}"
             # 退出脚本，避免重复执行
             exit 0
             ;;
@@ -509,42 +825,28 @@ function main() {
     fi
     # 如果配置文件不存在，或内容为空/不是有效 JSON，则重新下载
     if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]] || [[ ! -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then
-        wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
+        if ! wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"; then
+            _error "${I18N_DATA['failed']}: config.json"
+        fi
         chmod 600 "${SCRIPT_CONFIG_PATH}"
+        # 校验下载结果非空且为有效 JSON，避免后续流程使用损坏的配置文件
+        if ! [[ -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then
+            _error "${I18N_DATA['failed']}: config.json (invalid)"
+        fi
     fi
 
-    # 处理命令行参数中的快速安装和自定义目录选项
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-        # 快速安装选项
-        --vision | --xhttp | --trojan | --fallback | --hy2 | --ss2022 | --mkcp | --cdn | --sni | --multi | --lan)
-            QUICK_INSTALL="${1}"
-            ;;
-        # 自定义安装目录选项
-        -d)
-            shift
-            PROJECT_ROOT="${1}"
-            ;;
-        esac
-        shift
-    done
-
     # 从脚本配置文件中读取已记录的安装路径
-    local script_path="$(jq -r '.path' "${SCRIPT_CONFIG_PATH}")"
-    # 如果配置文件中没有记录路径，且命令行也未指定，则使用默认路径
-    if [[ (-z "${script_path}" || "${script_path}" == "null") && -z "${PROJECT_ROOT}" ]]; then
-        PROJECT_ROOT='/usr/local/xray-script'
+    local script_path="$(jq -r '.path // ""' "${SCRIPT_CONFIG_PATH}")"
+    local requested_path="${PROJECT_ROOT}"
+    if ! PROJECT_ROOT="$(choose_project_root "${requested_path}" "${script_path}")"; then
+        _error "${I18N_DATA['path_invalid']}: ${requested_path:-${script_path}}"
+    fi
+
+    # 显式 -d 始终优先于历史保存路径；同时把默认值或规范化后的路径写回配置。
+    if [[ "${script_path}" != "${PROJECT_ROOT}" ]]; then
         SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
         backup_config "${SCRIPT_CONFIG_PATH}"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-    # 如果配置文件中已有记录的路径，则使用该路径
-    elif [[ -n "${script_path}" ]]; then
-        PROJECT_ROOT="${script_path}"
-    # 如果配置文件中没有路径，但命令行指定了路径，则使用命令行指定的路径并更新配置文件
-    elif [[ -n "${PROJECT_ROOT}" ]]; then
-        SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
-        backup_config "${SCRIPT_CONFIG_PATH}"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
     fi
 
     # 设置各个子目录的路径
@@ -555,12 +857,13 @@ function main() {
     TOOL_DIR="${PROJECT_ROOT}/tool"
 
     # 检查项目根目录是否存在
-    if [[ -d "${PROJECT_ROOT}" ]]; then
+    if project_installation_complete "${PROJECT_ROOT}"; then
         # 如果存在，则检查版本更新
-        check_xray_script_version
+        check_xray_script_version || _error "${I18N_DATA['failed']}: version state"
     else
-        # 如果不存在，则下载项目文件
+        # 目录不存在或安装不完整时重新下载缺失文件。
         download_xray_script_files "${PROJECT_ROOT}"
+        project_installation_complete "${PROJECT_ROOT}" || _error "${I18N_DATA['failed']}: invalid Xray-script archive"
     fi
 
     # 检查配置文件中的语言设置

@@ -206,6 +206,18 @@ function menu_web_config() {
     echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option0")"
 }
 
+function menu_cdn_backend() {
+    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option1")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option2")"
+    echo -e "------------------------------------------------------"
+    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.info1")"
+    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.info2")"
+    echo -e "   $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.warning")"
+    echo -e "------------------------------------------------------"
+    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option0")"
+}
+
 # =============================================================================
 # 函数名称: menu_config
 # 功能描述: 显示配置管理菜单。
@@ -332,6 +344,13 @@ function menu_cdn_config() {
     for option in 1 2 3 4 5 6; do
         echo -e "${GREEN}${option}.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.option${option}")"
     done
+    echo -e "------------------------------------------------------"
+}
+
+function menu_cdn_direct_config() {
+    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option1")"
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option2")"
     echo -e "------------------------------------------------------"
 }
 
@@ -464,7 +483,7 @@ function get_choose() {
     # 空输入仅采用当前菜单标注的默认项；显式输入 0 始终表示取消。
     if [[ -z "${choose}" ]]; then
         case "${i18n}" in
-        --config | --web | --full) return 1 ;;
+        --config | --web | --full | --cdn-backend) return 1 ;;
         --xray) return 2 ;;
         *) return 0 ;;
         esac
@@ -509,10 +528,12 @@ function main() {
     --xray) menu_xray >&2 ;;              # 显示 Xray 版本菜单
     --config) menu_xray_config >&2 ;;     # 显示协议配置菜单
     --web) menu_web_config >&2 ;;         # 显示 Web 配置菜单
+    --cdn-backend) menu_cdn_backend >&2 ;; # 显示 CDN 回源后端菜单
     --management) menu_config >&2 ;;      # 显示配置管理菜单
     --route) menu_route >&2 ;;            # 显示路由管理菜单
     --sni) menu_sni_config >&2 ;;         # 显示 SNI 配置菜单
     --cdn-config) menu_cdn_config >&2 ;;  # 显示 CDN 配置菜单
+    --cdn-direct-config) menu_cdn_direct_config >&2 ;; # 显示低资源 CDN 管理菜单
     --reverse) menu_reverse >&2 ;;         # 显示反向代理配置菜单
     --lan) menu_lan >&2 ;;                 # 显示异地组网菜单
     --banner) print_banner >&2 ;;         # 显示 Banner

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218
 set -euo pipefail
 
 readonly TEST_DIR="$(mktemp -d)"
@@ -134,6 +135,12 @@ printf '%s\n' \
     '    ssl_stapling              on;' \
     '    ssl_stapling_verify       on;' \
     >"${NGINX_CONFIG_DIR}/nginx.conf"
+cp config/nginx/conf/sites-available/cdn.example.com.conf \
+    "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
+sed -i \
+    -e 's|example.com|hydns.org|g' \
+    -e 's|/yourpath|/cdn-test|g' \
+    "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf"
 printf '%s\n' 'ExecStartPre=/bin/rm -rf /dev/shm/nginx' >"${NGINX_SERVICE_PATH}"
 SERVICE_MIGRATION_LOG="${TEST_DIR}/service-migration.log"
 function bash() { printf '%s\n' "$*" >>"${SERVICE_MIGRATION_LOG}"; }
@@ -236,6 +243,85 @@ ${TEST_DIR}/hydns.key
 EOF
 grep -Fq 'CDN site TLS certificate' "${CDN_PROMPT_LOG}"
 ! grep -qi 'SNI' "${CDN_PROMPT_LOG}"
+
+# Reconfiguring an existing hostname with an invalid custom certificate must
+# return through the normal rollback path without deleting the active site.
+rm -f -- "${SCRIPT_CONFIG_DIR}/hydns.org.conf"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj '/CN=wrong.example.test' \
+    -addext 'subjectAltName=DNS:wrong.example.test' \
+    -keyout "${TEST_DIR}/wrong.key" \
+    -out "${TEST_DIR}/wrong.crt" >/dev/null 2>&1
+SITE_HASH_BEFORE="$(sha256sum \
+    "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf")"
+SITE_LINK_BEFORE="$(readlink \
+    "${NGINX_CONFIG_DIR}/sites-enabled/hydns.org.conf")"
+CERT_HASH_BEFORE="$(sha256sum \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/fullchain.pem" \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/privkey.pem")"
+SCRIPT_CONFIG="$(jq \
+    --arg cert "${TEST_DIR}/wrong.crt" \
+    --arg key "${TEST_DIR}/wrong.key" '
+    .nginx.cdn = "hydns.org" |
+    .nginx.certificates.cdn = {
+        hostname:"hydns.org", source:"2", fullchain:$cert, privkey:$key
+    }
+' <<<"${SCRIPT_CONFIG}")"
+reset_config_data
+CONFIG_DATA['cdn']='hydns.org'
+CONFIG_DATA['only-change-domain']='n'
+if handler_change_domain 'cdn' 'y' 'n' >/dev/null 2>&1; then
+    echo 'Invalid custom certificate was accepted' >&2
+    exit 1
+fi
+[[ "$(sha256sum \
+    "${NGINX_CONFIG_DIR}/sites-available/hydns.org.conf")" == \
+    "${SITE_HASH_BEFORE}" ]]
+[[ -L "${NGINX_CONFIG_DIR}/sites-enabled/hydns.org.conf" ]]
+[[ "$(readlink "${NGINX_CONFIG_DIR}/sites-enabled/hydns.org.conf")" == \
+    "${SITE_LINK_BEFORE}" ]]
+[[ "$(sha256sum \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/fullchain.pem" \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/privkey.pem")" == \
+    "${CERT_HASH_BEFORE}" ]]
+
+# A failure while replacing the second certificate file must restore the
+# original pair instead of leaving a new certificate with the old key.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj '/CN=hydns.org' \
+    -addext 'subjectAltName=DNS:hydns.org' \
+    -keyout "${TEST_DIR}/replacement.key" \
+    -out "${TEST_DIR}/replacement.crt" >/dev/null 2>&1
+SCRIPT_CONFIG="$(jq \
+    --arg cert "${TEST_DIR}/replacement.crt" \
+    --arg key "${TEST_DIR}/replacement.key" '
+    .nginx.certificates.cdn = {
+        hostname:"hydns.org", source:"2", fullchain:$cert, privkey:$key
+    }
+' <<<"${SCRIPT_CONFIG}")"
+function cp() {
+    local destination="${!#}"
+    if [[ "${destination}" == \
+        "${NGINX_CONFIG_DIR}/certs/hydns.org/privkey.pem" &&
+        "$*" == *'.nginx-cert-stage.'* ]]; then
+        return 1
+    fi
+    command cp "$@"
+}
+reset_config_data
+CONFIG_DATA['cdn']='hydns.org'
+CONFIG_DATA['only-change-domain']='n'
+if handler_change_domain 'cdn' 'y' 'n' >/dev/null 2>&1; then
+    echo 'Partial custom certificate copy was accepted' >&2
+    exit 1
+fi
+unset -f cp
+[[ "$(sha256sum \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/fullchain.pem" \
+    "${NGINX_CONFIG_DIR}/certs/hydns.org/privkey.pem")" == \
+    "${CERT_HASH_BEFORE}" ]]
+[[ -z "$(find "${NGINX_CONFIG_DIR}/certs" -maxdepth 1 \
+    -type d -name '.nginx-cert-*' -print -quit)" ]]
 
 # Preparing pure CDN mode disables the stale SNI direct site and never calls
 # the direct-domain branch.

@@ -1,5 +1,5 @@
 {
-  "version": "v2026.07.21",
+  "version": "v2026.07.28",
   "path": "",
   "language": "",
   "xray": {
@@ -13,6 +13,11 @@
     },
     "tag": "",
     "port": 443,
+    "cdnBackend": "nginx",
+    "cdnCertHostname": "",
+    "cdnCertSource": "",
+    "cdnCertFullchain": "",
+    "cdnCertPrivkey": "",
     "uuid": "",
     "fallback": "",
     "trojan": "",
@@ -23,15 +28,12 @@
     "publicKey": "",
     "hash32": "",
     "target": "",
-    "serverNames": [
-      ""
-    ],
-    "shortIds": [
-      ""
-    ],
+    "serverNames": [],
+    "shortIds": [],
     "hy2auth": "",
     "hy2CertDomain": "",
     "hy2CertSource": "",
+    "hy2CertAcmeDomain": "",
     "hy2CertFullchain": "",
     "hy2CertPrivkey": "",
     "nodes": [],

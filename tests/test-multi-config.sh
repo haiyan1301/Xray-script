@@ -14,6 +14,7 @@ cp config.json "${TEST_DIR}/home/.xray-script/config.json"
 export HOME="${TEST_DIR}/home"
 export SCRIPT_CONFIG_PATH_OVERRIDE="${TEST_DIR}/script.json"
 export XRAY_CONFIG_PATH_OVERRIDE="${TEST_DIR}/xray.json"
+export XRAY_CERT_DIR_OVERRIDE="${TEST_DIR}/xray-certs"
 
 source core/handler.sh
 I18N_DATA="$(jq . i18n/en.json)"
@@ -104,12 +105,40 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -addext 'subjectAltName=DNS:example.com' \
     -keyout "${TEST_DIR}/key.pem" \
     -out "${TEST_DIR}/cert.pem" >/dev/null 2>&1
+MULTI_HY2_CERT_DIR="$(get_hy2_cert_dir 'example.com' '3')"
+install_custom_xray_certificate_pair_in_place \
+    "${TEST_DIR}/cert.pem" \
+    "${TEST_DIR}/key.pem" \
+    'example.com' \
+    "${MULTI_HY2_CERT_DIR}"
+VLESS_PROMPT_TAGS=()
 function run_vlessenc_choice() {
+    VLESS_PROMPT_TAGS+=("${CONFIG_DATA['tag']:-}")
     CONFIG_DATA['vless_enc_enable']='n'
 }
 
+# A pure HY2 multi-node config must never ask about VLESS encryption.
 READ_LOG=()
 PORT_READ_COUNT=0
+VLESS_PROMPT_TAGS=()
+handler_read_multi_xray_config <<EOF
+2
+5
+5
+3
+${TEST_DIR}/cert.pem
+${TEST_DIR}/key.pem
+
+EOF
+[[ "${#VLESS_PROMPT_TAGS[@]}" -eq 0 ]] || {
+    echo "Pure HY2 config unexpectedly prompted for VLESS enc" >&2
+    exit 1
+}
+jq -e 'map(.tag) == ["hy2","hy2"]' <<<"${CONFIG_DATA['nodes_json']}" >/dev/null
+
+READ_LOG=()
+PORT_READ_COUNT=0
+VLESS_PROMPT_TAGS=()
 handler_read_multi_xray_config <<EOF
 7
 7
@@ -128,6 +157,10 @@ EOF
 expected_read_order='rules port uuid seed port uuid target short port uuid target short path xhttp-mode port password target short path xhttp-mode port uuid fallback target short path xhttp-mode port hy2-auth port ss2022-password'
 [[ "${READ_LOG[*]}" == "${expected_read_order}" ]] || {
     echo "Unexpected integrated read order: ${READ_LOG[*]}" >&2
+    exit 1
+}
+[[ "${#VLESS_PROMPT_TAGS[@]}" -eq 1 && "${VLESS_PROMPT_TAGS[0]}" == 'mKCP' ]] || {
+    echo "VLESS enc prompt was not scoped to the first applicable node: ${VLESS_PROMPT_TAGS[*]}" >&2
     exit 1
 }
 jq -e '
@@ -223,12 +256,18 @@ fi
 
 SCRIPT_CONFIG="$(jq \
     --argjson nodes "${nodes}" \
-    --arg privateKey "${private_key}" '
+    --arg privateKey "${private_key}" \
+    --arg hy2Cert "${TEST_DIR}/cert.pem" \
+    --arg hy2Key "${TEST_DIR}/key.pem" '
     .xray.tag = "multi" |
     .xray.nodes = $nodes |
     .xray.privateKey = $privateKey |
     .xray.mldsa65Seed = "" |
     .xray.vlessEncEnable = "n" |
+    .xray.hy2CertSource = "3" |
+    .xray.hy2CertDomain = "example.com" |
+    .xray.hy2CertFullchain = $hy2Cert |
+    .xray.hy2CertPrivkey = $hy2Key |
     .xray.rules = {reset:1,bt:1,cn:1,ad:1} |
     .xray.warp = 0 |
     .xray.reverse = 0 |
@@ -240,7 +279,9 @@ function open_xray_firewall_port() { :; }
 function handler_lan_open_firewall() { :; }
 handler_multi_xray_config 1
 
-jq -e '
+jq -e \
+    --arg cert "${MULTI_HY2_CERT_DIR}/fullchain.pem" \
+    --arg key "${MULTI_HY2_CERT_DIR}/privkey.pem" '
     (.inbounds | length) == 19 and
     ([.inbounds[].tag] | unique | length) == 19 and
     ([.inbounds[] | select(.port? == 32768 and .tag != "api")] | length) == 0 and
@@ -251,7 +292,9 @@ jq -e '
         .settings.clients[0].auth == "hy2-password" and
         .streamSettings.hysteriaSettings.auth == "hy2-password" and
         .streamSettings.hysteriaSettings.udpIdleTimeout == 60 and
-        .streamSettings.tlsSettings.certificates[0].usage == "encipherment") and
+        .streamSettings.tlsSettings.certificates[0].usage == "encipherment" and
+        .streamSettings.tlsSettings.certificates[0].certificateFile == $cert and
+        .streamSettings.tlsSettings.certificates[0].keyFile == $key) and
     ([.inbounds[] | select(.protocol == "shadowsocks")] | length) == 2 and
     all(.inbounds[] | select(.streamSettings.network? == "kcp");
         .streamSettings.finalmask.udp[0].type == "mkcp-aes128gcm" and
