@@ -465,6 +465,29 @@ EOF
 fi
 grep -Fq -- '-s -- install -u xray --version v-test' "${INSTALL_BASH_LOG}"
 
+# A pre-install questionnaire choice must be consumed without reading stdin
+# again after package installation has started.
+readonly INSTALL_READ_LOG="${TEST_DIR}/install-read.log"
+: >"${INSTALL_CURL_LOG}"
+: >"${INSTALL_BASH_LOG}"
+: >"${INSTALL_READ_LOG}"
+if ! (
+    SCRIPT_CONFIG="$(jq '.xray.githubProxy = "y"' config.json)"
+    CMD_EXISTS_CALLS=0
+    function read() {
+        printf '%s\n' 'unexpected read' >>"${INSTALL_READ_LOG}"
+        return 1
+    }
+    handler_install 'release' </dev/null
+) >"${TEST_DIR}/install-persisted-proxy.stdout" \
+    2>"${TEST_DIR}/install-persisted-proxy.stderr"; then
+    fail_test 'handler_install failed while consuming a persisted GitHub proxy choice'
+fi
+[[ ! -s "${INSTALL_READ_LOG}" ]] ||
+    fail_test 'handler_install read stdin despite a persisted GitHub proxy choice'
+grep -Fq -- 'https://gh-proxy.com/https://github.com/XTLS/Xray-install/raw/main/install-release.sh' "${INSTALL_CURL_LOG}" ||
+    fail_test 'handler_install ignored the persisted GitHub proxy choice'
+
 # Purge must preserve local state unless both the download and the upstream
 # uninstall command complete successfully.
 readonly PURGE_ORIGINAL="${TEST_DIR}/purge-original.json"

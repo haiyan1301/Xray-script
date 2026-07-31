@@ -1002,6 +1002,7 @@ function handler_read_multi_xray_config() {
     local mldsa65_prompted='n'
     local multi_vless_enc_enable=''
     local multi_mldsa65_enable=''
+    local multi_github_proxy=''
     local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     reset_config_data
@@ -1064,6 +1065,11 @@ function handler_read_multi_xray_config() {
         nodes="$(echo "${nodes}" | jq --argjson node "${node}" '. + [$node]')"
     done
 
+    if ! cmd_exists 'xray'; then
+        run_github_proxy_choice || return 1
+        multi_github_proxy="${CONFIG_DATA['github_proxy']:-n}"
+    fi
+
     if [[ "${has_hy2}" == 'y' ]]; then
         echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.hy2_shared_cert")" >&2
         read_hy2_certificate_config || return 1
@@ -1084,6 +1090,7 @@ function handler_read_multi_xray_config() {
     CONFIG_DATA['nodes_json']="${nodes}"
     CONFIG_DATA['vless_enc_enable']="${multi_vless_enc_enable}"
     CONFIG_DATA['mldsa65_enable']="${multi_mldsa65_enable}"
+    CONFIG_DATA['github_proxy']="${multi_github_proxy}"
     CONFIG_DATA['hy2_cert_source']="${multi_hy2_cert_source}"
     CONFIG_DATA['hy2_cert_domain']="${multi_hy2_cert_domain}"
     CONFIG_DATA['hy2_cert_email']="${multi_hy2_cert_email}"
@@ -1252,7 +1259,7 @@ function handler_reset_script_config() {
         # 保留 CDN 后端和证书来源，才能在重配过程中安全判断 443
         # 当前由 Nginx 还是 Xray 占用，并复用已验证的证书。
         SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray' \
-            'version' 'warp' 'rules' \
+            'version' 'githubProxy' 'warp' 'rules' \
             'cdnBackend' 'cdnCertHostname' 'cdnCertSource' \
             'cdnCertFullchain' 'cdnCertPrivkey' 'hy2CertAcmeDomain')
         ;;
@@ -1326,6 +1333,9 @@ function handler_script_config() {
         fi
         if [[ -n "${CONFIG_DATA['mldsa65_enable']:-}" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mldsa65Enable "${CONFIG_DATA['mldsa65_enable']}" '.xray.mldsa65Enable = $mldsa65Enable')"
+        fi
+        if [[ -n "${CONFIG_DATA['github_proxy']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg githubProxy "${CONFIG_DATA['github_proxy']}" '.xray.githubProxy = $githubProxy')"
         fi
         if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
@@ -1480,6 +1490,9 @@ function handler_script_config() {
     fi
     if [[ -n "${CONFIG_DATA['mldsa65_enable']:-}" ]]; then
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mldsa65Enable "${CONFIG_DATA['mldsa65_enable']}" '.xray.mldsa65Enable = $mldsa65Enable')"
+    fi
+    if [[ -n "${CONFIG_DATA['github_proxy']:-}" ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg githubProxy "${CONFIG_DATA['github_proxy']}" '.xray.githubProxy = $githubProxy')"
     fi
     # 若启用了 VLESS enc，写入 decryption/encryption 到脚本配置
     if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
@@ -2337,6 +2350,22 @@ function run_mldsa65_choice() {
     fi
 }
 
+function run_github_proxy_choice() {
+    local eof_default="${1:-}"
+    local github_proxy_reply
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.prompt")" >&2
+    if ! read -r github_proxy_reply && [[ -z "${github_proxy_reply}" ]]; then
+        [[ -n "${eof_default}" ]] || return 1
+        github_proxy_reply="${eof_default}"
+    fi
+    github_proxy_reply="${github_proxy_reply:-n}"
+    if [[ "${github_proxy_reply,,}" == 'y' ]]; then
+        CONFIG_DATA['github_proxy']='y'
+    else
+        CONFIG_DATA['github_proxy']='n'
+    fi
+}
+
 function run_vlessenc_prompt() {
     local auto="${1:-0}"
     local vless_enc_reply
@@ -2438,6 +2467,9 @@ function handler_read_xray_config() {
     fi
     if protocol_uses_reality "${CONFIG_TAG}"; then
         run_mldsa65_choice || return 1
+    fi
+    if ! cmd_exists 'xray'; then
+        run_github_proxy_choice || return 1
     fi
     # Web 模式的证书在创建各自站点时处理，避免 CDN 和 SNI 共用一组提示与路径。
     case "${CONFIG_TAG,,}" in
@@ -3626,10 +3658,20 @@ function handler_install() {
     fi
     # 检查 Xray 命令是否存在，或是否强制安装
     if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
-        # 询问是否在中国大陆，使用 GitHub 加速下载
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.prompt")" >&2
-        read -r use_gh_proxy_reply
-        use_gh_proxy_reply="${use_gh_proxy_reply:-n}"
+        local use_gh_proxy_reply
+        use_gh_proxy_reply="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.githubProxy // ""')"
+        case "${use_gh_proxy_reply,,}" in
+        y | n)
+            use_gh_proxy_reply="${use_gh_proxy_reply,,}"
+            ;;
+        *)
+            # 独立运行安装命令时，配置问卷可能没有先执行，保留交互兜底。
+            run_github_proxy_choice 'n' || return 1
+            use_gh_proxy_reply="${CONFIG_DATA['github_proxy']}"
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg githubProxy "${use_gh_proxy_reply}" '.xray.githubProxy = $githubProxy')"
+            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+            ;;
+        esac
         local install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
         local script_content
         if [[ "${use_gh_proxy_reply,,}" == "y" ]]; then
@@ -5757,6 +5799,9 @@ function handler_quick_install() {
     fi
     if protocol_uses_reality "${quick_install_type}"; then
         run_mldsa65_choice 'n' || return 1
+    fi
+    if ! cmd_exists 'xray'; then
+        run_github_proxy_choice 'n' || return 1
     fi
     # 配置脚本 (设置各种参数)
     handler_script_config "${quick_install_type}" || return 1

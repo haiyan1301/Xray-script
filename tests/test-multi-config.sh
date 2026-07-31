@@ -34,12 +34,20 @@ reset_config_data
 run_mldsa65_choice 'n' </dev/null 2>/dev/null
 [[ "${CONFIG_DATA['mldsa65_enable']}" == 'n' ]]
 reset_config_data
+# shellcheck disable=SC2218
+run_github_proxy_choice 'n' </dev/null 2>/dev/null
+[[ "${CONFIG_DATA['github_proxy']}" == 'n' ]]
+reset_config_data
 if run_vlessenc_choice </dev/null 2>/dev/null; then
     echo 'Normal VLESS enc questionnaire accepted an unanswered EOF' >&2
     exit 1
 fi
 if run_mldsa65_choice </dev/null 2>/dev/null; then
     echo 'Normal ML-DSA-65 questionnaire accepted an unanswered EOF' >&2
+    exit 1
+fi
+if run_github_proxy_choice </dev/null 2>/dev/null; then
+    echo 'Normal GitHub proxy questionnaire accepted an unanswered EOF' >&2
     exit 1
 fi
 
@@ -144,6 +152,11 @@ VLESS_PROMPT_TAGS=()
 MLDSA_PROMPT_TAGS=()
 VLESS_CHOICE_REPLY='n'
 MLDSA_CHOICE_REPLY='n'
+GITHUB_PROXY_CHOICE_REPLY='n'
+XRAY_INSTALLED_FOR_TESTS=1
+function cmd_exists() {
+    [[ "$1" == 'xray' && "${XRAY_INSTALLED_FOR_TESTS}" -eq 1 ]]
+}
 function run_vlessenc_choice() {
     VLESS_PROMPT_TAGS+=("${CONFIG_DATA['tag']:-}")
     if [[ "${CAPTURE_INPUT_FLOW}" -eq 1 ]]; then
@@ -158,6 +171,12 @@ function run_mldsa65_choice() {
     fi
     CONFIG_DATA['mldsa65_enable']="${MLDSA_CHOICE_REPLY}"
 }
+function run_github_proxy_choice() {
+    if [[ "${CAPTURE_INPUT_FLOW}" -eq 1 ]]; then
+        INPUT_FLOW+=('github-proxy')
+    fi
+    CONFIG_DATA['github_proxy']="${GITHUB_PROXY_CHOICE_REPLY}"
+}
 
 # Vision collects all user choices in one configuration questionnaire, before
 # Xray installation and key generation begin.
@@ -169,14 +188,17 @@ MLDSA_PROMPT_TAGS=()
 RULES_REPLY='y'
 VLESS_CHOICE_REPLY='y'
 MLDSA_CHOICE_REPLY='y'
+GITHUB_PROXY_CHOICE_REPLY='y'
+XRAY_INSTALLED_FOR_TESTS=0
 CAPTURE_INPUT_FLOW=1
 handler_read_xray_config 'Vision'
-[[ "${INPUT_FLOW[*]}" == 'rules block-bt block-cn block-ad port uuid target short vless-enc mldsa65' ]] || {
+[[ "${INPUT_FLOW[*]}" == 'rules block-bt block-cn block-ad port uuid target short vless-enc mldsa65 github-proxy' ]] || {
     echo "Unexpected Vision input order: ${INPUT_FLOW[*]}" >&2
     exit 1
 }
 [[ "${CONFIG_DATA['vless_enc_enable']}" == 'y' ]]
 [[ "${CONFIG_DATA['mldsa65_enable']}" == 'y' ]]
+[[ "${CONFIG_DATA['github_proxy']}" == 'y' ]]
 CONFIG_DATA['cdn']=''
 CONFIG_DATA['email']=''
 handler_script_config
@@ -184,12 +206,14 @@ jq -e '
     .xray.tag == "Vision" and
     .xray.vlessEncEnable == "y" and
     .xray.mldsa65Enable == "y" and
+    .xray.githubProxy == "y" and
     .xray.mldsa65Seed == "" and
     .xray.mldsa65Verify == ""
 ' "${SCRIPT_CONFIG_PATH}" >/dev/null
 RULES_REPLY='N'
 VLESS_CHOICE_REPLY='n'
 MLDSA_CHOICE_REPLY='n'
+GITHUB_PROXY_CHOICE_REPLY='n'
 CAPTURE_INPUT_FLOW=0
 
 # A pure HY2 multi-node config must never ask about VLESS encryption.
@@ -295,6 +319,7 @@ SCRIPT_CONFIG="$(jq '.xray.tag = "multi" | .xray.nodes = []' config.json)"
 chinese_no_nodes="$(handler_multi_xray_config 1 2>&1 || true)"
 grep -Fq '多节点配置中没有节点。' <<<"${chinese_no_nodes}"
 I18N_DATA="$(jq . i18n/en.json)"
+XRAY_INSTALLED_FOR_TESTS=1
 
 # Existing ML-DSA material from an older config implies enabled and must be
 # reused instead of being rotated during a config rebuild.
@@ -557,6 +582,12 @@ done
         CONFIG_DATA['mldsa65_enable']='n'
         printf 'mldsa:%s\n' "$1" >>"${QUICK_CHOICE_LOG}"
     }
+    function run_github_proxy_choice() {
+        [[ "${1:-}" == 'n' ]]
+        CONFIG_DATA['github_proxy']='n'
+        printf 'github:%s\n' "$1" >>"${QUICK_CHOICE_LOG}"
+    }
+    function cmd_exists() { return 1; }
     function handler_script_config() { :; }
     function handler_install() { :; }
     function handler_reality_key_config() { :; }
@@ -567,7 +598,7 @@ done
     function handler_share() { :; }
 
     handler_quick_install 'Vision' </dev/null
-    [[ "$(tr '\n' ' ' <"${QUICK_CHOICE_LOG}")" == 'vless:y mldsa:n ' ]]
+    [[ "$(tr '\n' ' ' <"${QUICK_CHOICE_LOG}")" == 'vless:y mldsa:n github:n ' ]]
 )
 
 if [[ -n "${xray_bin}" ]]; then
