@@ -14,6 +14,8 @@
   * CDN-only mode (VLESS-XHTTP-TLS, without REALITY)
   * SNI (includes Vision_REALITY, XHTTP_REALITY, XHTTP_TLS)
   * Multi-node composite configuration
+* Optional VLESS Encryption (VLESS enc with post-quantum ML-KEM-768 key encapsulation)
+* Optional ML-DSA-65 post-quantum signature verification for REALITY
 * CDN and SNI are separate modes: CDN deploys XHTTP over TLS with either an Nginx backend or a low-resource direct Xray TLS backend; SNI enables REALITY and SNI traffic splitting
 * HY2 supports domain, short-lived IP, and custom certificates; custom certificates are checked against their key and SAN/CN
 * SNI share links implement bidirectional separation (upstream: xhttp+TLS+CDN | downstream: xhttp+Reality, upstream: xhttp+Reality | downstream: xhttp+TLS+CDN)
@@ -52,6 +54,15 @@
 * path default/fill:
   * Random generation (format: /8ugSUeNJ.9OEnTErb.dVZMUAFu)
   * Custom input (format: /8ugSUeNJ, with/without `/`)
+
+## Recent Features and Flow Changes
+
+* Vision collects routing/block choices, port, UUID, target, Short ID, VLESS Encryption, ML-DSA-65, and the first-install GitHub proxy choice before downloading or installing Xray. Post-install stages consume the saved configuration without reading input again.
+* Multi-node mode now has complete Chinese and English menus and messages. VLESS Encryption is asked once at the first applicable VLESS node, while ML-DSA-65 is asked once at the first REALITY node. Pure HY2 configurations do not show unrelated VLESS Encryption prompts.
+* VLESS Encryption parameters are generated per inbound. A public Vision inbound with `fallbacks` keeps `decryption: "none"`, so its share link does not incorrectly include `encryption`; eligible VLESS inbounds still receive the parameter.
+* The ML-DSA-65 choice is persisted. Existing complete key pairs are reused, the server Seed is not printed in installation logs, and the client Verify value is included in REALITY share links.
+* The GitHub proxy choice is persisted for the Xray download stage. A standalone install command still prompts when no saved choice is available.
+* CDN, SNI, and XHTTP templates use the current XHTTP session ID field, `sessionIDPlacement`, keeping session parameters consistent across all three modes.
 
 ## Issues
 
@@ -166,7 +177,7 @@ Manage CDN/SNI domains and certificates under `Manage Configuration -> CDN / SNI
 
 When switching to a protocol other than CDN/SNI, Nginx stops but remains installed. Selecting the direct Xray CDN backend also stops and disables Nginx.
 
-Installation flow: choose a protocol -> enter its settings -> choose the CDN backend when applicable -> install or reuse Xray -> only Nginx-backed modes choose camouflage content and install/reuse Nginx -> configure and verify certificates -> generate and validate the configuration -> start services -> print share links.
+Installation flow: choose a protocol -> enter applicable routing/block, port, UUID/Short ID, VLESS Encryption, ML-DSA-65, and first-install GitHub proxy settings once -> choose the CDN backend when applicable -> install or reuse Xray -> generate or reuse keys from the saved choices -> only Nginx-backed modes choose camouflage content and install/reuse Nginx -> configure and verify certificates -> generate and validate the configuration -> start services -> print share links.
 
 ### Installation Time Reference (1CPU/1GB)
 

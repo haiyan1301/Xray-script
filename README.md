@@ -14,7 +14,8 @@
   * CDN 独立模式 (VLESS-XHTTP-TLS，不包含 REALITY)
   * SNI (包含 Vision_REALITY、XHTTP_REALITY、XHTTP_TLS)
   * 多节点组合配置
-* 支持 VLESS enc（ML-KEM-768 后量子）可选启用
+* 支持 VLESS Encryption（VLESS enc，ML-KEM-768 后量子密钥封装）可选启用
+* REALITY 支持可选的 ML-DSA-65 后量子签名验证
 * CDN 与 SNI 是两个独立安装模式：CDN 只部署 XHTTP over TLS，并可选择 Nginx 或 Xray 直接 TLS 低资源后端；SNI 才启用 REALITY 与 SNI 分流
 * HY2 支持域名证书、短期 IP 证书和自定义证书，自定义证书会校验私钥及 SAN/CN
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
@@ -54,6 +55,15 @@
 * path 默认与自填:
   * 随机生成(格式: /8ugSUeNJ.9OEnTErb.dVZMUAFu)
   * 自定义输入(格式: /8ugSUeNJ, 加不加 `/` 都可以)
+
+## 最新功能与流程调整
+
+* Vision 安装会在下载和安装 Xray 前一次性收集路由/屏蔽选项、端口、UUID、目标、Short ID、VLESS Encryption、ML-DSA-65，以及首次安装时的 GitHub 加速选择；安装后阶段只消费已保存配置，不会再次读取输入。
+* 多节点模式已完整支持中英文菜单和提示。VLESS Encryption 在第一个适用的 VLESS 节点处询问一次，ML-DSA-65 在第一个 REALITY 节点处询问一次；纯 HY2 配置不会显示无关的 VLESS Encryption 选项。
+* VLESS Encryption 参数按实际入站生成。带 `fallbacks` 的公共 Vision 入站保持 `decryption: "none"`，分享链接不会错误携带 `encryption`；可用的 VLESS 入站仍会生成对应参数。
+* ML-DSA-65 选择会写入脚本配置。已存在的完整密钥对会直接复用，服务端 Seed 不输出到安装日志，客户端 Verify 会加入 REALITY 分享链接。
+* GitHub 加速选择会持久化供 Xray 下载阶段使用；独立执行安装命令且没有保存选择时，仍会提供交互式兜底询问。
+* CDN、SNI 与 XHTTP 模板使用当前 XHTTP 会话 ID 字段 `sessionIDPlacement`，保持三种模式的会话参数一致。
 
 ## 问题
 
@@ -175,7 +185,7 @@ CDN/SNI 的域名和证书可在「管理配置 -> CDN / SNI 站点管理」中�
 
 ### 安装时长参考
 
-安装流程：选择协议 -> 输入所需参数 -> CDN 选择 Nginx 或 Xray 直连后端 -> 安装或复用 Xray -> 仅 Nginx 后端选择伪装站点并安装/复用 Nginx -> 配置并验证证书 -> 生成并校验配置 -> 启动服务 -> 输出分享链接。
+安装流程：选择协议 -> 一次性输入路由/屏蔽、端口、UUID/Short ID、VLESS Encryption、ML-DSA-65 与首次安装 GitHub 加速等适用参数 -> CDN 选择 Nginx 或 Xray 直连后端 -> 安装或复用 Xray -> 按已保存选择生成或复用密钥 -> 仅 Nginx 后端选择伪装站点并安装/复用 Nginx -> 配置并验证证书 -> 生成并校验配置 -> 启动服务 -> 输出分享链接。
 
 **这是一台单核1G的服务器的平均安装时长，仅供参考：**
 
