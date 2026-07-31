@@ -1,0 +1,6 @@
+# Local test suites, fixtures, and validation scripts
+**/tests/
+**/fixtures/
+**/test-*.sh
+**/*_test.sh
+**/*.test.sh
