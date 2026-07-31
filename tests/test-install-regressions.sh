@@ -362,6 +362,41 @@ if ! open_xray_firewall_port 24443 udp 2>"${TEST_DIR}/firewall-inactive.log"; th
 fi
 grep -Fq 'The installed firewall manager is inactive' "${TEST_DIR}/firewall-inactive.log"
 
+readonly FIREWALLD_TRANSACTION_LOG="${TEST_DIR}/firewalld-transaction.log"
+readonly FIREWALLD_RELOAD_COUNT="${TEST_DIR}/firewalld-reload-count"
+: >"${FIREWALLD_TRANSACTION_LOG}"
+printf '%s\n' 0 >"${FIREWALLD_RELOAD_COUNT}"
+function firewall-cmd() {
+    printf '%s\n' "$*" >>"${FIREWALLD_TRANSACTION_LOG}"
+    case "$*" in
+    --state)
+        printf '%s\n' running
+        ;;
+    '--permanent --query-port=24443/udp')
+        return 1
+        ;;
+    '--permanent --add-port=24443/udp' | '--permanent --remove-port=24443/udp')
+        ;;
+    --reload)
+        local reload_count
+        reload_count="$(cat "${FIREWALLD_RELOAD_COUNT}")"
+        reload_count=$((reload_count + 1))
+        printf '%s\n' "${reload_count}" >"${FIREWALLD_RELOAD_COUNT}"
+        [[ "${reload_count}" -gt 1 ]]
+        ;;
+    *)
+        return 99
+        ;;
+    esac
+}
+if open_xray_firewall_port 24443 udp 2>"${TEST_DIR}/firewalld-transaction.log"; then
+    fail_test 'open_xray_firewall_port hid a firewalld reload failure'
+fi
+grep -Fxq -- '--permanent --remove-port=24443/udp' "${FIREWALLD_TRANSACTION_LOG}" ||
+    fail_test 'firewalld rule was not rolled back after reload failed'
+[[ "$(cat "${FIREWALLD_RELOAD_COUNT}")" -eq 2 ]] ||
+    fail_test 'firewalld was not reloaded after rolling back its new rule'
+
 readonly INSTALL_CURL_LOG="${TEST_DIR}/install-curl.log"
 readonly INSTALL_BASH_LOG="${TEST_DIR}/install-bash.log"
 : >"${INSTALL_CURL_LOG}"
@@ -429,6 +464,128 @@ EOF
     fail_test 'handler_install did not pass the expected arguments to the downloaded installer'
 fi
 grep -Fq -- '-s -- install -u xray --version v-test' "${INSTALL_BASH_LOG}"
+
+# Purge must preserve local state unless both the download and the upstream
+# uninstall command complete successfully.
+readonly PURGE_ORIGINAL="${TEST_DIR}/purge-original.json"
+jq '.xray.version = "v-test" | .xray.tag = "Vision"' config.json >"${PURGE_ORIGINAL}"
+function restore_purge_config() {
+    cp "${PURGE_ORIGINAL}" "${SCRIPT_CONFIG_PATH}"
+    SCRIPT_CONFIG="$(jq . "${PURGE_ORIGINAL}")"
+}
+function curl() { return 22; }
+restore_purge_config
+if handler_purge >"${TEST_DIR}/purge-download.stdout" 2>"${TEST_DIR}/purge-download.stderr"; then
+    fail_test 'handler_purge succeeded after its installer download failed'
+fi
+cmp -s "${PURGE_ORIGINAL}" "${SCRIPT_CONFIG_PATH}" ||
+    fail_test 'handler_purge cleared state after its installer download failed'
+function curl() { printf '%s\n' '#!/usr/bin/env bash' 'exit 23'; }
+restore_purge_config
+if handler_purge >"${TEST_DIR}/purge-run.stdout" 2>"${TEST_DIR}/purge-run.stderr"; then
+    fail_test 'handler_purge succeeded after the upstream uninstall failed'
+fi
+cmp -s "${PURGE_ORIGINAL}" "${SCRIPT_CONFIG_PATH}" ||
+    fail_test 'handler_purge cleared state after the upstream uninstall failed'
+function curl() { printf '%s\n' '#!/usr/bin/env bash' 'exit 0'; }
+restore_purge_config
+: >"${INSTALL_BASH_LOG}"
+if (
+    function write_config() { return 23; }
+    handler_purge
+) >"${TEST_DIR}/purge-stage.stdout" 2>"${TEST_DIR}/purge-stage.stderr"; then
+    fail_test 'handler_purge succeeded when its local state could not be prepared'
+fi
+if grep -Fq -- '-s -- remove --purge' "${INSTALL_BASH_LOG}"; then
+    fail_test 'handler_purge ran the upstream uninstall before preparing local state'
+fi
+cmp -s "${PURGE_ORIGINAL}" "${SCRIPT_CONFIG_PATH}" ||
+    fail_test 'handler_purge changed state after local preparation failed'
+function curl() { printf '%s\n' '#!/usr/bin/env bash' '[[ "$1" == remove && "$2" == --purge ]]'; }
+restore_purge_config
+handler_purge >"${TEST_DIR}/purge-success.stdout" 2>"${TEST_DIR}/purge-success.stderr"
+[[ "$(jq -r '.xray.version // empty' "${SCRIPT_CONFIG_PATH}")" == '' ]] ||
+    fail_test 'handler_purge did not clear state after a successful uninstall'
+
+# Rejecting an enable request before Xray is installed must not leave sensitive
+# backup copies alongside either configuration file.
+jq '.xray.version = "" | .xray.reverse = 0' config.json >"${SCRIPT_CONFIG_PATH}"
+jq . config/xray/Vision.json >"${XRAY_CONFIG_PATH}"
+SCRIPT_CONFIG="$(jq . "${SCRIPT_CONFIG_PATH}")"
+if handler_reverse_toggle >"${TEST_DIR}/reverse-not-installed.stdout" 2>"${TEST_DIR}/reverse-not-installed.stderr"; then
+    fail_test 'handler_reverse_toggle enabled reverse proxy without Xray'
+fi
+if compgen -G "${SCRIPT_CONFIG_PATH}.reverse-backup.*" >/dev/null ||
+    compgen -G "${XRAY_CONFIG_PATH}.reverse-backup.*" >/dev/null; then
+    fail_test 'handler_reverse_toggle left a backup after rejecting an enable request'
+fi
+
+# Reverse toggles regenerate the runtime configuration themselves. A failed
+# generation must restore both files instead of committing only the flag.
+readonly REVERSE_RUNTIME_ORIGINAL="${TEST_DIR}/reverse-runtime-original.json"
+jq '.xray.version = "v-test" | .xray.tag = "Vision" | .xray.reverse = 1' config.json >"${SCRIPT_CONFIG_PATH}"
+jq . config/xray/Vision.json >"${XRAY_CONFIG_PATH}"
+cp "${SCRIPT_CONFIG_PATH}" "${TEST_DIR}/reverse-script-original.json"
+cp "${XRAY_CONFIG_PATH}" "${REVERSE_RUNTIME_ORIGINAL}"
+SCRIPT_CONFIG="$(jq . "${SCRIPT_CONFIG_PATH}")"
+XRAY_CONFIG="$(jq . "${XRAY_CONFIG_PATH}")"
+REVERSE_CONFIG_CALLS=0
+function handler_xray_config() {
+    REVERSE_CONFIG_CALLS=$((REVERSE_CONFIG_CALLS + 1))
+    XRAY_CONFIG='{"partial":true}'
+    printf '%s\n' '{"partial":true}' >"${SCRIPT_CONFIG_PATH}"
+    printf '%s\n' '{"partial":true}' >"${XRAY_CONFIG_PATH}"
+    return 23
+}
+function cmd_exists() { return 0; }
+if handler_reverse_toggle >"${TEST_DIR}/reverse-failure.stdout" 2>"${TEST_DIR}/reverse-failure.stderr"; then
+    fail_test 'handler_reverse_toggle hid runtime regeneration failure'
+fi
+[[ "${REVERSE_CONFIG_CALLS}" -eq 1 ]] ||
+    fail_test 'handler_reverse_toggle did not regenerate the runtime config'
+cmp -s "${TEST_DIR}/reverse-script-original.json" "${SCRIPT_CONFIG_PATH}" ||
+    fail_test 'handler_reverse_toggle did not restore script state'
+cmp -s "${REVERSE_RUNTIME_ORIGINAL}" "${XRAY_CONFIG_PATH}" ||
+    fail_test 'handler_reverse_toggle did not restore runtime state'
+diff -u \
+    <(jq -S . "${REVERSE_RUNTIME_ORIGINAL}") \
+    <(jq -S . <<<"${XRAY_CONFIG}") ||
+    fail_test 'handler_reverse_toggle did not restore in-memory runtime state'
+
+# UUID readers must retry invalid input, and a failed reader subprocess must be
+# returned to the caller instead of being accepted as an empty value.
+(
+    readonly READ_ATTEMPT_FILE="${TEST_DIR}/uuid-read-attempted"
+    rm -f -- "${READ_ATTEMPT_FILE}"
+    function bash() {
+        if [[ "$1" == "${READ_PATH}" && "$2" == '--uuid' ]]; then
+            if [[ -f "${READ_ATTEMPT_FILE}" ]]; then
+                printf '%s\n' valid-uuid
+            else
+                : >"${READ_ATTEMPT_FILE}"
+                printf '%s\n' invalid-uuid
+            fi
+            return 0
+        fi
+        command bash "$@"
+    }
+    function exec_check() { [[ "$2" == 'valid-uuid' ]]; }
+    exec_read uuid
+    [[ "${CONFIG_DATA['uuid']}" == 'valid-uuid' ]]
+)
+if (
+    function bash() { return 23; }
+    exec_read uuid
+); then
+    fail_test 'exec_read hid a reader subprocess failure'
+fi
+
+# Restore test doubles used by the remainder of this regression suite.
+function handler_xray_config() {
+    XRAY_CONFIG_CALLS=$((XRAY_CONFIG_CALLS + 1))
+    return 0
+}
+function cmd_exists() { return 1; }
 
 # Certificate acquisition is a hard gate for both single and multi HY2
 # runtime config generation.

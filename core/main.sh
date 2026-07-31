@@ -965,8 +965,8 @@ function processes_reverse() {
     local choose=$(echo $?)
     case ${choose} in
     1 | 2)
-        exec_handler '--reverse'
-        exec_handler '--restart'
+        exec_handler '--reverse' || return 1
+        exec_handler '--restart' || return 1
         ;;
     3)
         exec_handler '--reverse-share'

@@ -93,7 +93,10 @@ function _os_ver() {
 function load_i18n() {
     local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
     if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
+        lang="${LANG:-}"
+        lang="${lang%%.*}"
+        lang="${lang%%_*}"
+        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
     fi
     # 如果语言为空或为 "null"，则默认使用中文
     if [[ -z "$lang" || "$lang" == "null" ]]; then

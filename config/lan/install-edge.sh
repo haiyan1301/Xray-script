@@ -35,6 +35,9 @@ rm -f "${TEST_CONFIG}"
 trap - EXIT
 
 if [[ -d "${INSTALL_DIR}" ]]; then
+    if systemctl is-active --quiet xray-lan.service; then
+        systemctl stop xray-lan.service
+    fi
     cp -a "${INSTALL_DIR}" "${INSTALL_DIR}.bak.$(date +%Y%m%d_%H%M%S)"
 fi
 install -d -m 700 "${INSTALL_DIR}" /usr/local/libexec

@@ -252,9 +252,15 @@
       "xray_missing": "安装器已结束，但系统中仍找不到 xray 命令"
     },
     "multi": {
+      "label": "多节点",
       "protocol_title": "选择多节点协议",
       "select_protocol": "请选择节点协议，节点序号:",
-      "unsupported": "该选项不可用于多节点模式，请选择列表中的 1-7。"
+      "unsupported": "该选项不可用于多节点模式，请选择列表中的 1-7。",
+      "node_count_prompt": "要创建多少个节点？[2]: ",
+      "node_count_invalid": "请输入 2 到 100 之间的整数。",
+      "port_conflict": "端口 {port} 为保留端口或已分配给其他节点，正在生成随机端口。",
+      "hy2_shared_cert": "多节点模式下的 HY2 节点共用一套 TLS 证书。",
+      "no_nodes": "多节点配置中没有节点。"
     },
     "cert_source": {
       "prompt_cdn": "CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
@@ -302,6 +308,7 @@
       "name_mismatch": "该名称不在证书的 SAN/CN 中，请重新输入",
       "source_invalid": "请选择 1、2 或 3",
       "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试",
+      "detected_ip": "检测到的公网 IP：",
       "email_invalid": "保存的 ACME 账户邮箱无效，请输入合法邮箱后重试",
       "firewall_open": "正在开放防火墙端口",
       "firewall_ok": "防火墙端口已开放",
@@ -322,6 +329,7 @@
     },
     "mldsa": {
       "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)",
+      "generating": "正在生成 ML-DSA-65 后量子密钥对...",
       "generate_fail": "无法生成完整的 ML-DSA-65 密钥对，原配置未被修改",
       "generated": "ML-DSA-65 密钥对已生成"
     },

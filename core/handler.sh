@@ -492,7 +492,7 @@ function exec_read() {
     # 循环直到输入有效 (flag 为 false)
     while ${flag}; do
         # 调用 read.sh 脚本获取用户输入
-        result="$(bash "${READ_PATH}" "--${opt}")"
+        result="$(bash "${READ_PATH}" "--${opt}")" || return 1
         # 根据配置项名称进行特定验证
         case "${opt}" in
         version)
@@ -525,11 +525,11 @@ function exec_read() {
             exec_check '--reverse-target' "${result}" || continue
             ;;
         reverse-uuid)
-            exec_check '--uuid' "${result}"
+            exec_check '--uuid' "${result}" || continue
             ;;
         uuid | fallback)
             # 验证 UUID (fallback 也使用 uuid 验证)
-            exec_check '--uuid' "${result}"
+            exec_check '--uuid' "${result}" || continue
             ;;
         seed | password | hy2-auth)
             # 验证密码、种子或 HY2 auth
@@ -620,22 +620,23 @@ function map_protocol_choice_to_tag() {
 
 function print_multi_protocol_menu() {
     echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.protocol_title") ------------------" >&2
-    echo -e "${GREEN}1.${NC} Vision (${GREEN}$(echo "$I18N_DATA" | jq -r '.menu.status.default')${NC})" >&2
-    echo -e "${GREEN}2.${NC} XHTTP" >&2
-    echo -e "${GREEN}3.${NC} Trojan" >&2
-    echo -e "${GREEN}4.${NC} Fallback" >&2
-    echo -e "${GREEN}5.${NC} Hysteria2" >&2
-    echo -e "${GREEN}6.${NC} Shadowsocks 2022" >&2
-    echo -e "${GREEN}7.${NC} mKCP" >&2
+    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option1') (${GREEN}$(echo "$I18N_DATA" | jq -r '.menu.status.default')${NC})" >&2
+    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option2')" >&2
+    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option3')" >&2
+    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option4')" >&2
+    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option5')" >&2
+    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option6')" >&2
+    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option7')" >&2
     echo -e "----------------------------------------------------------" >&2
 }
 
 function read_multi_protocol_tag() {
     local node_index="$1"
     local choose config_tag
+    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     while true; do
-        echo -e "${GREEN}[Multi]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.select_protocol") ${node_index}" >&2
+        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.select_protocol") ${node_index}" >&2
         print_multi_protocol_menu
         printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC} $(echo "$I18N_DATA" | jq -r ".menu.choose"): " >&2
         read -r choose
@@ -653,7 +654,7 @@ function read_multi_protocol_tag() {
             return 0
         fi
 
-        echo -e "${YELLOW}[Multi]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.unsupported")" >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.unsupported")" >&2
     done
 }
 
@@ -673,6 +674,7 @@ function generate_unique_multi_port() {
     shift 2
     local used_ports=("$@")
     local port="${requested}"
+    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     if [[ -z "${port}" ]]; then
         if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
@@ -683,7 +685,7 @@ function generate_unique_multi_port() {
     fi
 
     while [[ "${port}" == '32768' ]] || port_in_list "${port}" "${used_ports[@]}"; do
-        echo -e "${YELLOW}[Multi]${NC} Port ${port} is reserved or already used, generating a random port." >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_conflict" | sed "s/{port}/${port}/g")" >&2
         port="$(exec_generate '--port')"
     done
 
@@ -831,7 +833,7 @@ function read_hy2_certificate_config() {
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_fetch_fail")" >&2
             return 1
         fi
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} IP: ${server_ip}" >&2
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.detected_ip") ${server_ip}" >&2
         CONFIG_DATA['hy2_cert_domain']="${server_ip}"
         exec_read 'email'
         CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
@@ -997,7 +999,10 @@ function handler_read_multi_xray_config() {
     local node_count
     local has_hy2='n'
     local vless_enc_prompted='n'
+    local mldsa65_prompted='n'
     local multi_vless_enc_enable=''
+    local multi_mldsa65_enable=''
+    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     reset_config_data
     CONFIG_DATA['tag']='multi'
@@ -1014,11 +1019,14 @@ function handler_read_multi_xray_config() {
     local multi_block_ad="${CONFIG_DATA['block-ad']:-N}"
 
     while true; do
-        echo -e "${GREEN}[Multi]${NC} How many nodes do you want to create? [2]: " >&2
-        read -r node_count
+        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.node_count_prompt")" >&2
+        read -r node_count || return 1
         node_count="${node_count:-2}"
-        [[ "${node_count}" =~ ^[0-9]+$ && "${node_count}" -ge 2 && "${node_count}" -le 100 ]] && break
-        echo -e "${YELLOW}[Multi]${NC} Please enter an integer from 2 to 100." >&2
+        if [[ "${node_count}" =~ ^[0-9]{1,3}$ ]]; then
+            node_count="$((10#${node_count}))"
+            [[ "${node_count}" -ge 2 && "${node_count}" -le 100 ]] && break
+        fi
+        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.node_count_invalid")" >&2
     done
 
     local i
@@ -1041,9 +1049,14 @@ function handler_read_multi_xray_config() {
             # VLESS enc is a shared setting for VLESS nodes. Ask while an
             # applicable node is being configured so a trailing HY2 node does
             # not appear to own this option.
-            run_vlessenc_choice
+            run_vlessenc_choice || return 1
             multi_vless_enc_enable="${CONFIG_DATA['vless_enc_enable']:-n}"
             vless_enc_prompted='y'
+        fi
+        if [[ "${mldsa65_prompted}" == 'n' ]] && protocol_uses_reality "${config_tag}"; then
+            run_mldsa65_choice || return 1
+            multi_mldsa65_enable="${CONFIG_DATA['mldsa65_enable']:-n}"
+            mldsa65_prompted='y'
         fi
 
         local node
@@ -1052,7 +1065,7 @@ function handler_read_multi_xray_config() {
     done
 
     if [[ "${has_hy2}" == 'y' ]]; then
-        echo -e "${YELLOW}[Multi]${NC} HY2 nodes share one TLS certificate in multi-node mode." >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.hy2_shared_cert")" >&2
         read_hy2_certificate_config || return 1
     fi
 
@@ -1070,6 +1083,7 @@ function handler_read_multi_xray_config() {
     CONFIG_DATA['block-ad']="${multi_block_ad}"
     CONFIG_DATA['nodes_json']="${nodes}"
     CONFIG_DATA['vless_enc_enable']="${multi_vless_enc_enable}"
+    CONFIG_DATA['mldsa65_enable']="${multi_mldsa65_enable}"
     CONFIG_DATA['hy2_cert_source']="${multi_hy2_cert_source}"
     CONFIG_DATA['hy2_cert_domain']="${multi_hy2_cert_domain}"
     CONFIG_DATA['hy2_cert_email']="${multi_hy2_cert_email}"
@@ -1310,6 +1324,9 @@ function handler_script_config() {
         if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
         fi
+        if [[ -n "${CONFIG_DATA['mldsa65_enable']:-}" ]]; then
+            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mldsa65Enable "${CONFIG_DATA['mldsa65_enable']}" '.xray.mldsa65Enable = $mldsa65Enable')"
+        fi
         if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
@@ -1461,6 +1478,9 @@ function handler_script_config() {
     if [[ -n "${CONFIG_DATA['vless_enc_enable']:-}" ]]; then
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg vlessEncEnable "${CONFIG_DATA['vless_enc_enable']}" '.xray.vlessEncEnable = $vlessEncEnable')"
     fi
+    if [[ -n "${CONFIG_DATA['mldsa65_enable']:-}" ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mldsa65Enable "${CONFIG_DATA['mldsa65_enable']}" '.xray.mldsa65Enable = $mldsa65Enable')"
+    fi
     # 若启用了 VLESS enc，写入 decryption/encryption 到脚本配置
     if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
@@ -1515,14 +1535,22 @@ function handler_x25519_config() {
 # =============================================================================
 function handler_mldsa65_config() {
     local enable="${1:-n}"
+    local existing_seed="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')"
+    local existing_verify="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
+
     if [[ "${enable,,}" != "y" ]]; then
         # 禁用 ML-DSA-65，清除已有密钥
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.mldsa65Seed = "" | .xray.mldsa65Verify = ""')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.mldsa65Enable = "n" | .xray.mldsa65Seed = "" | .xray.mldsa65Verify = ""')"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+        return 0
+    fi
+    if [[ -n "${existing_seed}" && -n "${existing_verify}" ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.mldsa65Enable = "y"')"
         write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
         return 0
     fi
     # 打印绿色的配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} ML-DSA-65 post-quantum key generation" >&2
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generating")" >&2
     # 生成 ML-DSA-65 密钥对
     local MLDSA65
     if ! MLDSA65="$(exec_generate '--mldsa65')"; then
@@ -1538,12 +1566,41 @@ function handler_mldsa65_config() {
     fi
 
     # 更新脚本配置中的 ML-DSA-65 密钥
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg seed "${MLDSA65_SEED}" '.xray.mldsa65Seed = $seed')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg verify "${MLDSA65_VERIFY}" '.xray.mldsa65Verify = $verify')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+        --arg seed "${MLDSA65_SEED}" \
+        --arg verify "${MLDSA65_VERIFY}" '
+        .xray.mldsa65Enable = "y" |
+        .xray.mldsa65Seed = $seed |
+        .xray.mldsa65Verify = $verify
+    ')"
     # 将更新后的脚本配置写入文件
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
     # Seed 是服务端私密材料，不打印到终端。
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generated")" >&2
+}
+
+function configured_mldsa65_enable() {
+    local configured="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Enable // ""')"
+    local existing_seed="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')"
+    local existing_verify="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
+
+    case "${configured,,}" in
+    y | n)
+        echo "${configured,,}"
+        ;;
+    *)
+        if [[ -n "${existing_seed}" && -n "${existing_verify}" ]]; then
+            echo 'y'
+        else
+            echo 'n'
+        fi
+        ;;
+    esac
+}
+
+function handler_reality_key_config() {
+    handler_x25519_config || return 1
+    handler_mldsa65_config "$(configured_mldsa65_enable)" || return 1
 }
 
 # =============================================================================
@@ -1564,6 +1621,8 @@ function open_xray_firewall_port() {
     local firewall_ok=0
     local ufw_available=0
     local firewalld_available=0
+    local firewalld_rule_preexisting=0
+    local firewalld_query_status=0
     local ufw_status=''
     local firewalld_status=''
 
@@ -1582,9 +1641,20 @@ function open_xray_firewall_port() {
     if [[ "${ufw_available}" -eq 1 ]] && grep -Eiq '^Status:[[:space:]]+active([[:space:]]|$)' <<<"${ufw_status}"; then
         ufw allow "${port}"/"${protocol}" >/dev/null 2>&1 && firewall_ok=1
     elif [[ "${firewalld_available}" -eq 1 && "${firewalld_status,,}" == 'running' ]]; then
-        if firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
-            firewall-cmd --reload >/dev/null 2>&1; then
-            firewall_ok=1
+        firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1
+        firewalld_query_status=$?
+        case "${firewalld_query_status}" in
+        0) firewalld_rule_preexisting=1 ;;
+        1) firewalld_rule_preexisting=0 ;;
+        *) return 1 ;;
+        esac
+        if firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1; then
+            if firewall-cmd --reload >/dev/null 2>&1; then
+                firewall_ok=1
+            elif [[ "${firewalld_rule_preexisting}" -eq 0 ]]; then
+                firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 || true
+                firewall-cmd --reload >/dev/null 2>&1 || true
+            fi
         fi
     elif [[ "${ufw_available}" -eq 1 || "${firewalld_available}" -eq 1 ]]; then
         echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_inactive")" >&2
@@ -1686,23 +1756,30 @@ function handler_multi_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -c '.rules // []')"
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp // 0')"
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
 
     if [[ "${node_count}" -eq 0 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Multi-node config has no nodes." >&2
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.no_nodes")" >&2
         return 1
     fi
 
     if [[ "${skip_vlessenc}" != "1" ]]; then
         if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
-            run_vlessenc_prompt 1
-            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
-            else
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
-                VLESS_ENC_DECRYPTION=""
+            if [[ -z "${VLESS_ENC_DECRYPTION}" || -z "${VLESS_ENC_ENCRYPTION}" ]]; then
+                run_vlessenc_prompt 1
+                if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
+                    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+                        --arg dec "${CONFIG_DATA['vless_enc_decryption']}" \
+                        --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '
+                        .xray.vlessEncDecryption = $dec |
+                        .xray.vlessEncEncryption = $enc
+                    ')"
+                    VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+                else
+                    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+                    VLESS_ENC_DECRYPTION=""
+                fi
             fi
         elif [[ "${VLESS_ENC_ENABLE}" == "n" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
@@ -1740,7 +1817,14 @@ function handler_multi_xray_config() {
 
         if [[ -n "${VLESS_ENC_DECRYPTION}" ]]; then
             node_inbounds="$(echo "${node_inbounds}" | jq --arg dec "${VLESS_ENC_DECRYPTION}" '
-                map(if .protocol? == "vless" and (.settings.decryption? != null) then .settings.decryption = $dec else . end)
+                map(
+                    if .protocol? == "vless" and
+                        (.settings.decryption? != null) and
+                        ((.settings | has("fallbacks")) | not)
+                    then .settings.decryption = $dec
+                    else .
+                    end
+                )
             ')"
         fi
 
@@ -1924,11 +2008,11 @@ function handler_multi_xray_config() {
     sleep 2
     handler_multi_firewall_ports || return 1
 
+    handler_lan_open_firewall || return 1
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
         open_xray_firewall_port "${reverse_port}" tcp || return 1
     fi
-    handler_lan_open_firewall
 }
 
 function handler_xray_config() {
@@ -1957,6 +2041,7 @@ function handler_xray_config() {
     local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
+    local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
     local CDN_BACKEND="$(get_cdn_backend)"
     if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
@@ -1973,14 +2058,20 @@ function handler_xray_config() {
     fi
     if protocol_uses_vless_enc "${CONFIG_TAG}" && [[ "${skip_vlessenc}" != "1" ]]; then
         if [[ "${VLESS_ENC_ENABLE}" == "y" ]]; then
-            run_vlessenc_prompt 1
-            if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-                VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
-            else
-                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
-                VLESS_ENC_DECRYPTION=""
+            if [[ -z "${VLESS_ENC_DECRYPTION}" || -z "${VLESS_ENC_ENCRYPTION}" ]]; then
+                run_vlessenc_prompt 1
+                if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" && -n "${CONFIG_DATA['vless_enc_encryption']:-}" ]]; then
+                    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+                        --arg dec "${CONFIG_DATA['vless_enc_decryption']}" \
+                        --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '
+                        .xray.vlessEncDecryption = $dec |
+                        .xray.vlessEncEncryption = $enc
+                    ')"
+                    VLESS_ENC_DECRYPTION="${CONFIG_DATA['vless_enc_decryption']}"
+                else
+                    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
+                    VLESS_ENC_DECRYPTION=""
+                fi
             fi
         elif [[ "${VLESS_ENC_ENABLE}" == "n" ]]; then
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.vlessEncDecryption = "" | .xray.vlessEncEncryption = ""')"
@@ -2031,7 +2122,10 @@ function handler_xray_config() {
     if [[ -n "${VLESS_ENC_DECRYPTION}" ]]; then
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg dec "${VLESS_ENC_DECRYPTION}" '
             .inbounds |= map(
-                if .protocol? == "vless" and (.settings.decryption? != null) then .settings.decryption = $dec
+                if .protocol? == "vless" and
+                    (.settings.decryption? != null) and
+                    ((.settings | has("fallbacks")) | not)
+                then .settings.decryption = $dec
                 else . end
             )
         ')"
@@ -2195,12 +2289,13 @@ function handler_xray_config() {
         ;;
     esac
 
-    # 反向代理防火墙端口
+    handler_lan_open_firewall || return 1
+
+    # 反向代理端口放在最后处理，确保其成功后没有其他可失败的防火墙步骤。
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
         open_xray_firewall_port "${reverse_port}" tcp || return 1
     fi
-    handler_lan_open_firewall
 }
 
 # =============================================================================
@@ -2211,14 +2306,34 @@ function handler_xray_config() {
 # 返回值: 无 (直接修改 CONFIG_DATA 全局关联数组)
 # =============================================================================
 function run_vlessenc_choice() {
+    local eof_default="${1:-}"
     local vless_enc_reply
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
-    read -r vless_enc_reply
+    if ! read -r vless_enc_reply && [[ -z "${vless_enc_reply}" ]]; then
+        [[ -n "${eof_default}" ]] || return 1
+        vless_enc_reply="${eof_default}"
+    fi
     vless_enc_reply="${vless_enc_reply:-n}"
     if [[ "${vless_enc_reply,,}" == "y" ]]; then
         CONFIG_DATA['vless_enc_enable']="y"
     else
         CONFIG_DATA['vless_enc_enable']="n"
+    fi
+}
+
+function run_mldsa65_choice() {
+    local eof_default="${1:-}"
+    local mldsa65_reply
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
+    if ! read -r mldsa65_reply && [[ -z "${mldsa65_reply}" ]]; then
+        [[ -n "${eof_default}" ]] || return 1
+        mldsa65_reply="${eof_default}"
+    fi
+    mldsa65_reply="${mldsa65_reply:-n}"
+    if [[ "${mldsa65_reply,,}" == 'y' ]]; then
+        CONFIG_DATA['mldsa65_enable']='y'
+    else
+        CONFIG_DATA['mldsa65_enable']='n'
     fi
 }
 
@@ -2258,7 +2373,7 @@ function run_vlessenc_prompt() {
 #           1. 验证配置标签的有效性。
 #           2. 根据脚本配置决定是否需要读取规则相关输入。
 #           3. 根据配置标签读取对应的各项配置参数。
-#           4. 若为 VLESS 类配置（非 Trojan），询问是否启用 VLESS enc。
+#           4. 在同一输入阶段收集 VLESS enc 与 ML-DSA-65 启用选项。
 # 参数:
 #   $1: CONFIG_TAG - 配置标签 (例如 Vision, XHTTP, SNI 等)
 # 返回值: 无 (直接修改 CONFIG_DATA 全局关联数组)
@@ -2319,7 +2434,10 @@ function handler_read_xray_config() {
         ;;
     esac
     if protocol_uses_vless_enc "${CONFIG_TAG}"; then
-        run_vlessenc_choice
+        run_vlessenc_choice || return 1
+    fi
+    if protocol_uses_reality "${CONFIG_TAG}"; then
+        run_mldsa65_choice || return 1
     fi
     # Web 模式的证书在创建各自站点时处理，避免 CDN 和 SNI 共用一组提示与路径。
     case "${CONFIG_TAG,,}" in
@@ -3550,12 +3668,39 @@ function handler_install() {
 # 返回值: 无 (通过调用外部脚本执行卸载)
 # =============================================================================
 function handler_purge() {
-    # 调用 Xray-install 脚本进行卸载 (带 --purge 参数)
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
-    # 重置 xray 字段
-    SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')
-    # 将重置后的脚本配置写入文件
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    local install_script_url='https://github.com/XTLS/Xray-install/raw/main/install-release.sh'
+    local script_content=''
+    local updated_config=''
+    local staged_config=''
+
+    if ! script_content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${install_script_url}")"; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Failed to download the Xray uninstall script." >&2
+        return 1
+    fi
+    if [[ -z "${script_content}" ]] || ! bash -n <<<"${script_content}"; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Refusing to run an invalid Xray uninstall script." >&2
+        return 1
+    fi
+
+    updated_config="$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')" || return 1
+    staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.purge.XXXXXX")" || return 1
+    if ! write_config "${updated_config}" "${staged_config}"; then
+        rm -f -- "${staged_config}"
+        return 1
+    fi
+
+    if ! bash -s -- remove --purge <<<"${script_content}"; then
+        rm -f -- "${staged_config}"
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Xray uninstall failed; local state was preserved." >&2
+        return 1
+    fi
+
+    if ! mv -fT -- "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Xray was removed, but the prepared local state could not be committed. Recovery file: ${staged_config}" >&2
+        return 1
+    fi
+    sync
+    SCRIPT_CONFIG="${updated_config}"
 }
 
 # =============================================================================
@@ -5327,39 +5472,101 @@ function handler_reverse_config() {
 # 返回值: 无
 # =============================================================================
 function handler_reverse_toggle() {
-    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
-    if [[ "${reverse_status}" -eq 1 ]]; then
-        # 禁用反向代理
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.reverse = 0')"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.disabled")" >&2
-    else
-        # 启用反向代理，首先检查 Xray 是否安装
-        local xray_ver=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')
+    local original_script_config="${SCRIPT_CONFIG}"
+    local original_xray_config="${XRAY_CONFIG:-}"
+    local script_config_backup=''
+    local xray_config_backup=''
+    local had_xray_config=0
+    local reverse_status=''
+    local reverse_port=''
+    local reverse_target=''
+    local reverse_uuid=''
+    local xray_ver=''
+
+    reverse_status="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')" || return 1
+    if [[ "${reverse_status}" -ne 1 ]]; then
+        xray_ver="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')" || return 1
         if [[ -z "${xray_ver}" ]]; then
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.not_installed")" >&2
             return 1
         fi
 
-        # 读取用户输入
-        exec_read 'reverse-port'
-        exec_read 'reverse-target'
-        exec_read 'reverse-uuid'
+        exec_read 'reverse-port' || return 1
+        exec_read 'reverse-target' || return 1
+        exec_read 'reverse-uuid' || return 1
 
-        local reverse_port="${CONFIG_DATA['reverse-port']:-8443}"
-        local reverse_target="${CONFIG_DATA['reverse-target']}"
-        local reverse_uuid="${CONFIG_DATA['reverse-uuid']}"
-        reverse_uuid="$(exec_generate '--uuid' "${reverse_uuid}")"
+        reverse_port="${CONFIG_DATA['reverse-port']:-8443}"
+        reverse_target="${CONFIG_DATA['reverse-target']}"
+        reverse_uuid="${CONFIG_DATA['reverse-uuid']}"
+        reverse_uuid="$(exec_generate '--uuid' "${reverse_uuid}")" || return 1
+        [[ -n "${reverse_uuid}" ]] || return 1
+    fi
 
+    script_config_backup="$(mktemp "${SCRIPT_CONFIG_PATH}.reverse-backup.XXXXXX")" || return 1
+    if ! cp -p -- "${SCRIPT_CONFIG_PATH}" "${script_config_backup}"; then
+        rm -f -- "${script_config_backup}"
+        return 1
+    fi
+    if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
+        xray_config_backup="$(mktemp "${XRAY_CONFIG_PATH}.reverse-backup.XXXXXX")" || {
+            rm -f -- "${script_config_backup}"
+            return 1
+        }
+        if ! cp -p -- "${XRAY_CONFIG_PATH}" "${xray_config_backup}"; then
+            rm -f -- "${script_config_backup}" "${xray_config_backup}"
+            return 1
+        fi
+        had_xray_config=1
+    fi
+
+    function rollback_reverse_toggle() {
+        local rollback_status=0
+
+        if ! mv -f -- "${script_config_backup}" "${SCRIPT_CONFIG_PATH}"; then
+            rollback_status=1
+        else
+            script_config_backup=''
+        fi
+        if [[ "${had_xray_config}" -eq 1 ]]; then
+            if ! mv -f -- "${xray_config_backup}" "${XRAY_CONFIG_PATH}"; then
+                rollback_status=1
+            else
+                xray_config_backup=''
+            fi
+        else
+            rm -f -- "${XRAY_CONFIG_PATH}" || rollback_status=1
+        fi
+        SCRIPT_CONFIG="${original_script_config}"
+        XRAY_CONFIG="${original_xray_config}"
+        return "${rollback_status}"
+    }
+
+    if [[ "${reverse_status}" -eq 1 ]]; then
+        # 禁用反向代理
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.reverse = 0')"
+        handler_xray_config 1 || {
+            rollback_reverse_toggle ||
+                echo 'Reverse proxy rollback failed.' >&2
+            rm -f -- "${script_config_backup}" "${xray_config_backup}"
+            return 1
+        }
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.disabled")" >&2
+    else
         # 写入脚本配置
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson val 1 '.xray.reverse = $val')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${reverse_port}" '.xray.reversePort = $port')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg target "${reverse_target}" '.xray.reverseTarget = $target')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${reverse_uuid}" '.xray.reverseUuid = $uuid')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mode "forward" '.xray.reverseMode = $mode')"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        handler_xray_config 1 || {
+            rollback_reverse_toggle ||
+                echo 'Reverse proxy rollback failed.' >&2
+            rm -f -- "${script_config_backup}" "${xray_config_backup}"
+            return 1
+        }
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.enabled")" >&2
     fi
+    rm -f -- "${script_config_backup}" "${xray_config_backup}"
 }
 
 # =============================================================================
@@ -5542,6 +5749,15 @@ function handler_reverse_share() {
 # =============================================================================
 function handler_quick_install() {
     local quick_install_type="${1:-Vision}" # 获取快速安装类型参数，默认为 Vision
+    # Legacy quick installs still collect both post-quantum choices together,
+    # before any package installation output begins.
+    if protocol_uses_vless_enc "${quick_install_type}"; then
+        # Preserve the legacy non-interactive quick-install default on EOF.
+        run_vlessenc_choice 'y' || return 1
+    fi
+    if protocol_uses_reality "${quick_install_type}"; then
+        run_mldsa65_choice 'n' || return 1
+    fi
     # 配置脚本 (设置各种参数)
     handler_script_config "${quick_install_type}" || return 1
     # 安装 Xray (使用 release 版本)
@@ -5551,24 +5767,8 @@ function handler_quick_install() {
     if protocol_uses_hy2_certificate "${quick_install_type}"; then
         handler_hy2_cert || return 1
     fi
-    # 仅 VLESS 类模板询问是否启用 VLESS enc
-    if protocol_uses_vless_enc "${quick_install_type}"; then
-        run_vlessenc_prompt 1
-        # 若用户选择了 VLESS enc，将结果写回脚本配置
-        if [[ -n "${CONFIG_DATA['vless_enc_decryption']:-}" ]]; then
-            SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg dec "${CONFIG_DATA['vless_enc_decryption']}" '.xray.vlessEncDecryption = $dec')"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg enc "${CONFIG_DATA['vless_enc_encryption']}" '.xray.vlessEncEncryption = $enc')"
-            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-        fi
-    fi
     if protocol_uses_reality "${quick_install_type}"; then
-        handler_x25519_config || return 1
-        local mldsa65_reply
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
-        read -r mldsa65_reply
-        mldsa65_reply="${mldsa65_reply:-n}"
-        handler_mldsa65_config "${mldsa65_reply}" || return 1
+        handler_reality_key_config || return 1
     fi
     # 配置 Xray (生成并写入 config.json)
     if protocol_uses_vless_enc "${quick_install_type}"; then
@@ -5645,12 +5845,7 @@ function main() {
                 handler_hy2_cert || return 1
             fi
             if [[ "${has_reality}" == 'true' ]]; then
-                handler_x25519_config || return 1
-                local mldsa65_reply
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
-                read -r mldsa65_reply
-                mldsa65_reply="${mldsa65_reply:-n}"
-                handler_mldsa65_config "${mldsa65_reply}" || return 1
+                handler_reality_key_config || return 1
             fi
 
             if [[ "${has_vless}" == 'true' ]]; then
@@ -5663,12 +5858,7 @@ function main() {
             handler_xray_config 1 || return 1
         else
             if protocol_uses_reality "${current_tag}"; then
-                handler_x25519_config || return 1
-                local mldsa65_reply
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
-                read -r mldsa65_reply
-                mldsa65_reply="${mldsa65_reply:-n}"
-                handler_mldsa65_config "${mldsa65_reply}" || return 1
+                handler_reality_key_config || return 1
             fi
 
             if protocol_uses_vless_enc "${current_tag}"; then

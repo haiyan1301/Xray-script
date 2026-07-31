@@ -4,6 +4,7 @@ set -euo pipefail
 readonly CONFIG_DIR="${XRAY_LAN_DIR:-/usr/local/etc/xray-lan}"
 readonly META_FILE="${CONFIG_DIR}/site.json"
 readonly STATE_FILE="/run/xray-lan-network.state"
+readonly ROUTE_STATE_FILE="${XRAY_LAN_ROUTE_STATE_FILE:-/run/xray-lan-routes.state}"
 
 [[ -r "${META_FILE}" ]] || { echo "Missing ${META_FILE}" >&2; exit 1; }
 
@@ -46,11 +47,34 @@ function remove_forward_rules() {
     done
 }
 
-function start_network() {
+function start_network() (
+    local route_state_temp=''
+    route_state_temp="$(mktemp "${ROUTE_STATE_FILE}.tmp.XXXXXX")" || return 1
+    trap '[[ -z "${route_state_temp}" ]] || rm -f -- "${route_state_temp}"' EXIT
+
     wait_for_tun
     ip link set dev "${TUN_NAME}" up
 
     local cidr existing
+    local old_routes=()
+    local route_is_current=0
+    if [[ -r "${ROUTE_STATE_FILE}" ]]; then
+        mapfile -t old_routes <"${ROUTE_STATE_FILE}"
+    fi
+    for cidr in "${old_routes[@]}"; do
+        [[ -n "${cidr}" ]] || continue
+        route_is_current=0
+        local current_cidr
+        for current_cidr in "${REMOTE_CIDRS[@]}"; do
+            if [[ "${cidr}" == "${current_cidr}" ]]; then
+                route_is_current=1
+                break
+            fi
+        done
+        if [[ "${route_is_current}" -eq 0 ]]; then
+            ip -4 route del "${cidr}" dev "${TUN_NAME}" 2>/dev/null || true
+        fi
+    done
     for cidr in "${REMOTE_CIDRS[@]}"; do
         existing="$(ip -4 route show exact "${cidr}" 2>/dev/null || true)"
         if [[ -n "${existing}" && "${existing}" != *" dev ${TUN_NAME}"* ]]; then
@@ -58,7 +82,10 @@ function start_network() {
             return 1
         fi
         ip -4 route replace "${cidr}" dev "${TUN_NAME}" metric 5
+        printf '%s\n' "${cidr}" >>"${route_state_temp}"
     done
+    mv -fT -- "${route_state_temp}" "${ROUTE_STATE_FILE}"
+    route_state_temp=''
 
     if [[ "${MODE}" == "gateway" ]]; then
         if [[ ! -f "${STATE_FILE}" ]]; then
@@ -71,14 +98,20 @@ function start_network() {
         sysctl -q -w net.ipv4.conf.all.rp_filter=0
         add_forward_rules
     fi
-}
+)
 
 function stop_network() {
     local cidr
     remove_forward_rules
-    for cidr in "${REMOTE_CIDRS[@]}"; do
+    local routes_to_remove=("${REMOTE_CIDRS[@]}")
+    if [[ -r "${ROUTE_STATE_FILE}" ]]; then
+        mapfile -t routes_to_remove <"${ROUTE_STATE_FILE}"
+    fi
+    for cidr in "${routes_to_remove[@]}"; do
+        [[ -n "${cidr}" ]] || continue
         ip -4 route del "${cidr}" dev "${TUN_NAME}" 2>/dev/null || true
     done
+    rm -f -- "${ROUTE_STATE_FILE}"
 
     if [[ -f "${STATE_FILE}" ]]; then
         # shellcheck disable=SC1090

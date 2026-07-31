@@ -101,7 +101,10 @@ function load_i18n() {
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
+        lang="${LANG:-}"
+        lang="${lang%%.*}"
+        lang="${lang%%_*}"
+        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
     fi
 
     # 如果语言为空或为 "null"，则默认使用中文
@@ -546,6 +549,36 @@ function gen_cflags() {
 # 参数: 无
 # 返回值: 无 (执行下载和安装过程)
 # =============================================================================
+function install_nginx_file_atomically() {
+    local source_file="$1"
+    local target_file="$2"
+    local mode="$3"
+    local staged_file=''
+
+    staged_file="$(mktemp "${target_file}.new.XXXXXX")" || return 1
+    if ! install -m "${mode}" "${source_file}" "${staged_file}" ||
+        ! mv -fT -- "${staged_file}" "${target_file}"; then
+        rm -f -- "${staged_file}"
+        return 1
+    fi
+}
+
+function install_nginx_binary_atomically() {
+    install_nginx_file_atomically "$1" "$2" 755
+}
+
+function install_nginx_modules_atomically() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local module=''
+
+    [[ -d "${source_dir}" ]] || return 0
+    while IFS= read -r -d '' module; do
+        install_nginx_file_atomically \
+            "${module}" "${target_dir}/$(basename -- "${module}")" 755 || return 1
+    done < <(find "${source_dir}" -maxdepth 1 -type f -name '*.so' -print0)
+}
+
 function prebuilt_install() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading')"
     # 获取当前仓库的 GitHub Releases，并按当前 CPU 架构选择最新的可用产物。
@@ -609,10 +642,13 @@ function prebuilt_install() {
     # 安装二进制文件到标准路径
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
     mkdir -p "${NGINX_PATH}/sbin" "${NGINX_PATH}/modules" "${NGINX_PATH}/conf" "${NGINX_PATH}/logs" "${NGINX_PATH}/html"
-    cp "${release_dir}/sbin/nginx" "${NGINX_PATH}/sbin/nginx"
-    chmod +x "${NGINX_PATH}/sbin/nginx"
-    # 复制动态模块（如果存在）
-    find "${release_dir}/modules" -maxdepth 1 -name '*.so' -exec cp {} "${NGINX_PATH}/modules/" \; 2>/dev/null || true
+    install_nginx_binary_atomically \
+        "${release_dir}/sbin/nginx" "${NGINX_PATH}/sbin/nginx" ||
+        print_error "Failed to install the prebuilt Nginx binary"
+    # 原子替换动态模块，避免破坏仍由旧 worker 映射的 inode。
+    install_nginx_modules_atomically \
+        "${release_dir}/modules" "${NGINX_PATH}/modules" ||
+        print_error "Failed to install the prebuilt Nginx modules"
     # 如果是全新安装且 conf 目录为空，拷贝默认配置
     if [[ ! -f "${NGINX_PATH}/conf/nginx.conf" ]]; then
         # 从 release 中复制日志目录内容或创建默认配置
@@ -645,6 +681,13 @@ CONFEOF
     chown -R nginx:nginx "${NGINX_LOG_PATH}"
     ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.install_ok')"
+}
+
+function reload_nginx_after_binary_update() {
+    nginx -t || return 1
+    if systemctl is-active --quiet nginx; then
+        systemctl restart nginx
+    fi
 }
 
 # =============================================================================
@@ -836,8 +879,10 @@ function source_update() {
         # 备份旧的动态模块
         backup_files "${NGINX_PATH}/modules"
         # 复制新编译的 nginx 二进制文件和动态模块
-        cp objs/nginx "${NGINX_PATH}/sbin/"
-        find objs -maxdepth 1 -name '*.so' -exec cp {} "${NGINX_PATH}/modules/" \; 2>/dev/null || true
+        install_nginx_binary_atomically objs/nginx "${NGINX_PATH}/sbin/nginx" ||
+            print_error "Failed to install the compiled Nginx binary"
+        install_nginx_modules_atomically objs "${NGINX_PATH}/modules" ||
+            print_error "Failed to install the compiled Nginx modules"
         # 更新软链接
         ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
 
@@ -1097,6 +1142,10 @@ function main() {
             source_update        # 检查并更新
         fi
         systemctl_config_nginx # 更新时同步迁移 systemd 服务和共享目录
+        if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
+            reload_nginx_after_binary_update ||
+                print_error "Failed to validate or restart Nginx after the binary update"
+        fi
         ;;
     service-config)
         systemctl_config_nginx # 重新生成 systemd 服务和共享目录配置

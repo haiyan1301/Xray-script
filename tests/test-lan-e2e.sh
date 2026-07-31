@@ -85,7 +85,7 @@ SCRIPT_CONFIG="$(jq --arg privateKey "${PRIVATE_KEY}" --arg publicKey "${PUBLIC_
 ' config.json)"
 XRAY_CONFIG='{
     "log":{"loglevel":"warning"},
-    "routing":{"rules":[{"ruleTag":"private-ip","ip":["geoip:private"],"outboundTag":"block"}]},
+    "routing":{"rules":[]},
     "inbounds":[],
     "outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"block","protocol":"blackhole"}]
 }'

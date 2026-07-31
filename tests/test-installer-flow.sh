@@ -63,6 +63,44 @@ if (parse_args -d --vision) >"${TEST_DIR}/option-as-path.stdout" 2>"${TEST_DIR}/
     fail_test 'parse_args accepted another option as the -d path'
 fi
 
+# Locale-only environments such as C.UTF-8 must resolve to an available
+# translation instead of looking for i18n/C.json.
+LANG_PARAM='--lang=auto'
+LANG='C.UTF-8'
+unset 'I18N_DATA[error]'
+load_i18n
+[[ "${I18N_DATA['error']}" == 'Error' ]] ||
+    fail_test 'C.UTF-8 did not fall back to English'
+LANG_PARAM=''
+
+# Every package-manager failure is fatal, including failures before the final
+# package in the loop.
+function _os() { printf '%s' ubuntu; }
+APT_CALLS=0
+function apt() {
+    APT_CALLS=$((APT_CALLS + 1))
+    [[ "${APT_CALLS}" -ne 2 ]]
+}
+if install_dependencies; then
+    fail_test 'install_dependencies hid an apt package failure'
+fi
+[[ "${APT_CALLS}" -eq 2 ]] ||
+    fail_test 'install_dependencies continued after an apt package failure'
+unset -f apt _os
+
+# Directory setup must fail before curl/tar can extract into the caller's cwd.
+mkdir -p "${TEST_DIR}/not-a-directory"
+printf '%s\n' occupied >"${TEST_DIR}/not-a-directory/target"
+DOWNLOAD_CURL_CALLS=0
+function curl() { DOWNLOAD_CURL_CALLS=$((DOWNLOAD_CURL_CALLS + 1)); }
+if (download_github_files "${TEST_DIR}/not-a-directory/target/child" test-url) \
+    >"${TEST_DIR}/bad-target.stdout" 2>"${TEST_DIR}/bad-target.stderr"; then
+    fail_test 'download_github_files accepted an unusable target directory'
+fi
+[[ "${DOWNLOAD_CURL_CALLS}" -eq 0 ]] ||
+    fail_test 'download_github_files downloaded after directory setup failed'
+unset -f curl
+
 I18N_DATA['tip']='UPDATE_TIP'
 I18N_DATA['new']='NEW_VERSION'
 I18N_DATA['now']='UPDATE_NOW'

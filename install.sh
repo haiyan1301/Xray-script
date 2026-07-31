@@ -213,7 +213,10 @@ function load_i18n() {
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
+        lang="${LANG:-}"
+        lang="${lang%%.*}"
+        lang="${lang%%_*}"
+        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
     fi
 
     # 如果语言设置为 "en"，则加载英文提示信息
@@ -350,19 +353,19 @@ function install_dependencies() {
         # 检查是否使用 dnf 包管理器 (较新版本)
         if cmd_exists "dnf"; then
             # 使用 dnf 更新系统并安装软件包
-            dnf update -y
-            dnf install -y dnf-plugins-core
-            dnf update -y
+            dnf update -y || return 1
+            dnf install -y dnf-plugins-core || return 1
+            dnf update -y || return 1
             for pkg in "${packages[@]}"; do
-                dnf install -y ${pkg}
+                dnf install -y "${pkg}" || return 1
             done
         else
             # 使用 yum 包管理器 (较旧版本)
-            yum update -y
-            yum install -y epel-release yum-utils
-            yum update -y
+            yum update -y || return 1
+            yum install -y epel-release yum-utils || return 1
+            yum update -y || return 1
             for pkg in "${packages[@]}"; do
-                yum install -y ${pkg}
+                yum install -y "${pkg}" || return 1
             done
         fi
         ;;
@@ -370,9 +373,9 @@ function install_dependencies() {
         # 为 Debian/Ubuntu 添加系统管理工具
         packages+=("cron" "bsdmainutils" "iproute2" "procps" "dnsutils")
         # 更新包列表并安装软件包
-        apt update -y
+        apt update -y || return 1
         for pkg in "${packages[@]}"; do
-            apt install -y ${pkg}
+            apt install -y "${pkg}" || return 1
         done
         ;;
     esac
@@ -391,9 +394,11 @@ function download_github_files() {
     local github_api_url="$2" # GitHub API 项目 URL
 
     # 创建目标目录
-    mkdir -p "${target_dir}"
+    mkdir -p -- "${target_dir}" ||
+        _error "${I18N_DATA['failed']}: ${target_dir}"
     # 切换到目标目录
-    cd "${target_dir}"
+    cd -- "${target_dir}" ||
+        _error "${I18N_DATA['failed']}: ${target_dir}"
 
     # 打印开始下载的信息
     echo -e "${GREEN}[${I18N_DATA['download']}]${NC} ${github_api_url}"
@@ -816,12 +821,16 @@ function main() {
 
     # 检查依赖，如果缺失则安装
     if ! check_dependencies; then
-        install_dependencies
+        install_dependencies ||
+            _error "${I18N_DATA['failed']}: dependencies"
+        check_dependencies ||
+            _error "${I18N_DATA['failed']}: dependencies"
     fi
 
     # 检查脚本配置目录和配置文件是否存在，如果不存在或损坏则创建并下载默认配置
     if [[ ! -d "${SCRIPT_CONFIG_DIR}" ]]; then
-        mkdir -p "${SCRIPT_CONFIG_DIR}"
+        mkdir -p -- "${SCRIPT_CONFIG_DIR}" ||
+            _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_DIR}"
     fi
     # 如果配置文件不存在，或内容为空/不是有效 JSON，则重新下载
     if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]] || [[ ! -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then

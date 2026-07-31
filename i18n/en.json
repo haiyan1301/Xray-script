@@ -252,9 +252,15 @@
       "xray_missing": "The installer finished, but the xray command is still unavailable"
     },
     "multi": {
+      "label": "Multi",
       "protocol_title": "Multi-node Protocol",
       "select_protocol": "Select protocol for node:",
-      "unsupported": "This option is unavailable in multi-node mode; choose 1-7 from the list."
+      "unsupported": "This option is unavailable in multi-node mode; choose 1-7 from the list.",
+      "node_count_prompt": "How many nodes do you want to create? [2]: ",
+      "node_count_invalid": "Enter an integer from 2 to 100.",
+      "port_conflict": "Port {port} is reserved or already assigned to another node; generating a random port.",
+      "hy2_shared_cert": "HY2 nodes share one TLS certificate in multi-node mode.",
+      "no_nodes": "Multi-node configuration contains no nodes."
     },
     "cert_source": {
       "prompt_cdn": "CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
@@ -302,6 +308,7 @@
       "name_mismatch": "The name is not covered by the certificate SAN/CN; please try again",
       "source_invalid": "Select 1, 2, or 3",
       "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry",
+      "detected_ip": "Detected public IP:",
       "email_invalid": "The saved ACME account email is invalid; enter a valid address and retry",
       "firewall_open": "Opening firewall port",
       "firewall_ok": "Firewall port is open",
@@ -322,6 +329,7 @@
     },
     "mldsa": {
       "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)",
+      "generating": "Generating an ML-DSA-65 post-quantum key pair...",
       "generate_fail": "Failed to generate a complete ML-DSA-65 key pair; the existing configuration was not changed",
       "generated": "ML-DSA-65 key pair generated"
     },

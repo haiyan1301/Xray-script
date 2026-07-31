@@ -95,6 +95,7 @@ function setup_case() {
     export SSL_CERT_PATH_OVERRIDE="${CASE_ROOT}/nginx/certs"
     export SSL_NGINX_COMMAND_OVERRIDE="${CASE_ROOT}/bin/nginx"
     export SSL_SYSTEMCTL_COMMAND_OVERRIDE="${CASE_ROOT}/bin/systemctl"
+    export SSL_ISSUE_LOCK_PATH_OVERRIDE="${CASE_ROOT}/ssl-issue.lock"
     export FAKE_SYSTEMCTL_STATE="${SYSTEMCTL_STATE}"
     export FAKE_SYSTEMCTL_LOG="${SYSTEMCTL_LOG}"
     export FAKE_NGINX_CONFIG="${NGINX_CONF}"
@@ -158,6 +159,19 @@ function assert_no_transaction_backups() {
         fail "transaction backup remained for $(basename "${CASE_ROOT}")"
     fi
 }
+
+# The shared Nginx challenge config is process-global. A second issuer must
+# fail before it changes Nginx state or certificate files.
+setup_case issue-lock active yes yes
+exec {HELD_ISSUE_LOCK}>"${SSL_ISSUE_LOCK_PATH_OVERRIDE}"
+flock -n "${HELD_ISSUE_LOCK}"
+run_issue_with_failure
+[[ "${LAST_ISSUE_STATUS}" -ne 0 ]] || fail 'locked issuance returned success'
+[[ ! -s "${SYSTEMCTL_LOG}" ]] || fail 'locked issuance touched systemd state'
+[[ ! -s "${ACME_LOG}" ]] || fail 'locked issuance invoked acme.sh'
+assert_pair_is "${OLD_CERT}" "${OLD_KEY}"
+flock -u "${HELD_ISSUE_LOCK}"
+exec {HELD_ISSUE_LOCK}>&-
 
 # A successful debug retry is a successful issuance and must proceed through
 # installation, config restoration, and service restoration.

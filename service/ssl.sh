@@ -52,6 +52,7 @@ readonly ACME_WEBROOT_PATH="${ACME_WEBROOT_PATH_OVERRIDE:-/var/www/_zerossl}"   
 readonly SSL_CERT_PATH="${SSL_CERT_PATH_OVERRIDE:-${NGINX_CONFIG_PATH}/certs}"     # SSL 证书存储目录
 readonly SSL_NGINX_COMMAND="${SSL_NGINX_COMMAND_OVERRIDE:-nginx}"
 readonly SSL_SYSTEMCTL_COMMAND="${SSL_SYSTEMCTL_COMMAND_OVERRIDE:-systemctl}"
+readonly SSL_ISSUE_LOCK_PATH="${SSL_ISSUE_LOCK_PATH_OVERRIDE:-${NGINX_CONFIG_PATH}/.ssl-issue.lock}"
 readonly DOMAIN_REGEX='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
 
 # --- 全局变量声明 ---
@@ -80,7 +81,10 @@ function load_i18n() {
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
+        lang="${LANG:-}"
+        lang="${lang%%.*}"
+        lang="${lang%%_*}"
+        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
     fi
 
     # 如果语言为空或为 "null"，则默认使用中文
@@ -292,6 +296,18 @@ function issue_certificate() (
     local transaction_cleanup_finished=0
     local error_message=''
     local reload_command
+    local issue_lock_fd=''
+
+    command -v flock >/dev/null 2>&1 || {
+        echo -e "${RED}[Error]${NC} flock is required for certificate issuance." >&2
+        return 1
+    }
+    mkdir -p -- "$(dirname -- "${SSL_ISSUE_LOCK_PATH}")" || return 1
+    exec {issue_lock_fd}>"${SSL_ISSUE_LOCK_PATH}" || return 1
+    if ! flock -n "${issue_lock_fd}"; then
+        echo -e "${RED}[Error]${NC} Another certificate transaction is already running." >&2
+        return 1
+    fi
 
     printf -v reload_command \
         'if %q is-active --quiet nginx; then %q -t && %q reload nginx; fi' \

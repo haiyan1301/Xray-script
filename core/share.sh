@@ -88,7 +88,10 @@ function load_i18n() {
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
-        lang=$(echo "$LANG" | cut -d'_' -f1)
+        lang="${LANG:-}"
+        lang="${lang%%.*}"
+        lang="${lang%%_*}"
+        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
     fi
 
     # 如果语言为空或为 "null"，则默认使用中文
@@ -335,6 +338,15 @@ function get_common_config() {
     CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds? | if . == null then empty else .[$random % length] end')"
     # 从脚本配置中获取 ML-DSA-65 Verify 公钥（后量子签名验证）
     CLIENT_CONFIG[mldsa65_verify]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
+    # 只有服务端当前入口实际启用了 VLESS enc，客户端链接才携带
+    # encryption。带 fallbacks 的 VLESS 入口与 decryption 不兼容。
+    local inbound_decryption
+    inbound_decryption="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.decryption? // ""')"
+    if [[ -n "${inbound_decryption}" && "${inbound_decryption}" != 'none' ]]; then
+        CLIENT_CONFIG[vless_enc_encryption]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
+    else
+        CLIENT_CONFIG[vless_enc_encryption]=''
+    fi
     # 从 Xray 配置中获取 HY2 auth 密码
     CLIENT_CONFIG[hy2_auth]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].settings.clients[0].auth? | if . == null then empty else . end')"
     # 从脚本配置中获取 HY2 证书域名/IP
@@ -587,8 +599,7 @@ function get_share_link_component() {
         SHARE_LINK_COMPONENT_EXTRA=""
     fi
     # 若启用了 VLESS enc，生成 encryption 参数部分
-    local vless_enc_encryption
-    vless_enc_encryption="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
+    local vless_enc_encryption="${CLIENT_CONFIG[vless_enc_encryption]:-}"
     if [[ -n "${vless_enc_encryption}" ]]; then
         SHARE_LINK_COMPONENT_VLESS_ENC="&encryption=$(echo "${vless_enc_encryption}" | urlencode)"
     else
@@ -796,7 +807,7 @@ function show_multi_config() {
     local i
 
     if [[ "${node_count}" -eq 0 ]]; then
-        echo -e "${RED}[Error]${NC} Multi-node config has no nodes."
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r '.handler.multi.no_nodes')"
         return 1
     fi
 

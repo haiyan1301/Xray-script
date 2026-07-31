@@ -21,6 +21,28 @@ I18N_DATA="$(jq . i18n/en.json)"
 
 [[ "$(read_multi_protocol_tag 1 <<<"")" == 'Vision' ]]
 
+# The legacy quick entry point supports closed stdin. Its historical defaults
+# remain VLESS enc enabled and ML-DSA-65 disabled, while normal questionnaires
+# still fail on an unanswered EOF.
+reset_config_data
+# Sourced from handler.sh; later definitions in this file are test doubles.
+# shellcheck disable=SC2218
+run_vlessenc_choice 'y' </dev/null 2>/dev/null
+[[ "${CONFIG_DATA['vless_enc_enable']}" == 'y' ]]
+reset_config_data
+# shellcheck disable=SC2218
+run_mldsa65_choice 'n' </dev/null 2>/dev/null
+[[ "${CONFIG_DATA['mldsa65_enable']}" == 'n' ]]
+reset_config_data
+if run_vlessenc_choice </dev/null 2>/dev/null; then
+    echo 'Normal VLESS enc questionnaire accepted an unanswered EOF' >&2
+    exit 1
+fi
+if run_mldsa65_choice </dev/null 2>/dev/null; then
+    echo 'Normal ML-DSA-65 questionnaire accepted an unanswered EOF' >&2
+    exit 1
+fi
+
 declare -A EXPECTED_FIELDS=(
     [mKCP]='uuid seed'
     [Vision]='uuid target short'
@@ -34,11 +56,17 @@ readonly PROTOCOLS=(mKCP Vision XHTTP Trojan Fallback hy2 ss2022)
 
 READ_LOG=()
 PORT_READ_COUNT=0
+RULES_REPLY='N'
+CAPTURE_INPUT_FLOW=0
+INPUT_FLOW=()
 function exec_read() {
     local field="$1"
     READ_LOG+=("${field}")
+    if [[ "${CAPTURE_INPUT_FLOW}" -eq 1 ]]; then
+        INPUT_FLOW+=("${field}")
+    fi
     case "${field}" in
-    rules) CONFIG_DATA["${field}"]='N' ;;
+    rules) CONFIG_DATA["${field}"]="${RULES_REPLY}" ;;
     port)
         PORT_READ_COUNT=$((PORT_READ_COUNT + 1))
         CONFIG_DATA["${field}"]="$((21000 + PORT_READ_COUNT))"
@@ -96,6 +124,7 @@ function exec_generate() {
     --short-ids) echo '["0123456789abcdef"]' ;;
     --path) echo '/generated-path' ;;
     --port) echo '40000' ;;
+    --mldsa65) echo 'generated-mldsa-seed,generated-mldsa-verify' ;;
     *) return 1 ;;
     esac
 }
@@ -112,15 +141,62 @@ install_custom_xray_certificate_pair_in_place \
     'example.com' \
     "${MULTI_HY2_CERT_DIR}"
 VLESS_PROMPT_TAGS=()
+MLDSA_PROMPT_TAGS=()
+VLESS_CHOICE_REPLY='n'
+MLDSA_CHOICE_REPLY='n'
 function run_vlessenc_choice() {
     VLESS_PROMPT_TAGS+=("${CONFIG_DATA['tag']:-}")
-    CONFIG_DATA['vless_enc_enable']='n'
+    if [[ "${CAPTURE_INPUT_FLOW}" -eq 1 ]]; then
+        INPUT_FLOW+=('vless-enc')
+    fi
+    CONFIG_DATA['vless_enc_enable']="${VLESS_CHOICE_REPLY}"
 }
+function run_mldsa65_choice() {
+    MLDSA_PROMPT_TAGS+=("${CONFIG_DATA['tag']:-}")
+    if [[ "${CAPTURE_INPUT_FLOW}" -eq 1 ]]; then
+        INPUT_FLOW+=('mldsa65')
+    fi
+    CONFIG_DATA['mldsa65_enable']="${MLDSA_CHOICE_REPLY}"
+}
+
+# Vision collects all user choices in one configuration questionnaire, before
+# Xray installation and key generation begin.
+reset_config_data
+READ_LOG=()
+INPUT_FLOW=()
+VLESS_PROMPT_TAGS=()
+MLDSA_PROMPT_TAGS=()
+RULES_REPLY='y'
+VLESS_CHOICE_REPLY='y'
+MLDSA_CHOICE_REPLY='y'
+CAPTURE_INPUT_FLOW=1
+handler_read_xray_config 'Vision'
+[[ "${INPUT_FLOW[*]}" == 'rules block-bt block-cn block-ad port uuid target short vless-enc mldsa65' ]] || {
+    echo "Unexpected Vision input order: ${INPUT_FLOW[*]}" >&2
+    exit 1
+}
+[[ "${CONFIG_DATA['vless_enc_enable']}" == 'y' ]]
+[[ "${CONFIG_DATA['mldsa65_enable']}" == 'y' ]]
+CONFIG_DATA['cdn']=''
+CONFIG_DATA['email']=''
+handler_script_config
+jq -e '
+    .xray.tag == "Vision" and
+    .xray.vlessEncEnable == "y" and
+    .xray.mldsa65Enable == "y" and
+    .xray.mldsa65Seed == "" and
+    .xray.mldsa65Verify == ""
+' "${SCRIPT_CONFIG_PATH}" >/dev/null
+RULES_REPLY='N'
+VLESS_CHOICE_REPLY='n'
+MLDSA_CHOICE_REPLY='n'
+CAPTURE_INPUT_FLOW=0
 
 # A pure HY2 multi-node config must never ask about VLESS encryption.
 READ_LOG=()
 PORT_READ_COUNT=0
 VLESS_PROMPT_TAGS=()
+MLDSA_PROMPT_TAGS=()
 handler_read_multi_xray_config <<EOF
 2
 5
@@ -134,11 +210,16 @@ EOF
     echo "Pure HY2 config unexpectedly prompted for VLESS enc" >&2
     exit 1
 }
+[[ "${#MLDSA_PROMPT_TAGS[@]}" -eq 0 ]] || {
+    echo "Pure HY2 config unexpectedly prompted for ML-DSA-65" >&2
+    exit 1
+}
 jq -e 'map(.tag) == ["hy2","hy2"]' <<<"${CONFIG_DATA['nodes_json']}" >/dev/null
 
 READ_LOG=()
 PORT_READ_COUNT=0
 VLESS_PROMPT_TAGS=()
+MLDSA_PROMPT_TAGS=()
 handler_read_multi_xray_config <<EOF
 7
 7
@@ -163,12 +244,86 @@ expected_read_order='rules port uuid seed port uuid target short port uuid targe
     echo "VLESS enc prompt was not scoped to the first applicable node: ${VLESS_PROMPT_TAGS[*]}" >&2
     exit 1
 }
+[[ "${#MLDSA_PROMPT_TAGS[@]}" -eq 1 && "${MLDSA_PROMPT_TAGS[0]}" == 'Vision' ]] || {
+    echo "ML-DSA-65 prompt was not scoped to the first Reality node: ${MLDSA_PROMPT_TAGS[*]}" >&2
+    exit 1
+}
+[[ "${CONFIG_DATA['vless_enc_enable']}" == 'n' ]]
+[[ "${CONFIG_DATA['mldsa65_enable']}" == 'n' ]]
 jq -e '
     map(.tag) == ["mKCP","Vision","XHTTP","Trojan","Fallback","hy2","ss2022"] and
     (.[1] | has("hy2auth") | not) and
     (.[5] | keys | sort) == ["hy2auth","name","port","tag"] and
     (.[6] | keys | sort) == ["name","port","ss2022Key","tag"]
 ' <<<"${CONFIG_DATA['nodes_json']}" >/dev/null
+
+function capture_multi_ui() {
+    local language="$1"
+    I18N_DATA="$(jq . "i18n/${language}.json")"
+    handler_read_multi_xray_config <<EOF 2>&1
+1
+2
+6
+6
+EOF
+}
+
+diff -u \
+    <(jq -r '.handler.multi | keys[]' i18n/en.json) \
+    <(jq -r '.handler.multi | keys[]' i18n/zh.json)
+
+english_multi_ui="$(capture_multi_ui en)"
+grep -Fq 'How many nodes do you want to create?' <<<"${english_multi_ui}"
+grep -Fq 'Enter an integer from 2 to 100.' <<<"${english_multi_ui}"
+grep -Fq 'Select protocol for node:' <<<"${english_multi_ui}"
+
+chinese_multi_ui="$(capture_multi_ui zh)"
+grep -Fq '要创建多少个节点？' <<<"${chinese_multi_ui}"
+grep -Fq '请输入 2 到 100 之间的整数。' <<<"${chinese_multi_ui}"
+grep -Fq '请选择节点协议' <<<"${chinese_multi_ui}"
+! grep -Fq 'How many nodes do you want to create?' <<<"${chinese_multi_ui}"
+! grep -Fq '[Multi]' <<<"${chinese_multi_ui}"
+
+I18N_DATA="$(jq . i18n/en.json)"
+english_port_warning="$(generate_unique_multi_port 32768 Vision 2>&1 >/dev/null)"
+grep -Fq 'Port 32768 is reserved or already assigned to another node' <<<"${english_port_warning}"
+I18N_DATA="$(jq . i18n/zh.json)"
+chinese_port_warning="$(generate_unique_multi_port 32768 Vision 2>&1 >/dev/null)"
+grep -Fq '端口 32768 为保留端口或已分配给其他节点' <<<"${chinese_port_warning}"
+
+SCRIPT_CONFIG="$(jq '.xray.tag = "multi" | .xray.nodes = []' config.json)"
+chinese_no_nodes="$(handler_multi_xray_config 1 2>&1 || true)"
+grep -Fq '多节点配置中没有节点。' <<<"${chinese_no_nodes}"
+I18N_DATA="$(jq . i18n/en.json)"
+
+# Existing ML-DSA material from an older config implies enabled and must be
+# reused instead of being rotated during a config rebuild.
+SCRIPT_CONFIG="$(jq '
+    .xray.mldsa65Seed = "existing-mldsa-seed" |
+    .xray.mldsa65Verify = "existing-mldsa-verify" |
+    del(.xray.mldsa65Enable)
+' config.json)"
+write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+[[ "$(configured_mldsa65_enable)" == 'y' ]]
+handler_mldsa65_config "$(configured_mldsa65_enable)"
+jq -e '
+    .xray.mldsa65Enable == "y" and
+    .xray.mldsa65Seed == "existing-mldsa-seed" and
+    .xray.mldsa65Verify == "existing-mldsa-verify"
+' "${SCRIPT_CONFIG_PATH}" >/dev/null
+
+SCRIPT_CONFIG="$(jq '
+    .xray.mldsa65Enable = "y" |
+    .xray.mldsa65Seed = "" |
+    .xray.mldsa65Verify = ""
+' config.json)"
+write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+handler_mldsa65_config 'y'
+jq -e '
+    .xray.mldsa65Enable == "y" and
+    .xray.mldsa65Seed == "generated-mldsa-seed" and
+    .xray.mldsa65Verify == "generated-mldsa-verify"
+' "${SCRIPT_CONFIG_PATH}" >/dev/null
 
 function configure_node_data() {
     local protocol="$1"
@@ -250,20 +405,38 @@ done
 
 private_key='test-private-key'
 xray_bin="${XRAY_BIN:-$(command -v xray || true)}"
+vless_decryption='existing-vless-decryption'
+vless_encryption='existing-vless-encryption'
+mldsa_seed='existing-mldsa-seed'
+mldsa_verify='existing-mldsa-verify'
 if [[ -n "${xray_bin}" ]]; then
     private_key="$(${xray_bin} x25519 | sed -n '1s/.*:[[:space:]]*//p')"
+    vlessenc_output="$(printf '2\n' | "${xray_bin}" vlessenc 2>&1)"
+    vless_decryption="$(grep '"decryption"' <<<"${vlessenc_output}" | tail -1 | sed 's/.*"decryption": *"\([^"]*\)".*/\1/')"
+    vless_encryption="$(grep '"encryption"' <<<"${vlessenc_output}" | tail -1 | sed 's/.*"encryption": *"\([^"]*\)".*/\1/')"
+    mldsa_output="$("${xray_bin}" mldsa65)"
+    mldsa_seed="$(sed -n '1s/.*:[[:space:]]*//p' <<<"${mldsa_output}")"
+    mldsa_verify="$(sed -n '2s/.*:[[:space:]]*//p' <<<"${mldsa_output}")"
 fi
 
 SCRIPT_CONFIG="$(jq \
     --argjson nodes "${nodes}" \
     --arg privateKey "${private_key}" \
     --arg hy2Cert "${TEST_DIR}/cert.pem" \
-    --arg hy2Key "${TEST_DIR}/key.pem" '
+    --arg hy2Key "${TEST_DIR}/key.pem" \
+    --arg vlessDec "${vless_decryption}" \
+    --arg vlessEnc "${vless_encryption}" \
+    --arg mldsaSeed "${mldsa_seed}" \
+    --arg mldsaVerify "${mldsa_verify}" '
     .xray.tag = "multi" |
     .xray.nodes = $nodes |
     .xray.privateKey = $privateKey |
-    .xray.mldsa65Seed = "" |
-    .xray.vlessEncEnable = "n" |
+    .xray.mldsa65Enable = "y" |
+    .xray.mldsa65Seed = $mldsaSeed |
+    .xray.mldsa65Verify = $mldsaVerify |
+    .xray.vlessEncEnable = "y" |
+    .xray.vlessEncDecryption = $vlessDec |
+    .xray.vlessEncEncryption = $vlessEnc |
     .xray.hy2CertSource = "3" |
     .xray.hy2CertDomain = "example.com" |
     .xray.hy2CertFullchain = $hy2Cert |
@@ -277,15 +450,32 @@ SCRIPT_CONFIG="$(jq \
 
 function open_xray_firewall_port() { :; }
 function handler_lan_open_firewall() { :; }
-handler_multi_xray_config 1
+VLESS_GENERATION_CALLS=0
+function run_vlessenc_prompt() {
+    VLESS_GENERATION_CALLS=$((VLESS_GENERATION_CALLS + 1))
+    return 1
+}
+handler_multi_xray_config
+[[ "${VLESS_GENERATION_CALLS}" -eq 0 ]] || {
+    echo 'Persisted VLESS enc material was unexpectedly regenerated' >&2
+    exit 1
+}
 
 jq -e \
     --arg cert "${MULTI_HY2_CERT_DIR}/fullchain.pem" \
-    --arg key "${MULTI_HY2_CERT_DIR}/privkey.pem" '
+    --arg key "${MULTI_HY2_CERT_DIR}/privkey.pem" \
+    --arg vlessDec "${vless_decryption}" \
+    --arg mldsaSeed "${mldsa_seed}" '
     (.inbounds | length) == 19 and
     ([.inbounds[].tag] | unique | length) == 19 and
     ([.inbounds[] | select(.port? == 32768 and .tag != "api")] | length) == 0 and
     ([.inbounds[] | select(.protocol == "vless")] | length) == 10 and
+    all(.inbounds[] | select(.protocol == "vless" and (.settings | has("fallbacks") | not));
+        .settings.decryption == $vlessDec) and
+    all(.inbounds[] | select(.protocol == "vless" and (.settings | has("fallbacks")));
+        .settings.decryption == "none") and
+    all(.inbounds[] | select(.streamSettings.realitySettings?);
+        .streamSettings.realitySettings.mldsa65Seed == $mldsaSeed) and
     ([.inbounds[] | select(.protocol == "trojan")] | length) == 2 and
     ([.inbounds[] | select(.protocol == "hysteria")] | length) == 2 and
     all(.inbounds[] | select(.protocol == "hysteria");
@@ -314,6 +504,71 @@ for mode in auto packet-up stream-up stream-one; do
     bash core/check.sh --xhttp-mode "${mode}" >/dev/null 2>&1
 done
 ! bash core/check.sh --xhttp-mode packet >/dev/null 2>&1
+
+# The post-install stage consumes persisted choices and must not read another
+# answer after package installation output has started.
+(
+    SCRIPT_CONFIG="$(jq '
+        .xray.tag = "Vision" |
+        .xray.vlessEncEnable = "y" |
+        .xray.mldsa65Enable = "y"
+    ' config.json)"
+    LATE_READ_LOG="${TEST_DIR}/late-read.log"
+    REALITY_PREP_LOG="${TEST_DIR}/reality-prep.log"
+    RUNTIME_BUILD_LOG="${TEST_DIR}/runtime-build.log"
+    POISON_INPUT="${TEST_DIR}/poison-input"
+    printf 'POISON\n' >"${POISON_INPUT}"
+
+    function load_i18n() { :; }
+    function handler_prepare_protocol_services() { :; }
+    function read() {
+        printf 'read called\n' >>"${LATE_READ_LOG}"
+        return 1
+    }
+    function handler_reality_key_config() {
+        [[ "$(configured_mldsa65_enable)" == 'y' ]]
+        printf 'prepared\n' >>"${REALITY_PREP_LOG}"
+    }
+    function handler_xray_config() {
+        printf 'built\n' >>"${RUNTIME_BUILD_LOG}"
+    }
+
+    exec 9<"${POISON_INPUT}"
+    main '--xray-config' <&9
+    [[ ! -e "${LATE_READ_LOG}" ]]
+    builtin read -r remaining_input <&9
+    [[ "${remaining_input}" == 'POISON' ]]
+    [[ "$(wc -l <"${REALITY_PREP_LOG}")" -eq 1 ]]
+    [[ "$(wc -l <"${RUNTIME_BUILD_LOG}")" -eq 1 ]]
+)
+
+# Quick Vision passes explicit EOF defaults into the two pre-install choices,
+# so automation with closed stdin does not regress while both choices stay in
+# the same pre-install phase.
+(
+    QUICK_CHOICE_LOG="${TEST_DIR}/quick-choice.log"
+    function run_vlessenc_choice() {
+        [[ "${1:-}" == 'y' ]]
+        CONFIG_DATA['vless_enc_enable']='y'
+        printf 'vless:%s\n' "$1" >>"${QUICK_CHOICE_LOG}"
+    }
+    function run_mldsa65_choice() {
+        [[ "${1:-}" == 'n' ]]
+        CONFIG_DATA['mldsa65_enable']='n'
+        printf 'mldsa:%s\n' "$1" >>"${QUICK_CHOICE_LOG}"
+    }
+    function handler_script_config() { :; }
+    function handler_install() { :; }
+    function handler_reality_key_config() { :; }
+    function handler_xray_config() { :; }
+    function add_rule() { :; }
+    function handler_geodata_cron() { :; }
+    function handler_restart() { :; }
+    function handler_share() { :; }
+
+    handler_quick_install 'Vision' </dev/null
+    [[ "$(tr '\n' ' ' <"${QUICK_CHOICE_LOG}")" == 'vless:y mldsa:n ' ]]
+)
 
 if [[ -n "${xray_bin}" ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -days 1 \

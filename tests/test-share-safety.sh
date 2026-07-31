@@ -40,6 +40,7 @@ function initialize_link_components() {
     CLIENT_CONFIG[mode]=''
     CLIENT_CONFIG[host]=''
     CLIENT_CONFIG[mldsa65_verify]=''
+    CLIENT_CONFIG[vless_enc_encryption]=''
     XHTTP_EXTRA=''
     XHTTP_EXTRA_ENCODED=''
 }
@@ -64,6 +65,54 @@ CLIENT_CONFIG[path]='/path'
 get_trojan_share_link
 [[ "${SHARE_LINK}" == \
     'trojan://p%40ss%25%26%23@192.0.2.10:443?type=xhttp&security=reality&sni=example.com&pbk=public-key&sid=abcd&spx=%2F&fp=chrome&path=%2Fpath' ]]
+
+# VLESS enc is attached per inbound. A fallback-capable Vision inbound cannot
+# use decryption, while its internal XHTTP inbound can.
+SCRIPT_CONFIG="$(jq '
+    .xray.port = 443 |
+    .xray.publicKey = "public-key" |
+    .xray.vlessEncEncryption = "client-encryption-token"
+' config.json)"
+XRAY_CONFIG='{
+    "inbounds": [
+        {},
+        {
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id":"11111111-2222-3333-4444-555555555555","flow":"xtls-rprx-vision"}],
+                "decryption": "none",
+                "fallbacks": [{"dest":"@fallback.sock"}]
+            },
+            "streamSettings": {
+                "network": "raw",
+                "security": "reality",
+                "realitySettings": {"serverNames":["example.com"],"shortIds":["abcd"]}
+            }
+        },
+        {
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id":"11111111-2222-3333-4444-555555555555"}],
+                "decryption": "server-decryption-token"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {"serverNames":["example.com"],"shortIds":["abcd"]},
+                "xhttpSettings": {"path":"/path","mode":"auto"}
+            }
+        }
+    ]
+}'
+initialize_link_components
+get_common_config 1 '192.0.2.10'
+get_vision_share_link
+[[ "${SHARE_LINK}" != *'&encryption='* ]]
+initialize_link_components
+get_common_config 2 '192.0.2.10'
+get_xhttp_share_link
+[[ "${SHARE_LINK}" == *'&encryption=client-encryption-token'* ]]
 
 for valid_ip in \
     '192.0.2.1' \
