@@ -147,6 +147,7 @@ declare -A param_map=(
     ["--only-change-domain"]="config,only_change_domain"
     ["--domain"]="config,domain"
     ["--cdn"]="config,cdn"
+    ["--cdn-down"]="config,cdn_down"
     ["--email"]="config,email"
     ["--short"]="config,short"
     ["--path"]="config,path"

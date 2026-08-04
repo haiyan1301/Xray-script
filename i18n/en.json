@@ -160,17 +160,19 @@
     },
     "cdn_config": {
       "title": "CDN Site Management",
-      "option1": "Change CDN domain",
-      "option2": "Force certificate renewal",
-      "option3": "Update Nginx",
-      "option4": "Enable/Disable Nginx auto-update",
-      "option5": "Change camouflage site content",
-      "option6": "Reset Cloudreve v3 admin data"
+      "option1": "Change uplink CDN domain",
+      "option2": "Change or clear downlink CDN domain",
+      "option3": "Force certificate renewal",
+      "option4": "Update Nginx",
+      "option5": "Enable/Disable Nginx auto-update",
+      "option6": "Change camouflage site content",
+      "option7": "Reset Cloudreve v3 admin data"
     },
     "cdn_direct_config": {
       "title": "Low-resource CDN Management",
       "option1": "Reconfigure the CDN node or switch backend",
-      "option2": "Renew/reload the Xray TLS certificate"
+      "option2": "Change or clear downlink CDN domain",
+      "option3": "Renew/reload the Xray TLS certificate"
     },
     "reverse": {
       "title": "Reverse Proxy (NAT Traversal)",
@@ -264,7 +266,9 @@
     },
     "cert_source": {
       "prompt_cdn": "CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
+      "prompt_cdn_down": "Downlink CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
       "prompt_cdn_direct": "Direct Xray CDN TLS certificate [1. Standalone ACME / 2. Custom certificate paths] (default 1): ",
+      "prompt_cdn_down_direct": "Direct Xray downlink CDN TLS certificate [1. Standalone ACME / 2. Custom certificate paths] (default 1): ",
       "prompt_sni_domain": "SNI direct-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
       "prompt_sni_cdn": "SNI mode CDN-site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
       "source_invalid": "Certificate source must be 1 or 2",
@@ -289,6 +293,13 @@
       "use_reconfigure": "Direct CDN mode cannot use Nginx domain management; choose Reconfigure CDN node",
       "nginx_not_used": "This CDN node is using the no-Nginx low-resource backend; reconfigure it with the Nginx backend before using this action",
       "cleanup_incomplete": "The Xray runtime is healthy, but an Nginx cron job or old Cloudreve container could not be stopped; check crontab and Docker manually"
+    },
+    "cdn_split": {
+      "domain_invalid": "The uplink or downlink CDN domain is empty or invalid",
+      "domain_duplicate": "The uplink and downlink CDN domains must be different",
+      "cert_invalid": "The downlink CDN TLS certificate is invalid, expired, mismatched, or does not cover the domain",
+      "config_fail": "The downlink CDN update failed; the previous config and runtime files were restored",
+      "updated": "The downlink CDN configuration was updated"
     },
     "hy2_cert": {
       "prompt": "Certificate source [1. acme.sh domain cert / 2. acme.sh IP cert / 3. Custom cert path] (default 1): ",
@@ -397,6 +408,7 @@
     "only_change_domain": "Only change domain [Y/n]: ",
     "domain": "Enter website domain (for Reality): ",
     "cdn": "Enter website domain (for CDN): ",
+    "cdn_down": "Enter an optional downlink CDN domain (leave empty to disable splitting): ",
     "email": "Enter ACME account email: ",
     "short": "Enter shortId (comma separated, default auto-generated): ",
     "short_id_tip": "Supports input 0 to 8 to automatically generate shortId of corresponding length",
@@ -418,7 +430,10 @@
     "client": "Client Configuration",
     "extra": "XHTTP Extra Config",
     "link": "Share Link",
-    "qr": "QR Code"
+    "qr": "QR Code",
+    "uplink_address": "uplink address  ",
+    "downlink_address": "downlink address",
+    "cdn_split_mode_tip": "Tip: use packet-up or stream-up for independent uplink/downlink connections. auto remains supported; stream-one does not guarantee separate connections."
   },
   "check": {
     "ip": {

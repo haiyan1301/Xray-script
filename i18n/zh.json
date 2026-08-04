@@ -160,17 +160,19 @@
     },
     "cdn_config": {
       "title": "CDN 站点管理",
-      "option1": "修改 CDN 域名",
-      "option2": "强制续签证书",
-      "option3": "更新 Nginx",
-      "option4": "开/关 Nginx 自动更新",
-      "option5": "修改伪装站点内容",
-      "option6": "重置 Cloudreve v3 管理员数据"
+      "option1": "修改上行 CDN 域名",
+      "option2": "修改或清除下行 CDN 域名",
+      "option3": "强制续签证书",
+      "option4": "更新 Nginx",
+      "option5": "开/关 Nginx 自动更新",
+      "option6": "修改伪装站点内容",
+      "option7": "重置 Cloudreve v3 管理员数据"
     },
     "cdn_direct_config": {
       "title": "CDN 低资源模式管理",
       "option1": "重新配置 CDN 节点或切换后端",
-      "option2": "续签/重新加载 Xray TLS 证书"
+      "option2": "修改或清除下行 CDN 域名",
+      "option3": "续签/重新加载 Xray TLS 证书"
     },
     "reverse": {
       "title": "反向代理(内网穿透)",
@@ -264,7 +266,9 @@
     },
     "cert_source": {
       "prompt_cdn": "CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "prompt_cdn_down": "下行 CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "prompt_cdn_direct": "Xray 直连 CDN 的 TLS 证书 [1. standalone 自动申请 / 2. 自定义证书路径] (默认 1): ",
+      "prompt_cdn_down_direct": "Xray 直连下行 CDN 的 TLS 证书 [1. standalone 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "prompt_sni_domain": "SNI 直连站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "prompt_sni_cdn": "SNI 模式的 CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
       "source_invalid": "证书来源只能选择 1 或 2",
@@ -289,6 +293,13 @@
       "use_reconfigure": "低资源 CDN 模式不能使用 Nginx 域名管理，请选择“重新配置 CDN 节点”",
       "nginx_not_used": "当前为无 Nginx 的 CDN 低资源模式；如需此功能，请先重新配置 CDN 节点并切换到 Nginx 后端",
       "cleanup_incomplete": "Xray 运行配置已正常启动，但 Nginx 定时任务或旧 Cloudreve 容器未能全部停止，请手动检查 crontab 和 Docker"
+    },
+    "cdn_split": {
+      "domain_invalid": "上行或下行 CDN 域名为空或格式无效",
+      "domain_duplicate": "上行 CDN 与下行 CDN 域名不能相同",
+      "cert_invalid": "下行 CDN 的 TLS 证书无效、已过期、密钥不匹配或未覆盖该域名",
+      "config_fail": "下行 CDN 更新失败，已恢复原配置和运行时文件",
+      "updated": "下行 CDN 配置已更新"
     },
     "hy2_cert": {
       "prompt": "证书来源 [1. acme.sh 申请域名证书 / 2. acme.sh 申请 IP 证书 / 3. 自定义证书路径] (默认 1): ",
@@ -397,6 +408,7 @@
     "only_change_domain": "仅更新域名 [Y/n]: ",
     "domain": "请输入网站域名 (供 Reality 使用): ",
     "cdn": "请输入网站域名 (供 CDN 使用): ",
+    "cdn_down": "请输入可选的下行 CDN 域名 (留空关闭上下行分离): ",
     "email": "请输入 ACME 账户邮箱: ",
     "short": "请输入 shortId (多个值请用英文逗号分隔，默认自动生成): ",
     "short_id_tip": "支持输入 0 到 8 自动生成对应倍数长度的 shortId",
@@ -418,7 +430,10 @@
     "client": "客户端配置",
     "extra": "XHTTP 扩展配置(extra)",
     "link": "分享链接",
-    "qr": "二维码"
+    "qr": "二维码",
+    "uplink_address": "上行地址       ",
+    "downlink_address": "下行地址       ",
+    "cdn_split_mode_tip": "提示：独立上下行连接建议使用 packet-up 或 stream-up；auto 仍可用，stream-one 不保证形成独立上下行连接。"
   },
   "check": {
     "ip": {

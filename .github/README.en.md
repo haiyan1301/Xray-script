@@ -20,6 +20,7 @@
 * HY2 supports domain, short-lived IP, and custom certificates; custom certificates are checked against their key and SAN/CN
 * SNI share links implement bidirectional separation (upstream: xhttp+TLS+CDN | downstream: xhttp+Reality, upstream: xhttp+Reality | downstream: xhttp+TLS+CDN)
 * CDN and SNI certificates are stored independently; direct Xray CDN and HY2 additionally isolate certificate directories by hostname/IP and automatic/custom source so stale renewal hooks cannot overwrite the active pair
+* CDN-only mode can use an optional second domain so separate CDNs carry uplink and downlink connections
 * Rule configurations and custom entries:
   * Block BitTorrent traffic (optional)
   * Block China IP traffic (optional)
@@ -81,6 +82,14 @@
 ## Share Links
 
 Based on [VMessAEAD / VLESS 分享链接标准提案](https://github.com/XTLS/Xray-core/discussions/716) and [v2rayN](https://github.com/2dust/v2rayN). Modify links manually if other clients have compatibility issues.
+
+CDN-only mode uses `.nginx.cdn` for uplink and optional `.nginx.cdnDown` for downlink. The domains must differ and both CDN routes must reach the same Xray XHTTP inbound with the same UUID, path, and mode. A missing or empty `cdnDown` preserves the existing single-CDN behavior.
+
+When `cdnDown` is set, the primary share-link address, SNI, and host still use `.nginx.cdn`. Its URL-encoded XHTTP `extra` gains a `downloadSettings` object whose address, SNI, and host use `.nginx.cdnDown`; it uses port 443, TLS, XHTTP, H2, the Chrome fingerprint, and the same path and mode. Existing XHTTP obfuscation fields are merged into the same object.
+
+`auto` remains supported, but use `packet-up` or `stream-up` when independent uplink/downlink connections are required. `stream-one` does not guarantee separate connections. The Nginx backend creates one TLS site per domain and sends both to the same XHTTP Unix socket. The direct Xray backend keeps one inbound and places one or two certificates in its TLS certificate array for SNI selection. Custom certificates may be separate, or one certificate may be reused if it covers both domains.
+
+Certificate metadata is stored separately under `.nginx.certificates.cdn` / `.nginx.certificates.cdnDown` and, for the direct backend, `.xray.cdnCertHostname/Source/Fullchain/Privkey` / `.xray.cdnDownCertHostname/Source/Fullchain/Privkey`. Clearing the downlink domain also removes its managed site, metadata, and renewal task.
 
 In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, modify client settings manually.
 

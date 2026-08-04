@@ -84,6 +84,22 @@ function get_cdn_backend() {
     normalize_cdn_backend "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnBackend // ""')"
 }
 
+function validate_cdn_split_domains() {
+    local uplink downlink
+    uplink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    downlink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    [[ -n "${downlink}" ]] || return 0
+    if ! exec_check '--domain-format' "${uplink}" >/dev/null 2>&1 ||
+        ! exec_check '--domain-format' "${downlink}" >/dev/null 2>&1; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_invalid")" >&2
+        return 1
+    fi
+    if [[ "${uplink,,}" == "${downlink,,}" ]]; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+        return 1
+    fi
+}
+
 function certificate_path_component() {
     local value="${1,,}"
 
@@ -560,8 +576,27 @@ function exec_read() {
             if [[ "${config_tag,,}" == 'cdn' ]]; then
                 # CDN 域名应解析到 CDN 节点，仅校验格式以避免暴露源站 IP
                 exec_check '--domain-format' "${result}" || continue
+                if [[ -z "${CONFIG_DATA['tag']+set}" ]]; then
+                    local configured_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+                    if [[ -n "${configured_down}" && "${result,,}" == "${configured_down,,}" ]]; then
+                        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+                        continue
+                    fi
+                fi
             else
                 exec_check '--dns' "${result}" || continue
+            fi
+            ;;
+        cdn-down)
+            # 下行 CDN 可留空；非空时仅校验格式，避免要求 CDN 域名直解析到源站。
+            if [[ -n "${result}" ]]; then
+                exec_check '--domain-format' "${result}" || continue
+                local uplink_domain="${CONFIG_DATA['cdn']:-}"
+                [[ -n "${uplink_domain}" ]] || uplink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+                if [[ "${result,,}" == "${uplink_domain,,}" ]]; then
+                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+                    continue
+                fi
             fi
             ;;
         short)
@@ -1261,7 +1296,10 @@ function handler_reset_script_config() {
         SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray' \
             'version' 'githubProxy' 'warp' 'rules' \
             'cdnBackend' 'cdnCertHostname' 'cdnCertSource' \
-            'cdnCertFullchain' 'cdnCertPrivkey' 'hy2CertAcmeDomain')
+            'cdnCertFullchain' 'cdnCertPrivkey' \
+            'cdnDownCertHostname' 'cdnDownCertSource' \
+            'cdnDownCertFullchain' 'cdnDownCertPrivkey' \
+            'hy2CertAcmeDomain')
         ;;
     nginx)
         # 重置 nginx 部分，保留 version, ca 字段
@@ -1383,7 +1421,8 @@ function handler_script_config() {
         SHORT_IDS="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-'8 8'})"
     fi
 
-    local CDN_DOMAIN="${CONFIG_DATA['cdn']}"
+    local CDN_DOMAIN="${CONFIG_DATA['cdn']:-}"
+    local CDN_DOWN_DOMAIN="${CONFIG_DATA['cdn-down']:-}"
     local CA_EMAIL="${CONFIG_DATA['email']}"
     # 更新脚本配置中的规则状态
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset != "n" then .xray.rules.reset = 1 else .xray.rules.reset = 0 end ')"
@@ -1457,7 +1496,22 @@ function handler_script_config() {
         ;;
     cdn)
         [[ -n "${CA_EMAIL}" ]] && SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cdn "${CDN_DOMAIN}" '.nginx.cdn = $cdn')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+            --arg cdn "${CDN_DOMAIN}" \
+            --arg cdnDown "${CDN_DOWN_DOMAIN}" '
+            .nginx.cdn = $cdn |
+            .nginx.cdnDown = $cdnDown |
+            .nginx.certificates //= {} |
+            if $cdnDown == "" or ((.nginx.certificates.cdnDown.hostname // "") != $cdnDown) then
+                .nginx.certificates.cdnDown = {hostname:"",source:"",fullchain:"",privkey:""}
+            else . end |
+            if $cdnDown == "" or ((.xray.cdnDownCertHostname // "") != $cdnDown) then
+                .xray.cdnDownCertHostname = "" |
+                .xray.cdnDownCertSource = "" |
+                .xray.cdnDownCertFullchain = "" |
+                .xray.cdnDownCertPrivkey = ""
+            else . end
+        ')"
         # 清理从 Reality/SNI 模式遗留的源站目标，CDN 配置不会使用这些字段。
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
             .xray.target = "" |
@@ -2046,7 +2100,7 @@ function handler_xray_config() {
     local SHORT_IDS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds')"            # 获取 Short IDs
     local MLDSA65_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')" # 获取 ML-DSA-65 Seed
     local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"         # 获取路径
-    local XHTTP_MODE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')"
+    local XHTTP_MODE="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.xhttpMode // "") | if . == "" then "auto" else . end')"
     local XRAY_RULES_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')" # 获取规则状态
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"        # 获取 bt 规则状态
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"        # 获取 cn 规则状态
@@ -2057,6 +2111,9 @@ function handler_xray_config() {
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
     local CDN_BACKEND="$(get_cdn_backend)"
+    if [[ "${CONFIG_TAG,,}" == 'cdn' ]]; then
+        validate_cdn_split_domains || return 1
+    fi
     if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
         handler_multi_xray_config "${skip_vlessenc}"
         return $?
@@ -2095,6 +2152,7 @@ function handler_xray_config() {
     XRAY_CONFIG="$(jq '.' "${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json")"
     if [[ "${CONFIG_TAG,,}" == 'cdn' && "${CDN_BACKEND}" == 'xray' ]]; then
         local CDN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+        local CDN_DOWN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
         local CDN_CERT_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
         local cdn_cert_dir=''
         cdn_cert_dir="$(get_cdn_direct_cert_dir "${CDN_DOMAIN}" "${CDN_CERT_SOURCE}")" ||
@@ -2108,9 +2166,26 @@ function handler_xray_config() {
         fi
 
         XRAY_PORT=443
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq \
+        local certificates_json="$(jq -n \
             --arg cert "${CDN_FULLCHAIN}" \
-            --arg key "${CDN_PRIVKEY}" '
+            --arg key "${CDN_PRIVKEY}" \
+            '[{certificateFile: $cert, keyFile: $key}]')" || return 1
+        if [[ -n "${CDN_DOWN_DOMAIN}" ]]; then
+            local CDN_DOWN_SOURCE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')"
+            local cdn_down_cert_dir="$(get_cdn_direct_cert_dir "${CDN_DOWN_DOMAIN}" "${CDN_DOWN_SOURCE}")" || return 1
+            local CDN_DOWN_FULLCHAIN="${cdn_down_cert_dir}/fullchain.pem"
+            local CDN_DOWN_PRIVKEY="${cdn_down_cert_dir}/privkey.pem"
+            if ! validate_cdn_direct_certificate "${CDN_DOWN_FULLCHAIN}" "${CDN_DOWN_PRIVKEY}" "${CDN_DOWN_DOMAIN}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.cert_invalid")" >&2
+                return 1
+            fi
+            certificates_json="$(echo "${certificates_json}" | jq \
+                --arg cert "${CDN_DOWN_FULLCHAIN}" \
+                --arg key "${CDN_DOWN_PRIVKEY}" \
+                '. + [{certificateFile: $cert, keyFile: $key}]')" || return 1
+        fi
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq \
+            --argjson certificates "${certificates_json}" '
             .inbounds[1].listen = "0.0.0.0" |
             .inbounds[1].port = 443 |
             .inbounds[1].streamSettings.security = "tls" |
@@ -2121,10 +2196,7 @@ function handler_xray_config() {
             .inbounds[1].streamSettings.tlsSettings = {
                 minVersion: "1.2",
                 alpn: ["h2", "http/1.1"],
-                certificates: [{
-                    certificateFile: $cert,
-                    keyFile: $key
-                }]
+                certificates: $certificates
             }
         ')"
     fi
@@ -2449,6 +2521,7 @@ function handler_read_xray_config() {
         ;;
     cdn)
         exec_read 'cdn'    # 读取 CDN
+        exec_read 'cdn-down' # 读取可选的下行 CDN
         ;;
     esac
     # 根据配置标签读取特定参数 (第四部分)
@@ -2998,17 +3071,23 @@ function handler_restore_certificate_renewal_hooks() {
     cdn)
         domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
         if [[ "$(get_cdn_backend)" == 'xray' ]]; then
-            source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
-            if [[ "${source}" == '1' ]] && acme_manages_certificate "${domain}"; then
-                if ! cert_dir="$(get_xray_runtime_cert_dir 2>/dev/null)"; then
-                    cert_dir="$(get_cdn_direct_cert_dir "${domain}" "${source}")" ||
-                        return 1
+            local direct_role
+            for direct_role in cdn cdnDown; do
+                domain="$(echo "${SCRIPT_CONFIG}" | jq -r --arg role "${direct_role}" '.nginx[$role] // ""')"
+                [[ -n "${domain}" ]] || continue
+                if [[ "${direct_role}" == 'cdn' ]]; then
+                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
+                else
+                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')"
                 fi
-                install_acme_xray_certificate "${domain}" "${domain}" "${cert_dir}" ||
-                    return 1
-            fi
+                if [[ "${source}" == '1' ]] && acme_manages_certificate "${domain}"; then
+                    cert_dir="$(get_cdn_direct_cert_dir "${domain}" "${source}")" || return 1
+                    install_acme_xray_certificate "${domain}" "${domain}" "${cert_dir}" || return 1
+                fi
+            done
         else
             domains+=("${domain}")
+            domains+=("$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')")
         fi
         ;;
     sni)
@@ -3110,18 +3189,27 @@ function current_config_uses_hy2() {
             jq -e 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")' >/dev/null
 }
 
-function handler_cdn_direct_cert() {
+function handler_cdn_direct_cert_role() {
     local action="${1:-prepare}"
+    local role="${2:-cdn}"
     local domain source cached_hostname custom_fullchain custom_privkey account_email
     local cert_dir=''
     local acme_exists=0 target_ready=0
     local acme_action='' acme_status=0
 
-    domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
-    cached_hostname="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertHostname // ""')"
-    custom_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertFullchain // ""')"
-    custom_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertPrivkey // ""')"
+    if [[ "${role}" == 'cdn' ]]; then
+        domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+        source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
+        cached_hostname="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertHostname // ""')"
+        custom_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertFullchain // ""')"
+        custom_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertPrivkey // ""')"
+    else
+        domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+        source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')"
+        cached_hostname="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertHostname // ""')"
+        custom_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertFullchain // ""')"
+        custom_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertPrivkey // ""')"
+    fi
 
     if [[ -z "${domain}" ]] || ! exec_check '--domain-format' "${domain}" >/dev/null 2>&1; then
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.domain_invalid")" >&2
@@ -3132,9 +3220,23 @@ function handler_cdn_direct_cert() {
         custom_fullchain=''
         custom_privkey=''
     fi
+    if [[ "${role}" == 'cdnDown' && -z "${source}" ]]; then
+        local uplink_source uplink_fullchain uplink_privkey
+        uplink_source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
+        uplink_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertFullchain // ""')"
+        uplink_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertPrivkey // ""')"
+        if [[ "${uplink_source}" == '2' ]] &&
+            validate_cdn_direct_certificate "${uplink_fullchain}" "${uplink_privkey}" "${domain}"; then
+            source='2'
+            custom_fullchain="${uplink_fullchain}"
+            custom_privkey="${uplink_privkey}"
+        fi
+    fi
 
     while [[ ! "${source}" =~ ^[12]$ ]]; do
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.prompt_cdn_direct")" >&2
+        local cert_prompt='prompt_cdn_direct'
+        [[ "${role}" == 'cdnDown' ]] && cert_prompt='prompt_cdn_down_direct'
+        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.${cert_prompt}")" >&2
         read -r source
         source="${source:-1}"
         if [[ ! "${source}" =~ ^[12]$ ]]; then
@@ -3256,18 +3358,187 @@ function handler_cdn_direct_cert() {
         "${cert_dir}/privkey.pem" \
         "${domain}" || return 1
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+        --arg role "${role}" \
         --arg hostname "${domain}" \
         --arg source "${source}" \
         --arg fullchain "${custom_fullchain}" \
         --arg privkey "${custom_privkey}" '
-        .xray.cdnCertHostname = $hostname |
-        .xray.cdnCertSource = $source |
-        .xray.cdnCertFullchain = $fullchain |
-        .xray.cdnCertPrivkey = $privkey |
+        if $role == "cdn" then
+            .xray.cdnCertHostname = $hostname |
+            .xray.cdnCertSource = $source |
+            .xray.cdnCertFullchain = $fullchain |
+            .xray.cdnCertPrivkey = $privkey
+        else
+            .xray.cdnDownCertHostname = $hostname |
+            .xray.cdnDownCertSource = $source |
+            .xray.cdnDownCertFullchain = $fullchain |
+            .xray.cdnDownCertPrivkey = $privkey
+        end |
         .xray.port = 443
     ')"
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.ready")" >&2
+}
+
+function handler_cdn_direct_cert() {
+    local action="${1:-prepare}"
+    handler_cdn_direct_cert_role "${action}" 'cdn' || return 1
+    local cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    if [[ -n "${cdn_down}" ]]; then
+        handler_cdn_direct_cert_role "${action}" 'cdnDown' || return 1
+    fi
+}
+
+function handler_change_cdn_down_direct() {
+    local old_config="${SCRIPT_CONFIG}"
+    local old_domain old_source new_domain runtime_snapshot=''
+    local runtime_state='missing' operation_status=0
+
+    old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    old_source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')"
+    exec_read 'cdn-down' || return 1
+    new_domain="${CONFIG_DATA['cdn-down']:-}"
+    [[ "${new_domain}" != "${old_domain}" ]] || return 0
+
+    if [[ -L "${XRAY_CONFIG_PATH}" ]]; then
+        return 1
+    elif [[ -f "${XRAY_CONFIG_PATH}" ]]; then
+        runtime_state='file'
+        runtime_snapshot="$(mktemp "${XRAY_CONFIG_PATH}.cdn-down.XXXXXX")" || return 1
+        cp -p -- "${XRAY_CONFIG_PATH}" "${runtime_snapshot}" || {
+            rm -f -- "${runtime_snapshot}"
+            return 1
+        }
+    elif [[ -e "${XRAY_CONFIG_PATH}" ]]; then
+        return 1
+    fi
+
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg domain "${new_domain}" '
+        .nginx.certificates //= {} |
+        .nginx.cdnDown = $domain |
+        .nginx.certificates.cdnDown = {hostname:"",source:"",fullchain:"",privkey:""} |
+        .xray.cdnDownCertHostname = "" |
+        .xray.cdnDownCertSource = "" |
+        .xray.cdnDownCertFullchain = "" |
+        .xray.cdnDownCertPrivkey = ""
+    ')" || operation_status=1
+    if [[ "${operation_status}" -eq 0 ]]; then
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || operation_status=1
+    fi
+    if [[ "${operation_status}" -eq 0 && -n "${new_domain}" ]]; then
+        handler_cdn_direct_cert_role 'prepare' 'cdnDown' || operation_status=1
+    fi
+    if [[ "${operation_status}" -eq 0 ]]; then
+        handler_xray_config 1 || operation_status=1
+    fi
+    if [[ "${operation_status}" -eq 0 ]]; then
+        handler_restart || operation_status=1
+    fi
+
+    if [[ "${operation_status}" -ne 0 ]]; then
+        SCRIPT_CONFIG="${old_config}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || true
+        if [[ "${runtime_state}" == 'file' ]]; then
+            cp -p -- "${runtime_snapshot}" "${XRAY_CONFIG_PATH}" || true
+        else
+            rm -f -- "${XRAY_CONFIG_PATH}" || true
+        fi
+        handler_restart >/dev/null 2>&1 || true
+        if [[ -n "${new_domain}" && "${new_domain}" != "${old_domain}" ]] &&
+            acme_manages_certificate "${new_domain}"; then
+            exec_ssl '--stop-renew' "--domain=${new_domain}" '--delete-cert' >/dev/null 2>&1 || true
+        fi
+        [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.config_fail")" >&2
+        return 1
+    fi
+
+    [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
+    if [[ -n "${old_domain}" && "${old_domain}" != "${new_domain}" && "${old_source}" == '1' ]] &&
+        acme_manages_certificate "${old_domain}"; then
+        exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+    fi
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
+}
+
+function handler_change_cdn_down_nginx() {
+    local old_config="${SCRIPT_CONFIG}"
+    local old_domain new_domain transaction_dir='' runtime_snapshot=''
+    local operation_status=0
+
+    old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    exec_read 'cdn-down' || return 1
+    new_domain="${CONFIG_DATA['cdn-down']:-}"
+    [[ "${new_domain}" != "${old_domain}" ]] || return 0
+    transaction_dir="$(create_change_domain_transaction "${old_domain}" "${new_domain}")" || return 1
+    if [[ -L "${XRAY_CONFIG_PATH}" || ( -e "${XRAY_CONFIG_PATH}" && ! -f "${XRAY_CONFIG_PATH}" ) ]]; then
+        cleanup_change_domain_transaction "${transaction_dir}" || true
+        return 1
+    elif [[ -f "${XRAY_CONFIG_PATH}" ]]; then
+        runtime_snapshot="$(mktemp "${XRAY_CONFIG_PATH}.cdn-down.XXXXXX")" || {
+            cleanup_change_domain_transaction "${transaction_dir}" || true
+            return 1
+        }
+        cp -p -- "${XRAY_CONFIG_PATH}" "${runtime_snapshot}" || {
+            rm -f -- "${runtime_snapshot}"
+            cleanup_change_domain_transaction "${transaction_dir}" || true
+            return 1
+        }
+    fi
+
+    # Defer deletion of the old renewal target until Xray has accepted the
+    # updated runtime; the outer transaction can then restore it intact.
+    handler_change_domain 'cdnDown' 'n' 'y' || operation_status=1
+    if [[ "${operation_status}" -eq 0 ]]; then
+        handler_web "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.web // "normal"')" 'n' || operation_status=1
+    fi
+    if [[ "${operation_status}" -eq 0 ]]; then
+        handler_xray_config 1 || operation_status=1
+    fi
+    if [[ "${operation_status}" -eq 0 ]]; then
+        handler_restart || operation_status=1
+    fi
+    if [[ "${operation_status}" -ne 0 ]]; then
+        SCRIPT_CONFIG="${old_config}"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || true
+        if [[ -n "${runtime_snapshot}" ]]; then
+            cp -p -- "${runtime_snapshot}" "${XRAY_CONFIG_PATH}" || true
+        else
+            rm -f -- "${XRAY_CONFIG_PATH}" || true
+        fi
+        rollback_change_domain_transaction "${transaction_dir}" 'y' || true
+        handler_restore_certificate_renewal_hooks >/dev/null 2>&1 || true
+        handler_restart >/dev/null 2>&1 || true
+        [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.config_fail")" >&2
+        return 1
+    fi
+    cleanup_change_domain_transaction "${transaction_dir}" || return 1
+    [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
+    if [[ -n "${old_domain}" && "${old_domain}" != "${new_domain}" ]] &&
+        acme_manages_certificate "${old_domain}"; then
+        exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+    fi
+    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
+}
+
+function handler_cleanup_stale_cdn_down() {
+    local stale_domain="$1"
+    local cleanup_mode="${2:-all}"
+    [[ -n "${stale_domain}" ]] || return 0
+    exec_check '--domain-format' "${stale_domain}" >/dev/null 2>&1 || return 1
+    if [[ "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')" ||
+        "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')" ]]; then
+        return 0
+    fi
+    if [[ "${cleanup_mode}" != 'renew-only' ]]; then
+        rm -f -- \
+            "${NGINX_CONFIG_DIR}/sites-available/${stale_domain}.conf" \
+            "${NGINX_CONFIG_DIR}/sites-enabled/${stale_domain}.conf" || return 1
+    fi
+    if acme_manages_certificate "${stale_domain}"; then
+        exec_ssl '--stop-renew' "--domain=${stale_domain}" '--delete-cert' || return 1
+    fi
 }
 
 # =============================================================================
@@ -3523,6 +3794,9 @@ function handler_prepare_protocol_services() {
     # 从脚本配置中读取当前配置标签
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
     local web="${1}" # 获取 Web 服务类型参数
+    if [[ "${CONFIG_TAG,,}" == 'cdn' ]]; then
+        validate_cdn_split_domains || return 1
+    fi
     if ! current_protocol_uses_nginx; then
         # Keep the old Nginx/Cloudreve stack online until the replacement
         # runtime JSON has passed validation. handler_restart performs the
@@ -3550,6 +3824,10 @@ function handler_prepare_protocol_services() {
             rm -f "${NGINX_CONFIG_DIR}/sites-enabled/${stale_domain}.conf"
         fi
         handler_change_domain 'cdn' 'n' 'n' || return 1
+        local cdn_down_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+        if [[ -n "${cdn_down_domain}" ]]; then
+            handler_change_domain 'cdnDown' 'n' 'n' || return 1
+        fi
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.nginx.domain = ""')"
         write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
         handler_web "${web}" 'n' || return 1
@@ -4277,7 +4555,10 @@ function handler_sync_nginx_xhttp_path() {
 
     case "${config_tag,,}" in
     cdn)
-        domains+=("$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')")
+        domains+=(
+            "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+            "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+        )
         ;;
     sni)
         domains+=(
@@ -4798,7 +5079,7 @@ function create_change_domain_transaction() {
 
     [[ -z "${old_domain}" ]] ||
         valid_change_domain_transaction_domain "${old_domain}" || return 1
-    valid_change_domain_transaction_domain "${new_domain}" || return 1
+    [[ -z "${new_domain}" ]] || valid_change_domain_transaction_domain "${new_domain}" || return 1
     transaction_parent="$(cd -P -- "$(dirname -- "${SCRIPT_CONFIG_PATH}")" && pwd -P)" ||
         return 1
     transaction_dir="$(
@@ -4811,7 +5092,7 @@ function create_change_domain_transaction() {
     fi
 
     [[ -z "${old_domain}" ]] || domains+=("${old_domain}")
-    if [[ "${new_domain}" != "${old_domain}" ]]; then
+    if [[ -n "${new_domain}" && "${new_domain}" != "${old_domain}" ]]; then
         domains+=("${new_domain}")
     fi
     for domain in "${domains[@]}"; do
@@ -4825,8 +5106,8 @@ function create_change_domain_transaction() {
     done
     if ! snapshot_change_domain_transaction_path \
             "${transaction_dir}" 'modules-enabled/stream.conf' ||
-        ! snapshot_change_domain_transaction_path \
-            "${transaction_dir}" "certs/${new_domain}"; then
+        { [[ -n "${new_domain}" ]] && ! snapshot_change_domain_transaction_path \
+            "${transaction_dir}" "certs/${new_domain}"; }; then
         cleanup_change_domain_transaction "${transaction_dir}" 2>/dev/null || true
         return 1
     fi
@@ -4891,26 +5172,74 @@ function handler_change_domain() {
     local stop_cert_service="${2:-y}"
     local restart_nginx="${3:-y}"
     case "${target_domain}" in
-    domain | cdn) ;;
+    domain | cdn | cdnDown) ;;
     *) return 1 ;;
     esac
     # 从脚本配置中获取旧域名
     local old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r --arg key "${target_domain}" '.nginx[$key] // ""')"
     # 如果 CONFIG_DATA 中没有新域名，且 stop_cert_service 为 "y"，则读取用户输入
-    if [[ -z "${CONFIG_DATA["${target_domain}"]:-}" && "${stop_cert_service}" == "y" ]]; then
+    local input_domain_key="${target_domain}"
+    [[ "${target_domain}" == 'cdnDown' ]] && input_domain_key='cdn-down'
+    if [[ -z "${CONFIG_DATA["${input_domain_key}"]+set}" && "${stop_cert_service}" == "y" ]]; then
         [[ "${old_domain}" ]] && exec_read 'only-change-domain'
-        exec_read "${target_domain}"
-    else
-        CONFIG_DATA["${target_domain}"]="${old_domain}"
+        exec_read "${input_domain_key}"
+    elif [[ -z "${CONFIG_DATA["${input_domain_key}"]+set}" ]]; then
+        CONFIG_DATA["${input_domain_key}"]="${old_domain}"
     fi
-    local new_domain="${CONFIG_DATA["${target_domain}"]}"
+    local new_domain="${CONFIG_DATA["${input_domain_key}"]:-}"
+    if [[ "${target_domain}" == 'cdnDown' ]]; then
+        local uplink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+        if [[ -n "${new_domain}" && "${new_domain,,}" == "${uplink_domain,,}" ]]; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+            return 1
+        fi
+    elif [[ "${target_domain}" == 'cdn' ]]; then
+        local downlink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+        if [[ -n "${downlink_domain}" && "${new_domain,,}" == "${downlink_domain,,}" ]]; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+            return 1
+        fi
+    fi
     local transaction_dir
     if ! transaction_dir="$(
         create_change_domain_transaction "${old_domain}" "${new_domain}"
     )"; then
         return 1
     fi
+    if [[ "${target_domain}" == 'cdnDown' && -z "${new_domain}" ]]; then
+        if [[ -n "${old_domain}" ]] && {
+            ! remove_change_domain_transaction_target "${NGINX_CONFIG_DIR}/sites-available/${old_domain}.conf" 'n' ||
+            ! remove_change_domain_transaction_target "${NGINX_CONFIG_DIR}/sites-enabled/${old_domain}.conf" 'n';
+        }; then
+            rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
+            return 1
+        fi
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
+            .nginx.certificates //= {} |
+            .nginx.cdnDown = "" |
+            .nginx.certificates.cdnDown = {hostname:"",source:"",fullchain:"",privkey:""} |
+            .xray.cdnDownCertHostname = "" |
+            .xray.cdnDownCertSource = "" |
+            .xray.cdnDownCertFullchain = "" |
+            .xray.cdnDownCertPrivkey = ""
+        ')"
+        if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
+            rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
+            return 1
+        fi
+        if [[ "${restart_nginx}" != 'n' ]] && ! handler_nginx_restart; then
+            rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
+            return 1
+        fi
+        if [[ -n "${old_domain}" && "${stop_cert_service}" == 'y' ]] && acme_manages_certificate "${old_domain}"; then
+            exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+        fi
+        cleanup_change_domain_transaction "${transaction_dir}" || return 1
+        return 0
+    fi
     local site_conf="${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf"
+    local template_domain="${target_domain}"
+    [[ "${target_domain}" == 'cdnDown' ]] && template_domain='cdn'
     local manage_site_conf="y"
     # 完整安装必须按当前模式重建站点。否则从 SNI 切换到 CDN 时会继续使用
     # Unix Socket 监听配置，看起来仍像 SNI 模式。
@@ -4940,7 +5269,7 @@ function handler_change_domain() {
         fi
         # 复制站点配置模板到 available 目录
         if ! cp -f \
-                "${CONFIG_DIR}/nginx/conf/sites-available/${target_domain}.example.com.conf" \
+                "${CONFIG_DIR}/nginx/conf/sites-available/${template_domain}.example.com.conf" \
                 "${site_conf}" ||
         # 替换配置文件中的 example.com 为实际域名
             ! sed -i "s|example.com|${new_domain}|g" "${site_conf}" ||
@@ -4950,7 +5279,7 @@ function handler_change_domain() {
                 "${transaction_dir}" "${restart_nginx}" || true
             return 1
         fi
-        if [[ "${CONFIG_TAG,,}" == "cdn" && "${target_domain}" == "cdn" ]]; then
+        if [[ "${CONFIG_TAG,,}" == "cdn" && ( "${target_domain}" == "cdn" || "${target_domain}" == "cdnDown" ) ]]; then
             if ! sed -i $'s|listen .*cdn_to_nginx.sock.*|listen 443 ssl reuseport;\\\n    listen [::]:443 ssl reuseport;|g' "${site_conf}" ||
                 ! sed -i '/set_real_ip_from[[:space:]]\+unix:;/d' "${site_conf}" ||
                 ! sed -i '/real_ip_header[[:space:]]\+proxy_protocol;/d' "${site_conf}"; then
@@ -4979,6 +5308,18 @@ function handler_change_domain() {
         cached_fullchain=''
         cached_privkey=''
     fi
+    if [[ "${target_domain}" == 'cdnDown' && -z "${cert_source_reply}" ]]; then
+        local uplink_cert_source uplink_fullchain uplink_privkey
+        uplink_cert_source="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certificates.cdn.source // ""')"
+        uplink_fullchain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certificates.cdn.fullchain // ""')"
+        uplink_privkey="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.certificates.cdn.privkey // ""')"
+        if [[ "${uplink_cert_source}" == '2' ]] &&
+            validate_cdn_direct_certificate "${uplink_fullchain}" "${uplink_privkey}" "${new_domain}"; then
+            cert_source_reply='2'
+            cached_fullchain="${uplink_fullchain}"
+            cached_privkey="${uplink_privkey}"
+        fi
+    fi
 
     while [[ ! "${cert_source_reply}" =~ ^[12]$ ]]; do
         if [[ -n "${cert_source_reply}" ]]; then
@@ -4989,6 +5330,8 @@ function handler_change_domain() {
             cert_prompt_key='prompt_sni_domain'
         elif [[ "${CONFIG_TAG,,}" == 'sni' ]]; then
             cert_prompt_key='prompt_sni_cdn'
+        elif [[ "${target_domain}" == 'cdnDown' ]]; then
+            cert_prompt_key='prompt_cdn_down'
         fi
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.${cert_prompt_key}")" >&2
         read -r cert_source_reply
@@ -5395,10 +5738,12 @@ function handler_web() {
     local config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
     local cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    local cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
     local site_domains=()
     case "${config_tag,,}" in
     cdn)
         [[ -n "${cdn}" ]] && site_domains+=("${cdn}")
+        [[ -n "${cdn_down}" ]] && site_domains+=("${cdn_down}")
         ;;
     sni)
         [[ -n "${domain}" ]] && site_domains+=("${domain}")
@@ -5866,6 +6211,14 @@ function main() {
         ;; # 更新 Nginx
     --nginx-purge) handler_nginx_purge ;;     # 卸载 Nginx
     --cdn-backend) handler_set_cdn_backend "$1" ;; # 设置 CDN 回源后端
+    --change-cdn-down)
+        if [[ "$(get_cdn_backend)" == 'xray' ]]; then
+            handler_change_cdn_down_direct
+        else
+            handler_change_cdn_down_nginx
+        fi
+        ;;
+    --cleanup-cdn-down) handler_cleanup_stale_cdn_down "$@" ;;
     --recover-runtime) handler_recover_runtime_services ;; # 按当前运行配置恢复服务
     --script-config)
         if [[ "${1,,}" == 'multi' ]]; then

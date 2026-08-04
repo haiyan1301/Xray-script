@@ -341,7 +341,7 @@ function menu_sni_config() {
 function menu_cdn_config() {
     echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.title") ------------------"
     local option
-    for option in 1 2 3 4 5 6; do
+    for option in 1 2 3 4 5 6 7; do
         echo -e "${GREEN}${option}.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.option${option}")"
     done
     echo -e "------------------------------------------------------"
@@ -351,6 +351,7 @@ function menu_cdn_direct_config() {
     echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.title") ------------------"
     echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option1")"
     echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option2")"
+    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option3")"
     echo -e "------------------------------------------------------"
 }
 

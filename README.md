@@ -19,7 +19,8 @@
 * CDN 与 SNI 是两个独立安装模式：CDN 只部署 XHTTP over TLS，并可选择 Nginx 或 Xray 直接 TLS 低资源后端；SNI 才启用 REALITY 与 SNI 分流
 * HY2 支持域名证书、短期 IP 证书和自定义证书，自定义证书会校验私钥及 SAN/CN
 * SNI 分享链接实现了上下行分离(上行 xhttp+TLS+CDN | 下行 xhttp+Reality、上行 xhttp+Reality | 下行 xhttp+TLS+CDN)
-* CDN/SNI 的站点证书分别保存，均支持自动申请或自行填写证书路径；Xray 直连 CDN 与 HY2 还会按域名/IP、自动/自定义来源隔离证书目录，避免旧续签任务覆盖当前证书
+   * CDN/SNI 的站点证书分别保存，均支持自动申请或自行填写证书路径；Xray 直连 CDN 与 HY2 还会按域名/IP、自动/自定义来源隔离证书目录，避免旧续签任务覆盖当前证书
+   * CDN 可选配置第二个下行域名，实现两个 CDN 分别承载上行和下行连接
 * Nginx 模板默认启用 limit.conf 基础防护（常见扫描与恶意 UA 拦截）
 * 规则配置与自填:
   * 禁止 bittorrent 流量(可选)
@@ -83,6 +84,29 @@
 ## 分享链接
 
 基于[VMessAEAD / VLESS 分享链接标准提案](https://github.com/XTLS/Xray-core/discussions/716)与[v2rayN](https://github.com/2dust/v2rayN)实现，如果其他客户端无法正常使用，请自行根据分享链接进行修改。
+
+CDN 独立模式的配置字段为 `.nginx.cdn`（上行）和 `.nginx.cdnDown`（可选下行，空字符串表示关闭）。两个域名必须不同，并且都要回源到同一个 Xray XHTTP 入站；UUID、path 和 mode 保持一致。旧配置缺少 `cdnDown` 时会按空值处理，不需要迁移。
+
+```json
+{
+  "nginx": {
+    "cdn": "upload-cdn.example.com",
+    "cdnDown": "download-cdn.example.net"
+  },
+  "xray": {
+    "path": "/same-xhttp-path",
+    "xhttpMode": "packet-up"
+  }
+}
+```
+
+填写 `cdnDown` 后，CDN 分享链接仍以 `.nginx.cdn` 作为 `address`、`serverName` 和 `host`，并在 URL 编码的 XHTTP `extra` 中生成 `downloadSettings`。下行设置的 `address`、`serverName`、`host` 来自 `.nginx.cdnDown`，使用 443/TLS/XHTTP、H2 ALPN、Chrome 指纹，并复用相同的 path 和 mode；现有 XHTTP 混淆字段会与它合并。没有下行域名时不会生成该字段，继续保持单 CDN 链接。
+
+`auto` 模式仍然可用，但它不保证客户端建立真正独立的上下行连接；需要明确上下行分离时优先选择 `packet-up` 或 `stream-up`，`stream-one` 不保证形成独立连接。
+
+Nginx 后端会为两个域名生成各自的 443 TLS 站点，两个站点使用相同的 XHTTP path、伪装站点和 Unix socket。Xray 直连后端只保留一个 XHTTP TLS 入站，并在同一个 `tlsSettings.certificates` 数组中写入一套或两套证书，由 SNI 选择证书。两侧可分别申请证书或分别填写自定义证书；同一张覆盖两个域名的证书可以复用。CDN 必须使用 HTTPS 回源（Cloudflare 使用 Full 或 Full (strict)，不能使用 Flexible）。
+
+证书元数据分别保存在 `.nginx.certificates.cdn` / `.nginx.certificates.cdnDown`，以及直连后端的 `.xray.cdnCertHostname/Source/Fullchain/Privkey` / `.xray.cdnDownCertHostname/Source/Fullchain/Privkey`。清除下行域名时会同时清理对应站点、元数据和自动续签任务。
 
 SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请自行在客户端修改。
 

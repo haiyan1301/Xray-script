@@ -19,6 +19,10 @@
     "cdnCertSource": "",
     "cdnCertFullchain": "",
     "cdnCertPrivkey": "",
+    "cdnDownCertHostname": "",
+    "cdnDownCertSource": "",
+    "cdnDownCertFullchain": "",
+    "cdnDownCertPrivkey": "",
     "uuid": "",
     "fallback": "",
     "trojan": "",
@@ -69,6 +73,7 @@
     "ca": "",
     "domain": "",
     "cdn": "",
+    "cdnDown": "",
     "web": "",
     "certificates": {
       "domain": {
@@ -78,6 +83,12 @@
         "privkey": ""
       },
       "cdn": {
+        "hostname": "",
+        "source": "",
+        "fullchain": "",
+        "privkey": ""
+      },
+      "cdnDown": {
         "hostname": "",
         "source": "",
         "fullchain": "",

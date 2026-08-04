@@ -178,7 +178,8 @@ function collect_nginx_artifact_domains() {
         domain_output="$(jq -c '
             [
                 (.nginx.domain // ""),
-                (.nginx.cdn // "")
+                (.nginx.cdn // ""),
+                (.nginx.cdnDown // "")
             ][]
         ' "${config_file}")" || return 1
         while IFS= read -r domain_json || [[ -n "${domain_json}" ]]; do
@@ -533,6 +534,12 @@ function rollback_protocol_install() {
     local script_snapshot_restored=1
     local runtime_snapshot_restored=1
     local cron_snapshot_restored=1
+    local attempted_cdn_down='' previous_cdn_down=''
+
+    if [[ -r "${SCRIPT_CONFIG_PATH}" ]]; then
+        attempted_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${SCRIPT_CONFIG_PATH}" 2>/dev/null || true)"
+    fi
+    previous_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${script_snapshot}" 2>/dev/null || true)"
 
     if ! restore_protocol_snapshot "${script_snapshot}" "${SCRIPT_CONFIG_PATH}"; then
         rollback_status=1
@@ -549,6 +556,10 @@ function rollback_protocol_install() {
             rollback_status=1
             nginx_artifacts_restored=0
         fi
+    fi
+    if [[ -n "${attempted_cdn_down}" && "${attempted_cdn_down}" != "${previous_cdn_down}" ]] &&
+        ! exec_handler '--cleanup-cdn-down' "${attempted_cdn_down}" 'renew-only'; then
+        rollback_status=1
     fi
     if [[ -n "${runtime_snapshot}" ]]; then
         exec_handler '--recover-runtime' >/dev/null 2>&1 ||
@@ -748,6 +759,13 @@ function install_protocol() (
     # The new runtime is healthy: from here on, cleanup/share failures are
     # post-commit warnings and must never roll back a working installation.
     transaction_committed=1
+    local old_cdn_down new_cdn_down
+    old_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${script_snapshot}")"
+    new_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${SCRIPT_CONFIG_PATH}")"
+    if [[ -n "${old_cdn_down}" && "${old_cdn_down}" != "${new_cdn_down}" ]] &&
+        ! exec_handler '--cleanup-cdn-down' "${old_cdn_down}"; then
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.post_install_cleanup_fail')" >&2
+    fi
     if ! cleanup_nginx_artifact_journal "${nginx_artifact_journal}"; then
         echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.post_install_cleanup_fail') ${nginx_artifact_journal}" >&2
     else
@@ -903,17 +921,19 @@ function processes_web_mode_config() {
     elif [[ "${cdn_backend}" == 'nginx' ]]; then
         case ${choose} in
         1) exec_handler '--change-domain' 'cdn' ;;
-        2) exec_handler '--renew-certificate' ;;
-        3) exec_handler '--nginx-update' ;;
-        4) exec_handler '--nginx-cron' ;;
-        5) change_web_backend ;;
-        6) exec_handler '--v3-reset' ;;
+        2) exec_handler '--change-cdn-down' ;;
+        3) exec_handler '--renew-certificate' ;;
+        4) exec_handler '--nginx-update' ;;
+        5) exec_handler '--nginx-cron' ;;
+        6) change_web_backend ;;
+        7) exec_handler '--v3-reset' ;;
         *) exit 0 ;;
         esac
     else
         case ${choose} in
         1) install_protocol 'CDN' ;;
-        2) exec_handler '--renew-certificate' ;;
+        2) exec_handler '--change-cdn-down' ;;
+        3) exec_handler '--renew-certificate' ;;
         *) exit 0 ;;
         esac
     fi

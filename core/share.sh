@@ -388,17 +388,15 @@ function build_xhttp_obfs_extra() {
 function setup_xhttp_obfs_extra() {
     local inbound_index=${1:-1}
     local obfs_json="$(build_xhttp_obfs_extra ${inbound_index})"
-    # 如果没有混淆参数则跳过
-    if [[ "$(echo "${obfs_json}" | jq 'length')" -eq 0 ]]; then
-        return 0
-    fi
-    if [[ -n "${XHTTP_EXTRA}" ]]; then
+    if [[ "$(echo "${obfs_json}" | jq 'length')" -gt 0 && -n "${XHTTP_EXTRA}" ]]; then
         # 合并到已有的 XHTTP_EXTRA (如包含 downloadSettings)
         XHTTP_EXTRA="$(echo "${XHTTP_EXTRA}" | jq --argjson obfs "${obfs_json}" '. + $obfs')"
-    else
+    elif [[ "$(echo "${obfs_json}" | jq 'length')" -gt 0 ]]; then
         XHTTP_EXTRA="${obfs_json}"
     fi
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode)
+    if [[ -n "${XHTTP_EXTRA}" ]]; then
+        XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode)
+    fi
 }
 
 function reset_share_state() {
@@ -524,7 +522,14 @@ function show_client_config() {
     local protocol_tag="${CLIENT_CONFIG[protocol_tag]:-${tag}}"
     # 使用 Here Document 打印客户端配置的标题和各项参数
     echo "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.client")(${tag}) ------------------"
-    echo "address          : ${CLIENT_CONFIG[remote_host]}"
+    if [[ "${protocol_tag,,}" == 'cdn' ]]; then
+        echo "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uplink_address") : ${CLIENT_CONFIG[remote_host]}"
+        if [[ -n "${CLIENT_CONFIG[cdn_down]:-}" ]]; then
+            echo "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.downlink_address") : ${CLIENT_CONFIG[cdn_down]}"
+        fi
+    else
+        echo "address          : ${CLIENT_CONFIG[remote_host]}"
+    fi
     echo "port             : ${CLIENT_CONFIG[port]}"
     echo "protocol         : ${CLIENT_CONFIG[protocol]}"
     if [[ "${protocol_tag,,}" == 'hy2' || "${protocol_tag,,}" == 'hysteria2' ]]; then
@@ -653,10 +658,41 @@ function get_xhttp_share_link() {
 # 返回值: 无 (直接修改全局变量 CLIENT_CONFIG 和 SHARE_LINK)
 # =============================================================================
 function get_cdn_share_link() {
+    local cdn_down xhttp_mode
     CLIENT_CONFIG[security]="tls"
-    CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
-    CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
-    CLIENT_CONFIG[host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    CLIENT_CONFIG[remote_host]="${CLIENT_CONFIG[server_name]}"
+    CLIENT_CONFIG[host]="${CLIENT_CONFIG[server_name]}"
+    cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    CLIENT_CONFIG[cdn_down]="${cdn_down}"
+
+    if [[ -n "${cdn_down}" ]]; then
+        xhttp_mode="${CLIENT_CONFIG[mode]:-auto}"
+        CLIENT_CONFIG[mode]="${xhttp_mode}"
+        XHTTP_EXTRA="$(jq -n \
+            --arg address "${cdn_down}" \
+            --arg path "${CLIENT_CONFIG[path]}" \
+            --arg mode "${xhttp_mode}" '
+            {
+                downloadSettings: {
+                    address: $address,
+                    port: 443,
+                    network: "xhttp",
+                    security: "tls",
+                    tlsSettings: {
+                        serverName: $address,
+                        alpn: ["h2"],
+                        fingerprint: "chrome"
+                    },
+                    xhttpSettings: {
+                        host: $address,
+                        path: $path,
+                        mode: $mode
+                    }
+                }
+            }
+        ')" || return 1
+    fi
 
     setup_xhttp_obfs_extra 1
     get_share_link_component
@@ -908,6 +944,11 @@ function show_config() {
         echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.extra") ------------------"
         # 使用 jq 格式化输出额外配置的 JSON
         echo "${XHTTP_EXTRA}" | jq -r '.'
+        if [[ "${CLIENT_CONFIG[protocol_tag]:-${CLIENT_CONFIG[tag]}}" =~ ^[Cc][Dd][Nn]$ &&
+            "${CLIENT_CONFIG[mode]:-auto}" =~ ^(auto|stream-one)$ &&
+            -n "${CLIENT_CONFIG[cdn_down]:-}" ]]; then
+            echo -e "${YELLOW}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split_mode_tip")${NC}"
+        fi
     fi
 
     # 显示分享链接
