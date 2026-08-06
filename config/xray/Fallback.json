@@ -132,7 +132,7 @@
           "xPaddingPlacement": "queryInHeader",
           "xPaddingMethod": "tokenish",
           "uplinkHTTPMethod": "POST",
-          "sessionPlacement": "header",
+          "sessionIDPlacement": "header",
           "sessionKey": "X-Session-ID",
           "seqPlacement": "header",
           "seqKey": "X-Request-Seq"

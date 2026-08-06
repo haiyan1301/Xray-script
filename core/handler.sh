@@ -745,7 +745,7 @@ function build_multi_node_json() {
         node="$(echo "${node}" | jq --arg password "${trojan_password}" '.trojan = $password')"
         ;;
     hy2)
-        local hy2_auth="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--password')}"
+        local hy2_auth="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}"
         node="$(echo "${node}" | jq --arg auth "${hy2_auth}" '.hy2auth = $auth')"
         ;;
     ss2022)
@@ -1440,7 +1440,7 @@ function handler_script_config() {
         ;;
     hy2)
         # 获取或生成 HY2 auth 密码
-        local HY2_AUTH="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--password')}"
+        local HY2_AUTH="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}"
         # 更新 HY2 auth 密码
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.xray.hy2auth = $auth')"
         ;;

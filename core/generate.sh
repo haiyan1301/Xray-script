@@ -127,6 +127,19 @@ function generate_password() {
 }
 
 # =============================================================================
+# 函数名称: generate_hy2_auth
+# 功能描述: 生成 HY2 auth 密码。HY2 auth 会直接出现在分享链接的 URI 用户信息中，
+#           只使用字母和数字，避免客户端将 @、#、%、: 等保留字符误解析为 URI 分隔符。
+# 参数: 无
+# 返回值: 生成的 HY2 auth 密码 (echo 输出)
+# =============================================================================
+function generate_hy2_auth() {
+    local length=$(generate_random 16 64)
+
+    cat /dev/urandom | tr -cd '0-9a-zA-Z' | fold -w $length | head -n 1
+}
+
+# =============================================================================
 # 函数名称: generate_target
 # 功能描述: 从配置文件 ${SCRIPT_CONFIG_PATH} 的 'target' 键中，
 #           随机选择一个键名作为目标。
@@ -388,6 +401,7 @@ function main() {
     --port) generate_port ;;                      # 生成端口
     --uuid) generate_uuid "$@" ;;                 # 生成 UUID
     --password) generate_password ;;              # 生成密码
+    --hy2-auth) generate_hy2_auth ;;              # 生成 HY2 auth 密码
     --target) generate_target "$@" ;;             # 生成目标
     --server-names) generate_server_names "$@" ;; # 生成服务器名称列表
     --x25519) generate_x25519 ;;                  # 生成 X25519 密钥对

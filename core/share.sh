@@ -369,8 +369,8 @@ function build_xhttp_obfs_extra() {
     echo "${XRAY_CONFIG}" | jq --argjson i "${inbound_index}" '
         .inbounds[$i].streamSettings.xhttpSettings // {} |
         {xPaddingObfsMode, xPaddingKey, xPaddingHeader, xPaddingPlacement,
-         xPaddingMethod, uplinkHTTPMethod, sessionPlacement, sessionKey,
-         seqPlacement, seqKey} |
+         xPaddingMethod, uplinkHTTPMethod, sessionIDPlacement,
+         sessionKey, seqPlacement, seqKey} |
         with_entries(select(.value != null))
     '
 }
@@ -566,7 +566,7 @@ function show_client_config() {
 # 返回值: 无 (直接修改一系列 SHARE_LINK_COMPONENT_* 全局变量)
 # =============================================================================
 function get_share_link_component() {
-    local uri_host encoded_trojan_password encoded_mkcp_seed
+    local uri_host encoded_trojan_password encoded_mkcp_seed xhttp_path
     uri_host="$(format_uri_host "${CLIENT_CONFIG[remote_host]}")"
     encoded_trojan_password="$(urlencode "${CLIENT_CONFIG[password]}")"
     encoded_mkcp_seed="$(urlencode "${CLIENT_CONFIG[seed]}")"
@@ -584,8 +584,10 @@ function get_share_link_component() {
     if [[ -n "${CLIENT_CONFIG[mldsa65_verify]}" ]]; then
         SHARE_LINK_COMPONENT_REALITY="${SHARE_LINK_COMPONENT_REALITY}&mldsa65Verify=${CLIENT_CONFIG[mldsa65_verify]}"
     fi
-    # 生成 XHTTP 网络传输路径参数部分 (&path=...&mode=...), 注意去除路径开头的 '/'
-    SHARE_LINK_COMPONENT_XHTTP="&path=%2F${CLIENT_CONFIG[path]#/}"
+    # 生成 XHTTP 网络传输路径参数部分 (&path=...&mode=...)
+    # path 必须整体编码；只手工替换开头的 '/' 会让 '?'、'&' 等字符破坏链接查询参数。
+    xhttp_path="${CLIENT_CONFIG[path]:-/}"
+    SHARE_LINK_COMPONENT_XHTTP="&path=$(urlencode "${xhttp_path}")"
     if [[ -n "${CLIENT_CONFIG[mode]}" ]]; then
         SHARE_LINK_COMPONENT_XHTTP="${SHARE_LINK_COMPONENT_XHTTP}&mode=${CLIENT_CONFIG[mode]}"
     fi
