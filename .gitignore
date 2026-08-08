@@ -1,6 +1,71 @@
-# Local test suites, fixtures, and validation scripts
+# ========================
+# AI 工具本地配置
+# ========================
+.claude/
+.agents/
+.gemini/
+.cursor/
+.copilot/
+COMMIT_MSG.txt
+
+# ========================
+# 测试文件（本地开发用）
+# ========================
 **/tests/
 **/fixtures/
 **/test-*.sh
 **/*_test.sh
 **/*.test.sh
+
+# ========================
+# OS 生成的文件
+# ========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ========================
+# 编辑器 / IDE
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.orig
+
+# ========================
+# 运行时 / 部署产物（不应入库）
+# ========================
+*.log
+*.pid
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# ========================
+# 归档 / 压缩包
+# ========================
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.gz
+!config/**/*.gz
+
+# ========================
+# 杂项
+# ========================
+*.bak
+node_modules/
