@@ -249,37 +249,90 @@ function install_docker() {
 }
 
 # =============================================================================
-# 函数名称: get_container_ip
-# 功能描述: 获取指定 Docker 容器的 IP 地址。
+# 函数名称: list_container_ips
+# 功能描述: 按 IPv4、IPv6 顺序列出指定 Docker 容器的唯一 IP 地址。
 # 参数:
 #   $1: 容器名称或 ID (container_name)
-# 返回值: 容器的 IP 地址 (echo 输出)
+# 返回值: 容器的 IP 地址列表（每行一个）
 # =============================================================================
-function get_container_ip() {
+function list_container_ips() {
     local container_name="$1"
-    local addresses
+    local networks
 
-    addresses="$(docker inspect --format='{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{println .GlobalIPv6Address}}{{end}}' "${container_name}" 2>/dev/null)" || return 1
-    addresses="$(printf '%s\n' "${addresses}" | awk 'NF && !seen[$0]++')"
-    [[ "$(printf '%s\n' "${addresses}" | awk 'NF {count++} END {print count + 0}')" -eq 1 ]] || return 1
-    printf '%s\n' "${addresses}"
+    networks="$(docker inspect --format='{{json .NetworkSettings.Networks}}' "${container_name}" 2>/dev/null)" || return 1
+    printf '%s\n' "${networks}" | jq -er '
+        to_entries | sort_by(.key) | map(.value) as $networks |
+        (
+            [$networks[].IPAddress | select(type == "string" and length > 0)] +
+            [$networks[].GlobalIPv6Address | select(type == "string" and length > 0)]
+        ) |
+        reduce .[] as $address
+            ([]; if index($address) == null then . + [$address] else . end) |
+        .[]
+    '
 }
+
+function probe_tcp_port() (
+    local address="$1"
+    local port="$2"
+    local probe_pid='' attempt status
+
+    function cleanup_tcp_probe() {
+        local exit_status=$?
+
+        trap - EXIT HUP INT TERM
+        if [[ -n "${probe_pid}" ]]; then
+            kill -TERM "${probe_pid}" 2>/dev/null || true
+            wait "${probe_pid}" >/dev/null 2>&1 || true
+        fi
+        exit "${exit_status}"
+    }
+
+    trap cleanup_tcp_probe EXIT
+    trap 'exit 1' HUP INT TERM
+
+    (
+        exec 3<>"/dev/tcp/${address}/${port}"
+    ) >/dev/null 2>&1 &
+    probe_pid=$!
+
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if ! kill -0 "${probe_pid}" 2>/dev/null; then
+            if wait "${probe_pid}" >/dev/null 2>&1; then
+                status=0
+            else
+                status=$?
+            fi
+            probe_pid=''
+            return "${status}"
+        fi
+        sleep 0.1
+    done
+
+    kill -TERM "${probe_pid}" 2>/dev/null || true
+    wait "${probe_pid}" >/dev/null 2>&1 || true
+    probe_pid=''
+    return 1
+)
 
 function wait_for_warp() {
     local container_name="$1"
-    local container_ip=''
-    local attempt
+    local container_ip='' addresses=''
+    local deadline=$((SECONDS + 30))
 
-    for ((attempt = 0; attempt < 30; attempt++)); do
+    while ((SECONDS < deadline)); do
         if [[ "$(docker inspect --format='{{.State.Running}}' "${container_name}" 2>/dev/null)" == 'true' ]]; then
-            container_ip="$(get_container_ip "${container_name}" 2>/dev/null || true)"
-            if [[ -n "${container_ip}" ]] &&
-                timeout 1 bash -c 'exec 3<>"/dev/tcp/$1/40001"' bash "${container_ip}" 2>/dev/null; then
-                printf '%s\n' "${container_ip}"
-                return 0
-            fi
+            addresses="$(list_container_ips "${container_name}" 2>/dev/null || true)"
+            while IFS= read -r container_ip; do
+                [[ -n "${container_ip}" ]] || continue
+                if probe_tcp_port "${container_ip}" 40001; then
+                    printf '%s\n' "${container_ip}"
+                    return 0
+                fi
+                ((SECONDS < deadline)) || return 1
+            done <<<"${addresses}"
         fi
-        sleep 1
+        ((SECONDS < deadline)) && sleep 1
     done
     return 1
 }
@@ -939,10 +992,10 @@ function clean_container_logs() {
 
 # =============================================================================
 # 函数名称: obtain_container_ip
-# 功能描述: 获取容器 IP 地址。
+# 功能描述: 获取 WARP 容器中当前可连接代理端口的 IP 地址。
 # 参数: 
 #   $1: 容器名称（默认获取 warp 容器 IP 地址）
-# 返回值: 容器的 IP 地址 (echo 输出)，或无输出
+# 返回值: 可连接 WARP 代理的容器 IP 地址，或无输出
 # =============================================================================
 function obtain_container_ip() {
     # 获取容器名称
@@ -950,7 +1003,7 @@ function obtain_container_ip() {
     # 获取容器的 IP 地址
     [[ "$(docker inspect --format='{{.State.Running}}' "${container_name}" 2>/dev/null)" == 'true' ]] || return 1
     local container_ip=''
-    container_ip="$(get_container_ip "${container_name}")" || return 1
+    container_ip="$(wait_for_warp "${container_name}")" || return 1
     [[ -n "${container_ip}" ]] || return 1
     printf '%s\n' "${container_ip}"
 }
@@ -990,7 +1043,7 @@ function main() {
     --start-cloudreve-v4) start_cloudreve_v4 ;;             # 启动 Cloudreve v4
     --stop-cloudreve-v4) stop_cloudreve_v4 ;;               # 停止 Cloudreve v4
     --clean-container-logs) clean_container_logs $2 ;;      # 清空容器日志文件
-    --obtain-container-ip) obtain_container_ip $2 ;;        # 获取容器 IP 地址
+    --obtain-container-ip) obtain_container_ip "$2" ;;      # 获取可连接的 WARP 容器 IP 地址
     esac
 }
 

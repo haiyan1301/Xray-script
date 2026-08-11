@@ -976,7 +976,7 @@ function generate_unique_multi_port() {
     local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     if [[ -z "${port}" ]]; then
-        if [[ ${#used_ports[@]} -gt 0 ]]; then
+        if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
             port="$(exec_generate '--port')"
         else
             port=443
@@ -2643,7 +2643,7 @@ function handler_multi_xray_config() {
     handler_apply_lan_config || return 1
 
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
 
@@ -2928,7 +2928,7 @@ function handler_xray_config() {
 
     # 只持久化用户管理的规则，模板和功能派生规则在每次构建时重建。
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
 
     # 仅在配置已通过 xray 校验并成功落盘后修改防火墙。
@@ -5094,28 +5094,34 @@ function handler_traffic() {
 # =============================================================================
 function handler_geodata_cron() {
     local IS_QUICK="${1:-0}" # 获取快速模式参数，默认为 0
+    local XRAY_STATUS=''
+    local current_crontab='' filtered_crontab=''
+
     # 从脚本配置中检查 Xray 状态 (版本)
-    local XRAY_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')"
+    XRAY_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')" || return 1
     # 如果 Xray 已安装
     if [[ -n "${XRAY_STATUS}" ]]; then
+        current_crontab="$(read_current_crontab)" || return 1
         # 如果非快速模式且 cron 已存在，则移除
-        if [[ "${IS_QUICK}" == "0" ]] && crontab -l | grep -q "${GEODATA_PATH}"; then
+        if [[ "${IS_QUICK}" == "0" ]] &&
+            printf '%s\n' "${current_crontab}" | grep -Fq -- "${GEODATA_PATH}"; then
             # 移除现有的 GeoData Cron 任务
-            crontab -l | grep -v "${GEODATA_PATH}" | crontab -
+            filtered_crontab="$(printf '%s\n' "${current_crontab}" |
+                grep -Fv -- "${GEODATA_PATH}" || true)"
+            printf '%s\n' "${filtered_crontab}" | sed '/^$/d' | crontab - || return 1
             # 打印关闭 Cron 任务的提示
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.close_cron")" >&2
         else
             # 设置 geodata.sh 脚本为可执行
-            chmod a+x "${GEODATA_PATH}"
-            # 添加新的 GeoData Cron 任务 (每天 6:30 执行)
-            (
-                crontab -l 2>/dev/null
-                echo "30 6 * * * ${GEODATA_PATH} >/dev/null 2>&1"
-            ) | awk '!x[$0]++' | crontab -
-            # 打印开启 Cron 任务的提示
+            chmod a+x "${GEODATA_PATH}" || return 1
+            # 先更新 GeoData，失败时保持原有 Cron 状态不变。
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.update")" >&2
-            # 立即执行一次 GeoData 更新
-            ${GEODATA_PATH}
+            "${GEODATA_PATH}" || return 1
+            # 添加新的 GeoData Cron 任务 (每天 6:30 执行)
+            {
+                [[ -n "${current_crontab}" ]] && printf '%s\n' "${current_crontab}"
+                printf '%s\n' "30 6 * * * ${GEODATA_PATH} >/dev/null 2>&1"
+            } | awk 'NF && !seen[$0]++' | crontab - || return 1
             # 打印已开启 Cron 任务的提示
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.open_cron")" >&2
         fi
@@ -7148,11 +7154,10 @@ function handler_reverse_share() {
 # 功能描述: 执行一键快速安装流程。
 #           1. 调用 handler_script_config 配置脚本。
 #           2. 调用 handler_install 安装 Xray。
-#           3. 调用 handler_xray_config 配置 Xray。
-#           4. 添加默认的阻止规则 (BT, CN IP, AD Domain)。
-#           5. 调用 handler_geodata_cron 更新 GeoData 并设置 Cron。
-#           6. 调用 handler_restart 重启 Xray 服务。
-#           7. 调用 handler_share 显示分享链接。
+#           3. 调用 handler_geodata_cron 更新 GeoData 并设置 Cron。
+#           4. 调用 handler_xray_config 配置 Xray 并持久化默认阻止规则。
+#           5. 调用 handler_restart 重启 Xray 服务。
+#           6. 调用 handler_share 显示分享链接。
 # 参数:
 #   $1: quick_install_type - 速安装类型 (例如 Vision, XHTTP, Fallback)，默认为 Vision
 # 返回值: 无 (通过调用一系列处理器函数执行完整安装流程)
@@ -7171,6 +7176,11 @@ function handler_quick_install() {
     if ! cmd_exists 'xray'; then
         run_github_proxy_choice 'n' || return 1
     fi
+    # 快速安装固定启用默认规则，并由 handler_xray_config 一次性提交。
+    CONFIG_DATA['rules']='Y'
+    CONFIG_DATA['block-bt']='Y'
+    CONFIG_DATA['block-cn']='Y'
+    CONFIG_DATA['block-ad']='Y'
     # 配置脚本 (设置各种参数)
     handler_script_config "${quick_install_type}" || return 1
     # 安装 Xray (使用 release 版本)
@@ -7183,23 +7193,19 @@ function handler_quick_install() {
     if protocol_uses_reality "${quick_install_type}"; then
         handler_reality_key_config || return 1
     fi
+    # 先完成 GeoData 更新，避免其失败发生在新运行配置提交之后。
+    handler_geodata_cron 1 || return 1
     # 配置 Xray (生成并写入 config.json)
     if protocol_uses_vless_enc "${quick_install_type}"; then
         handler_xray_config || return 1
     else
         handler_xray_config 1 || return 1
     fi
-    # 添加默认的阻止规则
-    add_rule "bt" "protocol" "bittorrent" "block" 1
-    add_rule "cn-ip" "ip" "geoip:cn" "block" "after" "private-ip"
-    add_rule "ad-domain" "domain" "geosite:category-ads-all" "block"
-    # 更新 GeoData 并设置 Cron 任务 (快速模式)
-    handler_geodata_cron 1
     # 重启 Xray 服务
     handler_restart || return 1
     handler_restore_certificate_renewal_hooks || return 1
     # 显示分享链接
-    handler_share
+    handler_share || return 1
 }
 
 # =============================================================================
