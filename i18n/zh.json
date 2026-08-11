@@ -34,7 +34,7 @@
       "configuration": "配置管理",
       "option1": "安装或重装节点",
       "option2": "仅更新 Xray 内核",
-      "option3": "卸载",
+      "option3": "卸载 Xray（保留 Nginx/证书/Docker）",
       "option4": "启动",
       "option5": "停止",
       "option6": "重启",
@@ -98,7 +98,7 @@
       "option1": "Nginx 默认页面",
       "option2": "Cloudreve v3版",
       "option3": "Cloudreve v4版",
-      "option0": "取消",
+      "option0": "取消本次安装",
       "info1": "Cloudreve v3 版本自动生成管理员账号",
       "info2": "Cloudreve v4 版本首个注册的账户会被设置为管理员"
     },
@@ -106,7 +106,7 @@
       "title": "选择 CDN 回源后端",
       "option1": "Nginx TLS 反向代理（含伪装站点）",
       "option2": "Xray 直接 TLS（低资源 VPS）",
-      "option0": "取消",
+      "option0": "取消本次安装",
       "info1": "保留伪装站点、Cloudreve 和 Nginx 管理功能",
       "info2": "停止并禁用 Nginx，由 Xray 直接监听 443，可减少内存和后台进程",
       "warning": "直连模式要求 CDN 使用 HTTPS 回源（Full/Strict，不能用 Flexible）；流式 XHTTP 请在 CDN 开启 HTTP/2/gRPC，并建议将源站 443 仅放行 CDN 回源 IP。"
@@ -260,6 +260,8 @@
       "unsupported": "该选项不可用于多节点模式，请选择列表中的 1-7。",
       "node_count_prompt": "要创建多少个节点？[2]: ",
       "node_count_invalid": "请输入 2 到 100 之间的整数。",
+      "port_prompt": "端口留空时自动分配：首个可用节点使用 443，后续节点使用随机端口。",
+      "port_assigned": "已分配端口: {port}",
       "port_conflict": "端口 {port} 为保留端口或已分配给其他节点，正在生成随机端口。",
       "hy2_shared_cert": "多节点模式下的 HY2 节点共用一套 TLS 证书。",
       "no_nodes": "多节点配置中没有节点。"
@@ -356,6 +358,7 @@
     },
     "lan": {
       "error": "错误",
+      "invalid_state": "异地组网状态不完整或格式无效",
       "not_enabled": "异地组网尚未启用，请先初始化 Hub",
       "already_enabled": "异地组网 Hub 已启用",
       "xray_required": "需要先安装支持 TUN 的 Xray-core",

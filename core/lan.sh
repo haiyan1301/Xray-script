@@ -156,19 +156,39 @@ function lan_strip_xray_config() {
     XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq '
         .inbounds = ((.inbounds // []) | map(select((.tag // "") != "lan-hub-in"))) |
         .routing.rules = ((.routing.rules // []) | map(select(
-            (.ruleTag // "") != "lan-deny-undeclared" and
-            (((.ruleTag // "") | startswith("lan-route-")) | not)
+            (((.ruleTag // "") | startswith("lan-")) | not)
         )))
-    ')"
+    ')" || return 1
 }
 
 function handler_apply_lan_config() {
-    lan_strip_xray_config
+    lan_strip_xray_config || return 1
 
     local enabled site_count
     enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')"
     site_count="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.lan.sites // []) | length')"
     [[ "${enabled}" -eq 1 && "${site_count}" -gt 0 ]] || return 0
+
+    if ! echo "${SCRIPT_CONFIG}" | jq -e '
+        .xray.lan as $lan |
+        ($lan.port | type) == "number" and $lan.port >= 1 and $lan.port <= 65535 and
+        all([$lan.target,$lan.serverName,$lan.serverAddress,$lan.privateKey,$lan.publicKey,$lan.shortId][];
+            type == "string" and length > 0
+        ) and
+        ($lan.sites | type) == "array" and ($lan.sites | length) > 0 and
+        all($lan.sites[];
+            (.id | type) == "string" and
+            (.id | test("^[a-z0-9][a-z0-9_-]{0,31}$")) and
+            (.accessUuid | type) == "string" and (.accessUuid | length) > 0 and
+            (.reverseUuid | type) == "string" and (.reverseUuid | length) > 0 and
+            (.reverseTag | type) == "string" and (.reverseTag | length) > 0 and
+            (.localCidrs | type) == "array" and (.localCidrs | length) > 0 and
+            all(.localCidrs[]; type == "string" and length > 0)
+        )
+    ' >/dev/null; then
+        echo -e "${RED}[LAN]${NC} $(lan_text invalid_state)" >&2
+        return 1
+    fi
 
     local port target server_name private_key short_id sites clients inbound route_rules block_rule
     port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.port')"
@@ -268,37 +288,19 @@ function handler_lan_open_firewall() {
     [[ "${enabled}" -eq 1 ]] || return 0
     port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.port // empty')"
     [[ -n "${port}" ]] || return 0
-    if command -v ufw &>/dev/null; then
-        ufw allow "${port}"/tcp >/dev/null 2>&1
-    elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="${port}"/tcp >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-    elif ! iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; then
-        iptables -I INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
-        ip6tables -I INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || true
-    fi
+    open_owned_firewall_port 'lan' "${port}" tcp
 }
 
 function handler_lan_close_firewall() {
     local port="$1"
-    [[ -n "${port}" ]] || return 0
-    if command -v ufw &>/dev/null; then
-        ufw delete allow "${port}"/tcp >/dev/null 2>&1 || true
-    elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --remove-port="${port}"/tcp >/dev/null 2>&1 || true
-        firewall-cmd --reload >/dev/null 2>&1 || true
-    else
-        while iptables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; do
-            iptables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || break
-        done
-        while ip6tables -C INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null; do
-            ip6tables -D INPUT -p tcp --dport "${port}" -j ACCEPT 2>/dev/null || break
-        done
-    fi
+    local defer_write="${2:-0}"
+    close_owned_firewall_ports 'lan' "${port}" "${defer_write}"
 }
 
 function handler_lan_add_site() {
+    local defer_commit="${1:-0}"
     local enabled site_id site_name cidr_input cidrs_result parse_status mode_choice mode lan_interface access_uuid reverse_uuid reverse_tag site
+    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config=''
     enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')"
     if [[ "${enabled}" -ne 1 ]]; then
         echo -e "${RED}[$(lan_text error)]${NC} $(lan_text not_enabled)" >&2
@@ -351,8 +353,9 @@ function handler_lan_add_site() {
         done
     fi
 
-    access_uuid="$(exec_generate '--uuid')"
-    reverse_uuid="$(exec_generate '--uuid')"
+    access_uuid="$(exec_generate '--uuid')" || return 1
+    reverse_uuid="$(exec_generate '--uuid')" || return 1
+    [[ -n "${access_uuid}" && -n "${reverse_uuid}" ]] || return 1
     reverse_tag="lan-reverse-${site_id}"
     site="$(jq -n \
         --arg id "${site_id}" \
@@ -374,8 +377,15 @@ function handler_lan_add_site() {
             reverseTag: $reverseTag
         }
     ')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson site "${site}" '.xray.lan.sites += [$site]')"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson site "${site}" '.xray.lan.sites += [$site]')" || return 1
+    if [[ "${defer_commit}" == '1' ]]; then
+        return 0
+    fi
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || {
+        SCRIPT_CONFIG="${previous_script_config}"
+        return 1
+    }
+    apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}" || return 1
     handler_lan_export_all >/dev/null 2>&1 || true
     echo -e "${GREEN}[LAN]${NC} $(lan_text site_added): ${site_id}" >&2
     echo -e "${YELLOW}[LAN]${NC} $(lan_text redeploy_required)" >&2
@@ -383,6 +393,7 @@ function handler_lan_add_site() {
 
 function handler_lan_enable() {
     local enabled xray_version port target server_name server_address key_pair private_key public_key short_id
+    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config=''
     enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')"
     if [[ "${enabled}" -eq 1 ]]; then
         echo -e "${YELLOW}[LAN]${NC} $(lan_text already_enabled)" >&2
@@ -452,21 +463,40 @@ function handler_lan_enable() {
             mtu: (.xray.lan.mtu // 1400),
             sites: (.xray.lan.sites // [])
         })
-    ')"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-    echo -e "${GREEN}[LAN]${NC} $(lan_text enabled)" >&2
+    ')" || return 1
 
     if [[ "$(echo "${SCRIPT_CONFIG}" | jq '.xray.lan.sites | length')" -eq 0 ]]; then
-        handler_lan_add_site
+        if ! handler_lan_add_site 1; then
+            SCRIPT_CONFIG="${previous_script_config}"
+            return 1
+        fi
     fi
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || {
+        SCRIPT_CONFIG="${previous_script_config}"
+        return 1
+    }
+    apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}" || return 1
+    handler_lan_export_all >/dev/null 2>&1 || true
+    echo -e "${GREEN}[LAN]${NC} $(lan_text enabled)" >&2
 }
 
 function handler_lan_disable() {
-    local port
+    local port enabled previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
+    enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')"
+    [[ "${enabled}" -eq 1 ]] || return 0
     port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.port // empty')"
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.lan.enabled = 0')"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-    handler_lan_close_firewall "${port}"
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    handler_lan_close_firewall "${port}" 1 || return 1
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.lan.enabled = 0')" || {
+        restore_owned_firewall_feature_state \
+            "${previous_script_config}" 'lan' "${port}" tcp || true
+        return 1
+    }
+    if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+        restore_owned_firewall_feature_state \
+            "${previous_script_config}" 'lan' "${port}" tcp || true
+        return 1
+    fi
     echo -e "${GREEN}[LAN]${NC} $(lan_text disabled)" >&2
 }
 
@@ -484,18 +514,43 @@ function handler_lan_list() {
 }
 
 function handler_lan_remove_site() {
-    local site_id count
+    local site_id count site_count enabled port close_firewall=0
+    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
     handler_lan_list >&2
     printf "${GREEN}[LAN]${NC} %s" "$(lan_text remove_prompt)" >&2
     read -r site_id
     site_id="${site_id,,}"
+    lan_validate_site_id "${site_id}" || return 1
     count="$(echo "${SCRIPT_CONFIG}" | jq --arg id "${site_id}" '[.xray.lan.sites[]? | select(.id == $id)] | length')"
     if [[ "${count}" -eq 0 ]]; then
         echo -e "${RED}[LAN]${NC} $(lan_text site_not_found)" >&2
         return 1
     fi
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg id "${site_id}" '.xray.lan.sites |= map(select(.id != $id))')"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    site_count="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.lan.sites // []) | length')" || return 1
+    enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')" || return 1
+    port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.port // empty')" || return 1
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    if [[ "${site_count}" -eq 1 && "${enabled}" -eq 1 ]]; then
+        handler_lan_close_firewall "${port}" 1 || return 1
+        close_firewall=1
+    fi
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg id "${site_id}" '
+        .xray.lan.sites |= map(select(.id != $id)) |
+        if (.xray.lan.sites | length) == 0 then .xray.lan.enabled = 0 else . end
+    ')" || {
+        if [[ "${close_firewall}" -eq 1 ]]; then
+            restore_owned_firewall_feature_state \
+                "${previous_script_config}" 'lan' "${port}" tcp || true
+        fi
+        return 1
+    }
+    if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+        if [[ "${close_firewall}" -eq 1 ]]; then
+            restore_owned_firewall_feature_state \
+                "${previous_script_config}" 'lan' "${port}" tcp || true
+        fi
+        return 1
+    fi
     rm -rf "${SCRIPT_CONFIG_DIR}/lan/${site_id}"
     rm -f "${SCRIPT_CONFIG_DIR}/lan/xray-lan-${site_id}.tar.gz"
     handler_lan_export_all >/dev/null 2>&1 || true
@@ -518,6 +573,7 @@ function handler_lan_export_site() {
         read -r site_id
     fi
     site_id="${site_id,,}"
+    lan_validate_site_id "${site_id}" || return 1
     site="$(echo "${SCRIPT_CONFIG}" | jq -c --arg id "${site_id}" '.xray.lan.sites[]? | select(.id == $id)')"
     if [[ -z "${site}" ]]; then
         echo -e "${RED}[LAN]${NC} $(lan_text site_not_found)" >&2

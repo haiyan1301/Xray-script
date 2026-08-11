@@ -286,6 +286,270 @@ function write_xray_runtime_config() {
     sync
 }
 
+function commit_xray_and_script_config() {
+    local runtime_content="$1"
+    local script_content="$2"
+    local runtime_temp script_temp runtime_backup='' script_backup=''
+    local runtime_existed=0 script_existed=0 validation_output
+    local runtime_restore_failed=0
+
+    if [[ -z "${runtime_content}" ]] || ! printf '%s\n' "${runtime_content}" | jq empty 2>/dev/null ||
+        [[ -z "${script_content}" ]] || ! printf '%s\n' "${script_content}" | jq empty 2>/dev/null; then
+        echo -e "${RED}[Error]${NC} Refusing to commit invalid JSON configuration." >&2
+        return 1
+    fi
+
+    runtime_temp="$(mktemp "${XRAY_CONFIG_PATH}.tmp.XXXXXX.json")" || return 1
+    script_temp="$(mktemp "${SCRIPT_CONFIG_PATH}.tmp.XXXXXX")" || {
+        rm -f -- "${runtime_temp}"
+        return 1
+    }
+    if ! printf '%s\n' "${runtime_content}" >"${runtime_temp}" ||
+        ! printf '%s\n' "${script_content}" >"${script_temp}"; then
+        rm -f -- "${runtime_temp}" "${script_temp}"
+        return 1
+    fi
+
+    if cmd_exists xray && [[ "${XRAY_CONFIG_VALIDATE:-1}" != '0' ]]; then
+        if ! validation_output="$(xray run -test -c "${runtime_temp}" 2>&1)"; then
+            echo -e "${RED}[Xray]${NC} Configuration validation failed:" >&2
+            printf '%s\n' "${validation_output}" >&2
+            rm -f -- "${runtime_temp}" "${script_temp}"
+            return 1
+        fi
+    fi
+
+    if [[ -e "${XRAY_CONFIG_PATH}" ]]; then
+        runtime_existed=1
+        chmod --reference="${XRAY_CONFIG_PATH}" "${runtime_temp}" 2>/dev/null || chmod 644 "${runtime_temp}"
+        chown --reference="${XRAY_CONFIG_PATH}" "${runtime_temp}" 2>/dev/null || true
+        runtime_backup="$(mktemp "${XRAY_CONFIG_PATH}.rollback.XXXXXX")" || {
+            rm -f -- "${runtime_temp}" "${script_temp}"
+            return 1
+        }
+        cp -p -- "${XRAY_CONFIG_PATH}" "${runtime_backup}" || {
+            rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}"
+            return 1
+        }
+    elif id -u xray >/dev/null 2>&1; then
+        chown root:xray "${runtime_temp}" 2>/dev/null || true
+        chmod 640 "${runtime_temp}"
+    else
+        chmod 644 "${runtime_temp}"
+    fi
+
+    chmod 600 "${script_temp}"
+    if [[ -e "${SCRIPT_CONFIG_PATH}" ]]; then
+        script_existed=1
+        script_backup="$(mktemp "${SCRIPT_CONFIG_PATH}.rollback.XXXXXX")" || {
+            rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}"
+            return 1
+        }
+        cp -p -- "${SCRIPT_CONFIG_PATH}" "${script_backup}" || {
+            rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}" "${script_backup}"
+            return 1
+        }
+    fi
+
+    if ! mv -f -- "${runtime_temp}" "${XRAY_CONFIG_PATH}"; then
+        rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}" "${script_backup}"
+        return 1
+    fi
+    if ! mv -f -- "${script_temp}" "${SCRIPT_CONFIG_PATH}"; then
+        if [[ "${runtime_existed}" -eq 1 ]]; then
+            if mv -f -- "${runtime_backup}" "${XRAY_CONFIG_PATH}"; then
+                runtime_backup=''
+            else
+                runtime_restore_failed=1
+            fi
+        else
+            rm -f -- "${XRAY_CONFIG_PATH}" || runtime_restore_failed=1
+        fi
+        if [[ "${script_existed}" -eq 0 ]]; then
+            rm -f -- "${SCRIPT_CONFIG_PATH}"
+        fi
+        rm -f -- "${script_temp}" "${script_backup}"
+        if [[ "${runtime_restore_failed}" -ne 0 ]]; then
+            echo -e "${RED}[Error]${NC} Failed to restore the previous Xray runtime configuration." >&2
+            if [[ -n "${runtime_backup}" ]]; then
+                printf 'Xray runtime recovery copy retained at: %s\n' "${runtime_backup}" >&2
+            else
+                printf 'Uncommitted Xray runtime remains at: %s\n' "${XRAY_CONFIG_PATH}" >&2
+            fi
+        fi
+        return 1
+    fi
+
+    rm -f -- "${runtime_backup}" "${script_backup}"
+    sync
+}
+
+function user_route_rules() {
+    jq -c '
+        def is_derived_rule:
+            ((.ruleTag // "") | tostring) as $tag |
+            $tag == "api" or
+            $tag == "private-ip" or
+            $tag == "reverse-portal" or
+            ($tag | startswith("anti-steal-")) or
+            ($tag | startswith("lan-"));
+        if type == "array" then map(select(is_derived_rule | not)) else [] end
+    '
+}
+
+function merge_user_route_rules() {
+    local rules="$1"
+
+    XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq --argjson rules "${rules}" '
+        reduce $rules[] as $rule (.;
+            ($rule.ruleTag // "") as $tag |
+            if any(.routing.rules[]?; (.ruleTag // "") == $tag) then
+                .routing.rules |= map(if (.ruleTag // "") == $tag then $rule else . end)
+            else
+                .routing.rules += [$rule]
+            end
+        )
+    ')" || return 1
+}
+
+function normalize_and_validate_xray_state() {
+    SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '
+        def state_bit($value):
+            if $value == null or $value == "" then 0
+            else ($value | tonumber? // -1)
+            end;
+        .xray.warp = state_bit(.xray.warp) |
+        .xray.reverse = state_bit(.xray.reverse) |
+        .xray.rules.reset = state_bit(.xray.rules.reset) |
+        .xray.rules.bt = state_bit(.xray.rules.bt) |
+        .xray.rules.cn = state_bit(.xray.rules.cn) |
+        .xray.rules.ad = state_bit(.xray.rules.ad) |
+        .xray.serverNames = (.xray.serverNames // []) |
+        .xray.shortIds = (.xray.shortIds // []) |
+        .xray.nodes = (.xray.nodes // []) |
+        .xray.firewallRules = (.xray.firewallRules // []) |
+        .rules = (.rules // []) |
+        if (.xray.lan // null) == null then
+            .xray.lan = {enabled:0,role:"hub",port:9443,target:"",serverName:"",serverAddress:"",privateKey:"",publicKey:"",shortId:"",tunName:"xray0",mtu:1400,sites:[]}
+        else
+            .xray.lan.enabled = state_bit(.xray.lan.enabled) |
+            .xray.lan.sites = (.xray.lan.sites // [])
+        end
+    ')" || return 1
+
+    if ! printf '%s\n' "${SCRIPT_CONFIG}" | jq -e '
+        def bit: type == "number" and (. == 0 or . == 1);
+        def port: type == "number" and floor == . and . >= 1 and . <= 65535;
+        def string_array: type == "array" and all(.[]; type == "string");
+        .xray as $x |
+        ($x | type) == "object" and
+        ($x.tag | type) == "string" and ($x.tag | length) > 0 and
+        ($x.port | port) and
+        ($x.warp | bit) and
+        ($x.reverse | bit) and
+        ($x.rules | type) == "object" and
+        ($x.rules.reset | bit) and ($x.rules.bt | bit) and
+        ($x.rules.cn | bit) and ($x.rules.ad | bit) and
+        ($x.serverNames | string_array) and ($x.shortIds | string_array) and
+        (($x.path // "") | type) == "string" and
+        (($x.privateKey // "") | type) == "string" and
+        (($x.target // "") | type) == "string" and
+        ($x.nodes | type) == "array" and
+        ($x.firewallRules | type) == "array" and
+        all($x.firewallRules[];
+            type == "object" and (.feature | type) == "string" and (.feature | length) > 0 and
+            (.backend | IN("ufw", "firewalld", "iptables")) and (.port | port) and
+            (.protocol | IN("tcp", "udp")) and
+            ((.ipv4 | type) == "boolean") and ((.ipv6 | type) == "boolean") and
+            (if .backend == "iptables" then (.ipv4 or .ipv6) else true end)
+        ) and
+        (.rules | type) == "array" and
+        all(.rules[]; type == "object" and (.ruleTag | type) == "string" and (.ruleTag | length) > 0) and
+        (if $x.reverse == 1 then
+            ($x.reversePort | port) and
+            ($x.reverseTarget | type) == "string" and ($x.reverseTarget | length) > 0 and
+            ($x.reverseUuid | type) == "string" and ($x.reverseUuid | length) > 0
+        else true end) and
+        ($x.lan | type) == "object" and ($x.lan.enabled | bit) and
+        (($x.lan.role // "") | type) == "string" and
+        (($x.lan.port // 9443) | port) and
+        (($x.lan.target // "") | type) == "string" and
+        (($x.lan.serverName // "") | type) == "string" and
+        (($x.lan.serverAddress // "") | type) == "string" and
+        (($x.lan.privateKey // "") | type) == "string" and
+        (($x.lan.publicKey // "") | type) == "string" and
+        (($x.lan.shortId // "") | type) == "string" and
+        (($x.lan.tunName // "xray0") | type) == "string" and
+        (($x.lan.mtu // 1400) | type) == "number" and
+        ($x.lan.sites | type) == "array"
+    ' >/dev/null; then
+        echo -e "${RED}[Error]${NC} Invalid or incomplete Xray script state." >&2
+        return 1
+    fi
+
+    if [[ "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse')" -eq 1 ]]; then
+        local reverse_target config_tag
+        reverse_target="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseTarget')" || return 1
+        config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')" || return 1
+        if ! parse_host_port "${reverse_target}"; then
+            echo -e "${RED}[Error]${NC} Invalid reverse proxy target: ${reverse_target}" >&2
+            return 1
+        fi
+        if ! protocol_supports_reverse "${config_tag}"; then
+            echo -e "${RED}[Error]${NC} Reverse proxy is not supported by ${config_tag}." >&2
+            return 1
+        fi
+    fi
+}
+
+function apply_xray_state_transaction() {
+    local previous_script_config="$1"
+    local previous_xray_config="$2"
+    local candidate_script_config new_firewall_rules rule rollback_script_config
+    local failed_firewall_rules='[]'
+
+    if handler_xray_config 1 && handler_restart; then
+        return 0
+    fi
+
+    candidate_script_config="${SCRIPT_CONFIG}"
+    new_firewall_rules="$(jq -n \
+        --argjson previous "${previous_script_config}" \
+        --argjson candidate "${candidate_script_config}" '
+        [($candidate.xray.firewallRules // [])[] as $rule |
+            select(any(($previous.xray.firewallRules // [])[]?;
+                .feature == $rule.feature and .backend == $rule.backend and
+                .port == $rule.port and .protocol == $rule.protocol
+            ) | not) | $rule]
+    ' 2>/dev/null || echo '[]')"
+    while IFS= read -r rule; do
+        [[ -n "${rule}" ]] || continue
+        if ! remove_owned_firewall_rule "${rule}"; then
+            restore_owned_firewall_rule "${rule}" || true
+            failed_firewall_rules="$(echo "${failed_firewall_rules}" | jq --argjson rule "${rule}" '. + [$rule]')" ||
+                failed_firewall_rules='[]'
+        fi
+    done < <(echo "${new_firewall_rules}" | jq -c '.[]' 2>/dev/null)
+
+    rollback_script_config="$(jq -n \
+        --argjson previous "${previous_script_config}" \
+        --argjson failed "${failed_firewall_rules}" '
+        $previous |
+        .xray.firewallRules = (((.xray.firewallRules // []) + $failed) |
+            unique_by([.feature,.backend,.port,.protocol]))
+    ')" || rollback_script_config="${previous_script_config}"
+    if [[ "$(echo "${failed_firewall_rules}" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]]; then
+        echo 'Some newly opened firewall rules could not be removed; ownership records were retained.' >&2
+    fi
+    SCRIPT_CONFIG="${rollback_script_config}"
+    XRAY_CONFIG="${previous_xray_config}"
+    if ! commit_xray_and_script_config "${previous_xray_config}" "${rollback_script_config}" ||
+        ! handler_restart; then
+        echo 'Xray state rollback failed.' >&2
+    fi
+    return 1
+}
+
 # =============================================================================
 # handler.sh 专用函数
 # =============================================================================
@@ -573,7 +837,7 @@ function exec_read() {
         cdn)
             local config_tag="${CONFIG_DATA['tag']:-}"
             [[ -z "${config_tag}" ]] && config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
-            if [[ "${config_tag,,}" == 'cdn' ]]; then
+            if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
                 # CDN 域名应解析到 CDN 节点，仅校验格式以避免暴露源站 IP
                 exec_check '--domain-format' "${result}" || continue
                 if [[ -z "${CONFIG_DATA['tag']+set}" ]]; then
@@ -622,7 +886,7 @@ function exec_read() {
         path)
             # 验证路径
             local config_tag="${CONFIG_DATA['tag']}"
-            if [[ "${config_tag,,}" == "sni" || "${config_tag,,}" == "cdn" ]]; then
+            if protocol_uses_xhttp "${config_tag}"; then
                 exec_check '--path-required' "${result}" || continue
             else
                 exec_check '--path' "${result}" || continue
@@ -712,7 +976,7 @@ function generate_unique_multi_port() {
     local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
 
     if [[ -z "${port}" ]]; then
-        if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
+        if [[ ${#used_ports[@]} -gt 0 ]]; then
             port="$(exec_generate '--port')"
         else
             port=443
@@ -798,41 +1062,41 @@ function read_multi_node_protocol_fields() {
 
     case "${config_tag,,}" in
     trojan)
-        exec_read 'password'
-        exec_read 'target'
-        exec_read 'short'
-        exec_read 'path'
-        exec_read 'xhttp-mode'
+        exec_read 'password' || return 1
+        exec_read 'target' || return 1
+        exec_read 'short' || return 1
+        exec_read 'path' || return 1
+        exec_read 'xhttp-mode' || return 1
         ;;
     hy2)
-        exec_read 'hy2-auth'
+        exec_read 'hy2-auth' || return 1
         ;;
     ss2022)
-        exec_read 'ss2022-password'
+        exec_read 'ss2022-password' || return 1
         ;;
     mkcp)
-        exec_read 'uuid'
-        exec_read 'seed'
+        exec_read 'uuid' || return 1
+        exec_read 'seed' || return 1
         ;;
     vision)
-        exec_read 'uuid'
-        exec_read 'target'
-        exec_read 'short'
+        exec_read 'uuid' || return 1
+        exec_read 'target' || return 1
+        exec_read 'short' || return 1
         ;;
     xhttp)
-        exec_read 'uuid'
-        exec_read 'target'
-        exec_read 'short'
-        exec_read 'path'
-        exec_read 'xhttp-mode'
+        exec_read 'uuid' || return 1
+        exec_read 'target' || return 1
+        exec_read 'short' || return 1
+        exec_read 'path' || return 1
+        exec_read 'xhttp-mode' || return 1
         ;;
     fallback)
-        exec_read 'uuid'
-        exec_read 'fallback'
-        exec_read 'target'
-        exec_read 'short'
-        exec_read 'path'
-        exec_read 'xhttp-mode'
+        exec_read 'uuid' || return 1
+        exec_read 'fallback' || return 1
+        exec_read 'target' || return 1
+        exec_read 'short' || return 1
+        exec_read 'path' || return 1
+        exec_read 'xhttp-mode' || return 1
         ;;
     *)
         return 1
@@ -856,9 +1120,9 @@ function read_hy2_certificate_config() {
     CONFIG_DATA['hy2_cert_source']="${cert_source}"
     case "${cert_source}" in
     1)
-        exec_read 'hy2-cert-domain'
+        exec_read 'hy2-cert-domain' || return 1
         CONFIG_DATA['hy2_cert_domain']="${CONFIG_DATA['hy2-cert-domain']}"
-        exec_read 'email'
+        exec_read 'email' || return 1
         CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
         ;;
     2)
@@ -870,7 +1134,7 @@ function read_hy2_certificate_config() {
         fi
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.detected_ip") ${server_ip}" >&2
         CONFIG_DATA['hy2_cert_domain']="${server_ip}"
-        exec_read 'email'
+        exec_read 'email' || return 1
         CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
         ;;
     3)
@@ -1043,11 +1307,11 @@ function handler_read_multi_xray_config() {
     reset_config_data
     CONFIG_DATA['tag']='multi'
 
-    exec_read 'rules'
+    exec_read 'rules' || return 1
     if [[ "${CONFIG_DATA['rules'],,}" != 'n' ]]; then
-        exec_read 'block-bt'
-        exec_read 'block-cn'
-        exec_read 'block-ad'
+        exec_read 'block-bt' || return 1
+        exec_read 'block-cn' || return 1
+        exec_read 'block-ad' || return 1
     fi
     local multi_rules="${CONFIG_DATA['rules']:-N}"
     local multi_block_bt="${CONFIG_DATA['block-bt']:-N}"
@@ -1073,10 +1337,12 @@ function handler_read_multi_xray_config() {
         reset_config_data
         CONFIG_DATA['tag']="${config_tag}"
 
-        exec_read 'port'
+        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_prompt")" >&2
+        exec_read 'port' || return 1
         local xray_port
         xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")"
         used_ports+=("${xray_port}")
+        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_assigned" | sed "s/{port}/${xray_port}/g")" >&2
 
         read_multi_node_protocol_fields "${config_tag}" || return 1
 
@@ -1180,71 +1446,65 @@ function reset_json_fields() {
 #   $4: outboundTag - 出站标签 (例如 "block", "warp")
 #   $5: position - (可选) 插入位置或相对于 target_tag 的位置 ("before", "after", 数字索引)
 #   $6: target_tag - (可选) 用于定位插入位置的参考规则标签
-# 返回值: 无 (直接修改 XRAY_CONFIG_PATH 文件)
+# 返回值: 无 (仅更新内存中的 XRAY_CONFIG)
 # =============================================================================
 function add_rule() {
-    local rule_tag=$1     # 获取规则标签
-    local domain_or_ip=$2 # 获取规则类型 (domain/ip)
-    # 将逗号分隔的值转换为 JSON 数组
-    local value=$(echo "$3" | tr ',' '\n' | jq -R | jq -s)
-    local outboundTag=$4 # 获取出站标签
-    local position=$5    # 获取插入位置参数
-    local target_tag=$6  # 获取目标规则标签参数
-    # 如果 XRAY_CONFIG 未初始化，则从文件加载
-    XRAY_CONFIG="${XRAY_CONFIG:-$(jq '.' "${XRAY_CONFIG_PATH}")}"
-    # 检查是否存在具有相同 ruleTag 的规则
-    local existing_rule=$(echo "${XRAY_CONFIG}" | jq -r --arg ruleTag "${rule_tag}" '.routing.rules[] | select(.ruleTag == $ruleTag)')
-    # 如果规则已存在
-    if [[ "${existing_rule}" ]]; then
-        # 如果是 domain 规则
-        if [[ "${domain_or_ip}" == "domain" ]]; then
-            # 将新值追加到现有 domain 数组并去重
-            XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg ruleTag "${rule_tag}" --argjson value "${value}" '.routing.rules |= map(if .ruleTag == $ruleTag then .domain += $value | .domain |= unique else . end)')"
-        # 如果是 ip 规则
-        elif [[ "${domain_or_ip}" == "ip" ]]; then
-            # 将新值追加到现有 ip 数组并去重
-            XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg ruleTag "${rule_tag}" --argjson value "${value}" '.routing.rules |= map(if .ruleTag == $ruleTag then .ip += $value | .ip |= unique else . end)')"
-        fi
-    else
-        # 规则不存在，创建新的规则 JSON 对象
-        local new_rule="[{\"ruleTag\":\"${rule_tag}\",\"${domain_or_ip}\":${value},\"outboundTag\":\"${outboundTag}\"}]"
-        # 如果指定了 target_tag
-        if [[ -n "${target_tag}" ]]; then
-            # 检查 target_tag 对应的规则是否存在
-            local target_rule=$(echo "${XRAY_CONFIG}" | jq -r --arg ruleTag "${target_tag}" '.routing.rules[] | select(.ruleTag == $ruleTag)')
-            if [[ "${target_rule}" ]]; then
-                # 获取 target_tag 对应规则的索引
-                local target_index=$(echo "${XRAY_CONFIG}" | jq -r --arg ruleTag "${target_tag}" '.routing.rules | to_entries | map(select(.value.ruleTag == $ruleTag)) | .[0].key')
-                # 根据 position 参数决定插入位置
-                if [[ "${position}" == "before" ]]; then
-                    # 插入到 target_tag 规则之前
-                    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson target_index "${target_index}" --argjson new_rule "${new_rule}" '.routing.rules |= .[:$target_index] + $new_rule + .[$target_index:]')"
-                elif [[ "${position}" == "after" ]]; then
-                    # 插入到 target_tag 规则之后
-                    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson target_index $((target_index + 1)) --argjson new_rule "${new_rule}" '.routing.rules |= .[:$target_index] + $new_rule + .[$target_index:]')"
-                else
-                    # 默认追加到末尾
-                    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson new_rule "${new_rule}" '.routing.rules += $new_rule')"
-                fi
-            else
-                # target_tag 规则不存在，追加到末尾
-                XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson new_rule "${new_rule}" '.routing.rules += $new_rule')"
-            fi
-        else
-            # 未指定 target_tag
-            # 如果指定了数字位置
-            if [[ -n "${position}" && "${position}" -ge 0 ]]; then
-                # 插入到指定索引位置
-                XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson position "${position}" --argjson new_rule "${new_rule}" '.routing.rules |= .[:$position] + $new_rule + .[$position:]')"
-            else
-                # 默认追加到末尾
-                XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson new_rule "${new_rule}" '.routing.rules += $new_rule')"
-            fi
-        fi
+    local rule_tag="$1"
+    local rule_field="$2"
+    local raw_value="$3"
+    local outbound_tag="$4"
+    local position="${5:-}"
+    local target_tag="${6:-}"
+    local values new_rule
+
+    case "${rule_field}" in
+    domain | ip | protocol) ;;
+    *) return 1 ;;
+    esac
+    XRAY_CONFIG="${XRAY_CONFIG:-$(jq '.' "${XRAY_CONFIG_PATH}")}" || return 1
+    values="$(printf '%s\n' "${raw_value}" | tr ',' '\n' | jq -R 'select(length > 0)' | jq -s 'unique')" || return 1
+    [[ "$(printf '%s\n' "${values}" | jq 'length')" -gt 0 ]] || return 1
+    new_rule="$(jq -n \
+        --arg ruleTag "${rule_tag}" \
+        --arg field "${rule_field}" \
+        --argjson values "${values}" \
+        --arg outboundTag "${outbound_tag}" \
+        '{ruleTag:$ruleTag,($field):$values,outboundTag:$outboundTag}')" || return 1
+
+    if printf '%s\n' "${XRAY_CONFIG}" | jq -e --arg tag "${rule_tag}" 'any(.routing.rules[]?; (.ruleTag // "") == $tag)' >/dev/null; then
+        XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq \
+            --arg tag "${rule_tag}" \
+            --arg field "${rule_field}" \
+            --argjson values "${values}" '
+            .routing.rules |= map(
+                if (.ruleTag // "") == $tag then
+                    .[$field] = (((.[$field] // []) + $values) | unique)
+                else . end
+            )
+        ')" || return 1
+        return 0
     fi
-    # 将更新后的 Xray 配置写入文件
-    write_xray_runtime_config "${XRAY_CONFIG}" || return 1
-    sleep 2
+
+    if [[ -n "${target_tag}" ]]; then
+        XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq \
+            --arg target "${target_tag}" \
+            --arg position "${position}" \
+            --argjson rule "${new_rule}" '
+            (.routing.rules | map(.ruleTag // "") | index($target)) as $index |
+            if $index == null then .routing.rules += [$rule]
+            elif $position == "before" then .routing.rules = (.routing.rules[:$index] + [$rule] + .routing.rules[$index:])
+            elif $position == "after" then ($index + 1) as $next | .routing.rules = (.routing.rules[:$next] + [$rule] + .routing.rules[$next:])
+            else .routing.rules += [$rule]
+            end
+        ')" || return 1
+    elif [[ "${position}" =~ ^[0-9]+$ ]]; then
+        XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq \
+            --argjson position "${position}" \
+            --argjson rule "${new_rule}" \
+            '.routing.rules = (.routing.rules[:$position] + [$rule] + .routing.rules[$position:])')" || return 1
+    else
+        XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq --argjson rule "${new_rule}" '.routing.rules += [$rule]')" || return 1
+    fi
 }
 
 # =============================================================================
@@ -1261,19 +1521,26 @@ function add_rule() {
 # =============================================================================
 function handler_routing() {
     # 从脚本配置中读取 WARP 状态
-    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
+    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')"
     local rule_type="$1"                         # 获取规则类型 (block/warp)
     local rule_target="$2"                       # 获取规则目标 (ip/domain)
     local rule_tag="${rule_type}-${rule_target}" # 构造规则标签
+    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
     # 检查 WARP 状态是否满足配置要求
     # 如果是 warp 规则但 WARP 未启用，则报错
     if [[ "${rule_type}" == 'warp' && ${WARP_STATUS} -ne 1 ]]; then
         _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.warp.status")"
     fi
     # 调用 exec_read 读取用户输入的规则值
-    exec_read "${rule_tag}"
+    exec_read "${rule_tag}" || return 1
     # 调用 add_rule 将规则添加到 Xray 配置中
-    add_rule "${rule_tag}" "${rule_target}" "${CONFIG_DATA[${rule_tag}]}" "${rule_type}"
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    XRAY_CONFIG="${previous_xray_config}"
+    add_rule "${rule_tag}" "${rule_target}" "${CONFIG_DATA[${rule_tag}]}" "${rule_type}" || return 1
+    local persisted_rules
+    persisted_rules="$(printf '%s\n' "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
+    SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq --argjson rules "${persisted_rules}" '.rules = $rules')" || return 1
+    apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"
 }
 
 # =============================================================================
@@ -1294,7 +1561,8 @@ function handler_reset_script_config() {
         # 保留 CDN 后端和证书来源，才能在重配过程中安全判断 443
         # 当前由 Nginx 还是 Xray 占用，并复用已验证的证书。
         SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray' \
-            'version' 'githubProxy' 'warp' 'rules' \
+            'version' 'githubProxy' 'warp' 'rules' 'lan' 'firewallRules' \
+            'reverse' 'reverseUuid' 'reversePort' 'reverseTarget' 'reverseMode' \
             'cdnBackend' 'cdnCertHostname' 'cdnCertSource' \
             'cdnCertFullchain' 'cdnCertPrivkey' \
             'cdnDownCertHostname' 'cdnDownCertSource' \
@@ -1748,6 +2016,311 @@ function open_xray_firewall_port() {
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
 }
 
+function owned_firewall_rule_exists() {
+    local rule="$1"
+    local backend port protocol ipv4 ipv6 status
+    backend="$(echo "${rule}" | jq -er '.backend')" || return 2
+    port="$(echo "${rule}" | jq -er '.port')" || return 2
+    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 2
+    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 2
+    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 2
+
+    case "${backend}" in
+    ufw)
+        command -v ufw &>/dev/null || return 2
+        status="$(ufw show added 2>/dev/null)" || return 2
+        grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)" <<<"${status}"
+        ;;
+    firewalld)
+        command -v firewall-cmd &>/dev/null || return 2
+        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 2
+        firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1
+        ;;
+    iptables)
+        local present=1
+        if [[ "${ipv4}" == 'true' ]]; then
+            command -v iptables &>/dev/null || return 2
+            if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+                present=0
+            else
+                iptables -S INPUT >/dev/null 2>&1 || return 2
+            fi
+        fi
+        if [[ "${ipv6}" == 'true' ]]; then
+            command -v ip6tables &>/dev/null || return 2
+            if ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+                present=0
+            else
+                ip6tables -S INPUT >/dev/null 2>&1 || return 2
+            fi
+        fi
+        return "${present}"
+        ;;
+    *) return 2 ;;
+    esac
+}
+
+function remove_owned_firewall_rule_fields() {
+    local backend="$1"
+    local port="$2"
+    local protocol="$3"
+    local ipv4="$4"
+    local ipv6="$5"
+    case "${backend}" in
+    ufw)
+        command -v ufw &>/dev/null || return 1
+        if ufw show added 2>/dev/null |
+            grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)"; then
+            ufw delete allow "${port}"/"${protocol}" >/dev/null 2>&1
+        fi
+        ;;
+    firewalld)
+        command -v firewall-cmd &>/dev/null || return 1
+        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 1
+        if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
+            firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
+                firewall-cmd --reload >/dev/null 2>&1
+        fi
+        ;;
+    iptables)
+        if [[ "${ipv4}" == 'true' ]]; then
+            command -v iptables &>/dev/null || return 1
+            if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+                iptables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
+            fi
+        fi
+        if [[ "${ipv6}" == 'true' ]]; then
+            command -v ip6tables &>/dev/null || return 1
+            if ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+                ip6tables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
+            fi
+        fi
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+function remove_owned_firewall_rule() {
+    local rule="$1"
+    local backend port protocol ipv4 ipv6
+    backend="$(echo "${rule}" | jq -er '.backend')" || return 1
+    port="$(echo "${rule}" | jq -er '.port')" || return 1
+    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 1
+    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 1
+    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 1
+    remove_owned_firewall_rule_fields \
+        "${backend}" "${port}" "${protocol}" "${ipv4}" "${ipv6}"
+}
+
+function restore_owned_firewall_rule() {
+    local rule="$1"
+    local backend port protocol ipv4 ipv6 status
+    backend="$(echo "${rule}" | jq -er '.backend')" || return 1
+    port="$(echo "${rule}" | jq -er '.port')" || return 1
+    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 1
+    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 1
+    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 1
+
+    case "${backend}" in
+    ufw)
+        command -v ufw &>/dev/null || return 1
+        status="$(ufw show added 2>/dev/null)" || return 1
+        grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)" <<<"${status}" ||
+            ufw allow "${port}"/"${protocol}" >/dev/null 2>&1
+        ;;
+    firewalld)
+        command -v firewall-cmd &>/dev/null || return 1
+        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 1
+        if ! firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
+            firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
+                firewall-cmd --reload >/dev/null 2>&1
+        fi
+        ;;
+    iptables)
+        if [[ "${ipv4}" == 'true' ]]; then
+            command -v iptables &>/dev/null || return 1
+            iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
+                iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
+        fi
+        if [[ "${ipv6}" == 'true' ]]; then
+            command -v ip6tables &>/dev/null || return 1
+            ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
+                ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
+        fi
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+function restore_owned_firewall_rules() {
+    local rule restore_status=0
+    for rule in "$@"; do
+        restore_owned_firewall_rule "${rule}" || restore_status=1
+    done
+    return "${restore_status}"
+}
+
+function open_owned_firewall_port() {
+    local feature="$1"
+    local port="$2"
+    local protocol="$3"
+    local backend='' ipv4=false ipv6=false rule existing_rule
+    local ufw_status firewalld_status previous_script_config updated_script_config
+
+    [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+    port=$((10#${port}))
+    ((port >= 1 && port <= 65535)) || return 1
+    [[ "${protocol}" =~ ^(tcp|udp)$ ]] || return 1
+    existing_rule="$(echo "${SCRIPT_CONFIG}" | jq -cr \
+        --arg feature "${feature}" --argjson port "${port}" --arg protocol "${protocol}" \
+        '[.xray.firewallRules[]? | select(.feature == $feature and .port == $port and .protocol == $protocol)][0] // empty')" ||
+        return 1
+    if [[ -n "${existing_rule}" ]]; then
+        restore_owned_firewall_rule "${existing_rule}"
+        return $?
+    fi
+
+    if command -v ufw &>/dev/null; then
+        ufw_status="$(ufw status 2>/dev/null || true)"
+        if grep -Eiq '^Status:[[:space:]]+active([[:space:]]|$)' <<<"${ufw_status}"; then
+            if grep -Eq "^${port}/${protocol}[[:space:]]+ALLOW([[:space:]]|$)" <<<"${ufw_status}"; then
+                return 0
+            fi
+            ufw allow "${port}"/"${protocol}" >/dev/null 2>&1 || return 1
+            backend='ufw'
+        else
+            return 0
+        fi
+    elif command -v firewall-cmd &>/dev/null; then
+        firewalld_status="$(firewall-cmd --state 2>/dev/null || true)"
+        [[ "${firewalld_status,,}" == 'running' ]] || return 0
+        if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
+            return 0
+        fi
+        firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1 || return 1
+        if ! firewall-cmd --reload >/dev/null 2>&1; then
+            firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 || true
+            return 1
+        fi
+        backend='firewalld'
+    elif command -v iptables &>/dev/null; then
+        if ! iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+            iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
+            ipv4=true
+        fi
+        if command -v ip6tables &>/dev/null &&
+            ! ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+            if ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+                ipv6=true
+            fi
+        fi
+        [[ "${ipv4}" == 'true' || "${ipv6}" == 'true' ]] || return 0
+        backend='iptables'
+    else
+        return 0
+    fi
+
+    rule="$(jq -n \
+        --arg feature "${feature}" --arg backend "${backend}" \
+        --argjson port "${port}" --arg protocol "${protocol}" \
+        --argjson ipv4 "${ipv4}" --argjson ipv6 "${ipv6}" \
+        '{feature:$feature,backend:$backend,port:$port,protocol:$protocol,ipv4:$ipv4,ipv6:$ipv6}')" || {
+        remove_owned_firewall_rule_fields \
+            "${backend}" "${port}" "${protocol}" "${ipv4}" "${ipv6}" || true
+        return 1
+    }
+    previous_script_config="${SCRIPT_CONFIG}"
+    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq --argjson rule "${rule}" '
+        .xray.firewallRules = ((.xray.firewallRules // []) + [$rule] | unique_by([.feature,.port,.protocol]))
+    ')" || {
+        remove_owned_firewall_rule "${rule}" || true
+        SCRIPT_CONFIG="${previous_script_config}"
+        return 1
+    }
+    SCRIPT_CONFIG="${updated_script_config}"
+    if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
+        if remove_owned_firewall_rule "${rule}"; then
+            SCRIPT_CONFIG="${previous_script_config}"
+        else
+            # Keep the ownership record in memory so the outer state
+            # transaction can retry removal or persist the unresolved rule.
+            SCRIPT_CONFIG="${updated_script_config}"
+        fi
+        return 1
+    fi
+}
+
+function close_owned_firewall_ports() {
+    local feature="$1"
+    local port="${2:-}"
+    local defer_write="${3:-0}"
+    local records rule existence_status updated_script_config
+    local previous_script_config="${SCRIPT_CONFIG}"
+    local -a removed_rules=()
+    records="$(echo "${SCRIPT_CONFIG}" | jq -c \
+        --arg feature "${feature}" --arg port "${port}" '
+        [.xray.firewallRules[]? | select(.feature == $feature and ($port == "" or (.port | tostring) == $port))]
+    ')" || return 1
+
+    while IFS= read -r rule; do
+        [[ -n "${rule}" ]] || continue
+        if owned_firewall_rule_exists "${rule}"; then
+            remove_owned_firewall_rule "${rule}" || {
+                restore_owned_firewall_rule "${rule}" ||
+                    echo 'Firewall rollback failed for the current owned port.' >&2
+                restore_owned_firewall_rules "${removed_rules[@]}" ||
+                    echo 'Firewall rollback failed while closing owned ports.' >&2
+                return 1
+            }
+            removed_rules+=("${rule}")
+        else
+            existence_status=$?
+            if [[ "${existence_status}" -eq 2 ]]; then
+                restore_owned_firewall_rules "${removed_rules[@]}" ||
+                    echo 'Firewall rollback failed while closing owned ports.' >&2
+                return 1
+            fi
+        fi
+    done < <(echo "${records}" | jq -c '.[]')
+    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq \
+        --arg feature "${feature}" --arg port "${port}" '
+        .xray.firewallRules = [
+            .xray.firewallRules[]? |
+            select(.feature != $feature or ($port != "" and (.port | tostring) != $port))
+        ]
+    ')" || {
+        restore_owned_firewall_rules "${removed_rules[@]}" ||
+            echo 'Firewall rollback failed after state update failure.' >&2
+        return 1
+    }
+    SCRIPT_CONFIG="${updated_script_config}"
+    if [[ "${defer_write}" -eq 1 ]]; then
+        return 0
+    fi
+    if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
+        SCRIPT_CONFIG="${previous_script_config}"
+        restore_owned_firewall_rules "${removed_rules[@]}" ||
+            echo 'Firewall rollback failed after configuration write failure.' >&2
+        return 1
+    fi
+}
+
+function restore_owned_firewall_feature_state() {
+    local previous_script_config="$1"
+    local feature="$2"
+    local port="$3"
+    local protocol="$4"
+    local restore_status=0
+
+    SCRIPT_CONFIG="${previous_script_config}"
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || restore_status=1
+    open_owned_firewall_port "${feature}" "${port}" "${protocol}" || restore_status=1
+    if [[ "${restore_status}" -ne 0 ]]; then
+        echo "Failed to restore ${feature} firewall ownership state." >&2
+    fi
+    return "${restore_status}"
+}
+
 function multi_upsert_route_rule() {
     local rule="$1"
 
@@ -1762,7 +2335,7 @@ function multi_upsert_route_rule() {
                 .routing.rules = (.routing.rules[:$private_index] + [$new_rule] + .routing.rules[$private_index:])
             end
         end
-    ')"
+    ')" || return 1
 }
 
 function multi_add_optional_block_rules() {
@@ -1772,16 +2345,16 @@ function multi_add_optional_block_rules() {
     local new_rule
 
     if [[ "${XRAY_RULES_BT}" -eq 1 ]]; then
-        new_rule="$(jq -n '{ruleTag:"bt",protocol:["bittorrent"],outboundTag:"block"}')"
-        multi_upsert_route_rule "${new_rule}"
+        new_rule="$(jq -n '{ruleTag:"bt",protocol:["bittorrent"],outboundTag:"block"}')" || return 1
+        multi_upsert_route_rule "${new_rule}" || return 1
     fi
     if [[ "${XRAY_RULES_CN}" -eq 1 ]]; then
-        new_rule="$(jq -n '{ruleTag:"cn-ip",ip:["geoip:cn"],outboundTag:"block"}')"
-        multi_upsert_route_rule "${new_rule}"
+        new_rule="$(jq -n '{ruleTag:"cn-ip",ip:["geoip:cn"],outboundTag:"block"}')" || return 1
+        multi_upsert_route_rule "${new_rule}" || return 1
     fi
     if [[ "${XRAY_RULES_AD}" -eq 1 ]]; then
-        new_rule="$(jq -n '{ruleTag:"ad-domain",domain:["geosite:category-ads-all"],outboundTag:"block"}')"
-        multi_upsert_route_rule "${new_rule}"
+        new_rule="$(jq -n '{ruleTag:"ad-domain",domain:["geosite:category-ads-all"],outboundTag:"block"}')" || return 1
+        multi_upsert_route_rule "${new_rule}" || return 1
     fi
 }
 
@@ -1820,8 +2393,9 @@ function handler_multi_xray_config() {
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"
-    local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -c '.rules // []')"
-    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp // 0')"
+    local XRAY_RULES
+    XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
+    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
@@ -1854,11 +2428,9 @@ function handler_multi_xray_config() {
         fi
     fi
 
-    XRAY_CONFIG="$(jq '.inbounds = [.inbounds[0]] | .routing.rules = [.routing.rules[] | select(.ruleTag == "api" or .ruleTag == "private-ip")]' "${SCRIPT_XRAY_DIR}/XHTTP.json")"
+    XRAY_CONFIG="$(jq '.inbounds = [.inbounds[0]]' "${SCRIPT_XRAY_DIR}/XHTTP.json")" || return 1
     if [[ "${XRAY_RULES_STATUS}" -eq 0 ]]; then
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '
-            .routing.rules = ($rules | map(select(((.ruleTag // "") | tostring | startswith("anti-steal-") | not))))
-        ')"
+        merge_user_route_rules "${XRAY_RULES}" || return 1
     fi
 
     local used_listen_ports=("32768")
@@ -1933,10 +2505,11 @@ function handler_multi_xray_config() {
             ')"
 
             local anti_in_tag="$(echo "${node_inbounds}" | jq -r '.[1].tag')"
-            local allow_rule="$(jq -n --arg ruleTag "anti-steal-allow-${suffix}" --arg inboundTag "${anti_in_tag}" --argjson domains "${server_names}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],domain:$domains,outboundTag:"direct"}')"
-            local block_rule="$(jq -n --arg ruleTag "anti-steal-block-${suffix}" --arg inboundTag "${anti_in_tag}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],outboundTag:"block"}')"
-            multi_upsert_route_rule "${allow_rule}"
-            multi_upsert_route_rule "${block_rule}"
+            local allow_rule block_rule
+            allow_rule="$(jq -n --arg ruleTag "anti-steal-allow-${suffix}" --arg inboundTag "${anti_in_tag}" --argjson domains "${server_names}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],domain:$domains,outboundTag:"direct"}')" || return 1
+            block_rule="$(jq -n --arg ruleTag "anti-steal-block-${suffix}" --arg inboundTag "${anti_in_tag}" '{ruleTag:$ruleTag,inboundTag:[$inboundTag],outboundTag:"block"}')" || return 1
+            multi_upsert_route_rule "${allow_rule}" || return 1
+            multi_upsert_route_rule "${block_rule}" || return 1
             ;;
         xhttp)
             local node_uuid="$(echo "${node}" | jq -r '.uuid')"
@@ -2051,34 +2624,33 @@ function handler_multi_xray_config() {
     done
 
     if [[ "${XRAY_RULES_STATUS}" -eq 1 ]]; then
-        multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}"
+        multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}" || return 1
     fi
 
     if [[ "${WARP_STATUS:-0}" -eq 1 ]]; then
         local container_ip=''
         container_ip="$(exec_docker '--obtain-container-ip')" || return 1
         [[ -n "${container_ip}" ]] || return 1
-        local socks_config='[{"tag":"warp","protocol":"socks","settings":{"servers":[{"address":"'"${container_ip}"'","port":40001}]}}]'
+        local socks_config
+        socks_config="$(jq -n --arg address "${container_ip}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')"
     fi
 
     local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
     if [[ "${reverse_status}" -eq 1 ]]; then
-        handler_reverse_config
+        handler_reverse_config || return 1
     fi
-    handler_apply_lan_config
+    handler_apply_lan_config || return 1
 
-    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
+    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-    write_xray_runtime_config "${XRAY_CONFIG}" || return 1
-    sleep 2
+    commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
 
     handler_lan_open_firewall || return 1
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
-        open_xray_firewall_port "${reverse_port}" tcp || return 1
+        open_owned_firewall_port 'reverse' "${reverse_port}" tcp || return 1
     fi
 }
 
@@ -2086,18 +2658,19 @@ function handler_xray_config() {
     local skip_vlessenc="${1:-0}"
     # 打印绿色的 Xray 配置更新提示
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray.config_update")" >&2
+    normalize_and_validate_xray_state || return 1
     # 从脚本配置中读取各项参数
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"                # 获取配置标签
-    local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"                # 获取端口
-    local XRAY_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.uuid')"                # 获取 UUID
+    local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"                 # 获取端口
+    local XRAY_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.uuid // ""')"          # 获取 UUID
     local HY2_AUTH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2auth // ""')"        # 获取 HY2 auth
-    local FALLBACK_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.fallback')"        # 获取 Fallback UUID
-    local TROJAN_PASSWORD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.trojan')"        # 获取 Trojan 密码
-    local KCP_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.kcp')"                  # 获取 mKCP Seed
-    local TARGET_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.target')"          # 获取目标域名
-    local SERVER_NAMES="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.serverNames')"      # 获取服务器名称
-    local PRIVATE_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.privateKey')"        # 获取私钥
-    local SHORT_IDS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds')"            # 获取 Short IDs
+    local FALLBACK_UUID="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.fallback // ""')"  # 获取 Fallback UUID
+    local TROJAN_PASSWORD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.trojan // ""')" # 获取 Trojan 密码
+    local KCP_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.kcp // ""')"            # 获取 mKCP Seed
+    local TARGET_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.target // ""')"    # 获取目标域名
+    local SERVER_NAMES="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.serverNames // []')" # 获取服务器名称
+    local PRIVATE_KEY="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.privateKey // ""')"  # 获取私钥
+    local SHORT_IDS="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.shortIds // []')"       # 获取 Short IDs
     local MLDSA65_SEED="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Seed // ""')" # 获取 ML-DSA-65 Seed
     local XHTTP_PATH="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"         # 获取路径
     local XHTTP_MODE="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.xhttpMode // "") | if . == "" then "auto" else . end')"
@@ -2105,7 +2678,8 @@ function handler_xray_config() {
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"        # 获取 bt 规则状态
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"        # 获取 cn 规则状态
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"        # 获取 ad 规则状态
-    local XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq -r '.rules')"                   # 获取路由规则
+    local XRAY_RULES
+    XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
@@ -2120,7 +2694,7 @@ function handler_xray_config() {
     fi
     if protocol_uses_xhttp "${CONFIG_TAG}"; then
         XHTTP_PATH="$(normalize_xhttp_path "${XHTTP_PATH}")"
-        if ! validate_xhttp_path "${XHTTP_PATH}"; then
+        if [[ -z "${XHTTP_PATH}" ]] || ! validate_xhttp_path "${XHTTP_PATH}"; then
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
             return 1
         fi
@@ -2149,7 +2723,10 @@ function handler_xray_config() {
         fi
     fi
     # 加载对应配置标签的 Xray 配置模板
-    XRAY_CONFIG="$(jq '.' "${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json")"
+    XRAY_CONFIG="$(jq '.' "${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json")" || return 1
+    if [[ "${XRAY_RULES_STATUS}" -eq 0 ]]; then
+        merge_user_route_rules "${XRAY_RULES}" || return 1
+    fi
     if [[ "${CONFIG_TAG,,}" == 'cdn' && "${CDN_BACKEND}" == 'xray' ]]; then
         local CDN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
         local CDN_DOWN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
@@ -2303,17 +2880,19 @@ function handler_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg mode "${XHTTP_MODE}" '.inbounds[2].streamSettings.xhttpSettings.mode = $mode')"
         ;;
     esac
-    # 处理路由规则
+    # 处理可选默认规则；保留模式已在模板规则之上合并用户规则。
     case "${XRAY_RULES_STATUS}" in
-    0)
-        # 保留当前路由规则
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.routing.rules = $rules')"
-        ;;
     1)
         # 重置并添加默认路由规则
-        [[ "${XRAY_RULES_BT}" -eq 1 ]] && add_rule "bt" "protocol" "bittorrent" "block" 1
-        [[ "${XRAY_RULES_CN}" -eq 1 ]] && add_rule "cn-ip" "ip" "geoip:cn" "block" "after" "private-ip"
-        [[ "${XRAY_RULES_AD}" -eq 1 ]] && add_rule "ad-domain" "domain" "geosite:category-ads-all" "block"
+        if [[ "${XRAY_RULES_BT}" -eq 1 ]]; then
+            add_rule "bt" "protocol" "bittorrent" "block" 1 || return 1
+        fi
+        if [[ "${XRAY_RULES_CN}" -eq 1 ]]; then
+            add_rule "cn-ip" "ip" "geoip:cn" "block" "after" "private-ip" || return 1
+        fi
+        if [[ "${XRAY_RULES_AD}" -eq 1 ]]; then
+            add_rule "ad-domain" "domain" "geosite:category-ads-all" "block" || return 1
+        fi
         ;;
     esac
     # Vision 防偷模式：在路由规则替换之后更新 anti-steal 相关配置
@@ -2335,25 +2914,22 @@ function handler_xray_config() {
         container_ip="$(exec_docker '--obtain-container-ip')" || return 1
         [[ -n "${container_ip}" ]] || return 1
         # 构造 WARP Socks 出站配置 JSON
-        local socks_config='[{"tag":"warp","protocol":"socks","settings":{"servers":[{"address":"'"${container_ip}"'","port":40001}]}}]'
+        local socks_config
+        socks_config="$(jq -n --arg address "${container_ip}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
         # 将 WARP 出站配置添加到 Xray 配置中
         XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')
     fi
     # 应用反向代理配置
     local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
     if [[ "${reverse_status}" -eq 1 ]]; then
-        handler_reverse_config
+        handler_reverse_config || return 1
     fi
-    handler_apply_lan_config
+    handler_apply_lan_config || return 1
 
-    # 获取更新后的路由规则
-    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules')"
-    # 更新脚本配置中的路由规则
+    # 只持久化用户管理的规则，模板和功能派生规则在每次构建时重建。
+    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')"
-    # 将更新后的脚本配置和 Xray 配置写入文件
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-    write_xray_runtime_config "${XRAY_CONFIG}" || return 1
-    sleep 2
+    commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
 
     # 仅在配置已通过 xray 校验并成功落盘后修改防火墙。
     case "${CONFIG_TAG,,}" in
@@ -2379,7 +2955,7 @@ function handler_xray_config() {
     # 反向代理端口放在最后处理，确保其成功后没有其他可失败的防火墙步骤。
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
-        open_xray_firewall_port "${reverse_port}" tcp || return 1
+        open_owned_firewall_port 'reverse' "${reverse_port}" tcp || return 1
     fi
 }
 
@@ -2488,51 +3064,51 @@ function handler_read_xray_config() {
     fi
     # 将配置标签存储到 CONFIG_DATA
     CONFIG_DATA['tag']="${CONFIG_TAG}"
-    exec_read 'rules'
+    exec_read 'rules' || return 1
     # 如果规则状态不是 'n'，则读取阻止选项
     if [[ "${CONFIG_DATA['rules'],,}" != 'n' ]]; then
-        exec_read 'block-bt'
-        exec_read 'block-cn'
-        exec_read 'block-ad'
+        exec_read 'block-bt' || return 1
+        exec_read 'block-cn' || return 1
+        exec_read 'block-ad' || return 1
     fi
     # SNI/CDN 对外固定由 Nginx 监听 443，询问端口只会产生一个不会生效的值。
     if protocol_reads_public_port "${CONFIG_TAG}"; then
-        exec_read 'port'
+        exec_read 'port' || return 1
     fi
     # 根据配置标签读取特定参数 (第一部分)
     case "${CONFIG_TAG,,}" in
-    trojan) exec_read 'password' ;;                             # 读取 Trojan 密码
-    hy2) exec_read 'hy2-auth' ;;                                # 读取 HY2 auth 密码
-    ss2022) exec_read 'ss2022-password' ;;                      # 读取 SS2022 PSK
-    mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' ;; # 读取 UUID
+    trojan) exec_read 'password' || return 1 ;;                             # 读取 Trojan 密码
+    hy2) exec_read 'hy2-auth' || return 1 ;;                                # 读取 HY2 auth 密码
+    ss2022) exec_read 'ss2022-password' || return 1 ;;                      # 读取 SS2022 PSK
+    mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' || return 1 ;; # 读取 UUID
     esac
     # 根据配置标签读取特定参数 (第二部分)
     case "${CONFIG_TAG,,}" in
-    fallback | sni) exec_read 'fallback' ;; # 读取 Fallback UUID
-    mkcp) exec_read 'seed' ;;               # 读取 mKCP Seed
+    fallback | sni) exec_read 'fallback' || return 1 ;; # 读取 Fallback UUID
+    mkcp) exec_read 'seed' || return 1 ;;               # 读取 mKCP Seed
     esac
     # 根据配置标签读取特定参数 (第三部分)
     case "${CONFIG_TAG,,}" in
-    vision | xhttp | trojan | fallback) exec_read 'target' ;; # 读取目标域名
+    vision | xhttp | trojan | fallback) exec_read 'target' || return 1 ;; # 读取目标域名
     sni)
         # 为 SNI 配置读取域名和 CDN
-        exec_read 'domain' # 读取域名
-        exec_read 'cdn'    # 读取 CDN
+        exec_read 'domain' || return 1 # 读取域名
+        exec_read 'cdn' || return 1    # 读取 CDN
         ;;
     cdn)
-        exec_read 'cdn'    # 读取 CDN
-        exec_read 'cdn-down' # 读取可选的下行 CDN
+        exec_read 'cdn' || return 1      # 读取 CDN
+        exec_read 'cdn-down' || return 1 # 读取可选的下行 CDN
         ;;
     esac
     # 根据配置标签读取特定参数 (第四部分)
     case "${CONFIG_TAG,,}" in
-    vision | xhttp | trojan | fallback | sni) exec_read 'short' ;; # 读取 Short IDs
+    vision | xhttp | trojan | fallback | sni) exec_read 'short' || return 1 ;; # 读取 Short IDs
     esac
     # 根据配置标签读取特定参数 (第五部分)
     case "${CONFIG_TAG,,}" in
     xhttp | trojan | fallback | sni | cdn)
-        exec_read 'path'
-        exec_read 'xhttp-mode'
+        exec_read 'path' || return 1
+        exec_read 'xhttp-mode' || return 1
         ;;
     esac
     if protocol_uses_vless_enc "${CONFIG_TAG}"; then
@@ -2902,36 +3478,20 @@ function reload_certificate_consumer() {
 function build_certificate_reload_command() {
     local consumer="$1"
     local target_dir="$2"
-    local owner_command=':'
-    local reload_command=''
-    local dir_q cert_q key_q
+    local acme_domain="$3"
+    local handler_q acme_domain_q target_dir_q
 
-    printf -v dir_q '%q' "${target_dir}"
-    printf -v cert_q '%q' "${target_dir}/fullchain.pem"
-    printf -v key_q '%q' "${target_dir}/privkey.pem"
     case "${consumer}" in
-    xray)
-        if id -u xray >/dev/null 2>&1 &&
-            getent group xray-nginx >/dev/null 2>&1; then
-            owner_command="chown xray:xray-nginx ${dir_q} ${cert_q} ${key_q}"
-        elif id -u xray >/dev/null 2>&1; then
-            owner_command="chown xray:xray ${dir_q} ${cert_q} ${key_q}"
-        fi
-        reload_command='if systemctl -q is-active xray; then systemctl -q reload xray || systemctl -q restart xray; fi'
-        ;;
-    nginx)
-        if id -u nginx >/dev/null 2>&1 &&
-            getent group xray-nginx >/dev/null 2>&1; then
-            owner_command="chown nginx:xray-nginx ${dir_q} ${cert_q} ${key_q}"
-        elif id -u nginx >/dev/null 2>&1; then
-            owner_command="chown nginx:nginx ${dir_q} ${cert_q} ${key_q}"
-        fi
-        reload_command='if systemctl -q is-active nginx; then nginx -t && systemctl -q reload nginx; fi'
-        ;;
+    xray|nginx) ;;
     *) return 1 ;;
     esac
-    printf '%s && chmod 750 %s && chmod 640 %s %s && %s' \
-        "${owner_command}" "${dir_q}" "${cert_q}" "${key_q}" "${reload_command}"
+
+    printf -v handler_q '%q' "${CUR_DIR}/handler.sh"
+    [[ -n "${acme_domain}" && "${acme_domain}" != *$'\n'* ]] || return 1
+    printf -v acme_domain_q '%q' "${acme_domain}"
+    printf -v target_dir_q '%q' "${target_dir}"
+    printf 'bash %s --deploy-acme-certificate %s %s' \
+        "${handler_q}" "${acme_domain_q}" "${target_dir_q}"
 }
 
 function install_acme_managed_certificate() {
@@ -2947,7 +3507,8 @@ function install_acme_managed_certificate() {
     xray|nginx) ;;
     *) return 1 ;;
     esac
-    reload_command="$(build_certificate_reload_command "${consumer}" "${target_dir}")" ||
+    reload_command="$(build_certificate_reload_command \
+        "${consumer}" "${target_dir}" "${acme_domain}")" ||
         return 1
 
     [[ ! -L "${target_dir}" &&
@@ -3020,15 +3581,295 @@ function install_acme_nginx_certificate() {
     install_acme_managed_certificate "$1" "$2" "$3" 'nginx'
 }
 
-function acme_manages_certificate() {
+function acme_main_domain_for_name() {
     local domain="$1"
 
     [[ -x "${ACME_PATH}" ]] || return 1
     "${ACME_PATH}" --list --home "${HOME}/.acme.sh" 2>/dev/null |
-        awk -v domain="${domain}" '
-            NR > 1 && $1 == domain && tolower($2) ~ /^ec-/ { found = 1 }
-            END { exit(found ? 0 : 1) }
+        awk -v domain="${domain,,}" '
+            NR > 1 && tolower($2) ~ /^ec-/ {
+                if (tolower($1) == domain) { print $1; exit }
+                sans = $3
+                gsub(/[,;]/, " ", sans)
+                count = split(sans, values, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    if (tolower(values[i]) == domain) { print $1; exit }
+                }
+            }
         '
+}
+
+function emit_active_acme_certificate_consumer() {
+    local requested_main_domain="${1,,}"
+    local lookup_name="$2"
+    local server_name="$3"
+    local consumer="$4"
+    local target_dir="$5"
+    local managed_domain=''
+
+    case "${consumer}" in
+    xray|nginx) ;;
+    *) return 1 ;;
+    esac
+    [[ -n "${lookup_name}" && -n "${server_name}" && -n "${target_dir}" &&
+        "${lookup_name}" != *$'\n'* && "${server_name}" != *$'\n'* &&
+        "${target_dir}" == /* && "${target_dir}" != '/' &&
+        "${target_dir}" != *$'\n'* && "${target_dir}" != *$'\t'* ]] || return 1
+
+    managed_domain="$(acme_main_domain_for_name "${lookup_name}" 2>/dev/null || true)"
+    if [[ -z "${managed_domain}" ]]; then
+        [[ -n "${requested_main_domain}" ]] && return 0
+        return 1
+    fi
+    if [[ -n "${requested_main_domain}" &&
+        "${managed_domain,,}" != "${requested_main_domain}" ]]; then
+        return 0
+    fi
+    printf '%s\t%s\t%s\t%s\n' \
+        "${managed_domain}" "${consumer}" "${server_name}" "${target_dir}"
+}
+
+function list_active_acme_certificate_consumers() {
+    local requested_main_domain="${1:-}"
+    local config_tag backend role domain source target_dir
+    local acme_domain multi_has_hy2
+    local -a roles=()
+
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')" || return 1
+    case "${config_tag,,}" in
+    cdn)
+        backend="$(get_cdn_backend)" || return 1
+        roles=(cdn cdnDown)
+        for role in "${roles[@]}"; do
+            domain="$(echo "${SCRIPT_CONFIG}" | jq -r \
+                --arg role "${role}" '.nginx[$role] // ""')" || return 1
+            [[ -n "${domain}" ]] || continue
+            if [[ "${backend}" == 'xray' ]]; then
+                if [[ "${role}" == 'cdn' ]]; then
+                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')" || return 1
+                else
+                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')" || return 1
+                fi
+                [[ "${source}" == '1' ]] || continue
+                target_dir="$(get_cdn_direct_cert_dir "${domain}" "${source}")" || return 1
+                emit_active_acme_certificate_consumer \
+                    "${requested_main_domain}" "${domain}" "${domain}" \
+                    'xray' "${target_dir}" || return 1
+            else
+                source="$(echo "${SCRIPT_CONFIG}" | jq -r \
+                    --arg role "${role}" '.nginx.certificates[$role].source // ""')" || return 1
+                [[ "${source}" == '1' ]] || continue
+                emit_active_acme_certificate_consumer \
+                    "${requested_main_domain}" "${domain}" "${domain}" \
+                    'nginx' "${NGINX_CONFIG_DIR}/certs/${domain}" || return 1
+            fi
+        done
+        ;;
+    sni)
+        roles=(domain cdn)
+        for role in "${roles[@]}"; do
+            domain="$(echo "${SCRIPT_CONFIG}" | jq -r \
+                --arg role "${role}" '.nginx[$role] // ""')" || return 1
+            [[ -n "${domain}" ]] || continue
+            source="$(echo "${SCRIPT_CONFIG}" | jq -r \
+                --arg role "${role}" '.nginx.certificates[$role].source // ""')" || return 1
+            [[ "${source}" == '1' ]] || continue
+            emit_active_acme_certificate_consumer \
+                "${requested_main_domain}" "${domain}" "${domain}" \
+                'nginx' "${NGINX_CONFIG_DIR}/certs/${domain}" || return 1
+        done
+        ;;
+    hy2|multi)
+        if [[ "${config_tag,,}" == 'multi' ]]; then
+            multi_has_hy2="$(echo "${SCRIPT_CONFIG}" |
+                jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')" || return 1
+            [[ "${multi_has_hy2}" == 'true' ]] || return 0
+        fi
+        source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')" || return 1
+        [[ "${source}" =~ ^[12]$ ]] || return 0
+        domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')" || return 1
+        acme_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '
+            (.xray.hy2CertAcmeDomain // "") as $acme_domain |
+            if $acme_domain == "" then (.xray.hy2CertDomain // "") else $acme_domain end
+        ')" || return 1
+        if ! target_dir="$(get_xray_runtime_cert_dir 2>/dev/null)"; then
+            target_dir="$(get_hy2_cert_dir "${domain}" "${source}")" || return 1
+        fi
+        emit_active_acme_certificate_consumer \
+            "${requested_main_domain}" "${acme_domain}" "${domain}" \
+            'xray' "${target_dir}" || return 1
+        ;;
+    esac
+}
+
+function handler_deploy_acme_certificate() {
+    local acme_domain="$1"
+    local source_dir="$2"
+    local managed_domain consumer_lines consumer server_name target_dir target_key
+    local reload_xray=0 reload_nginx=0 reload_status=0
+    local index consumer_count=0
+    local -a consumers=() server_names=() target_dirs=()
+    local -A target_consumers=()
+
+    [[ -n "${acme_domain}" && "${acme_domain}" != *$'\n'* &&
+        "${source_dir}" == /* && "${source_dir}" != '/' &&
+        "${source_dir}" != *$'\n'* && ! -L "${source_dir}" &&
+        -d "${source_dir}" &&
+        -f "${source_dir}/fullchain.pem" && ! -L "${source_dir}/fullchain.pem" &&
+        -f "${source_dir}/privkey.pem" && ! -L "${source_dir}/privkey.pem" ]] || return 1
+    managed_domain="$(acme_main_domain_for_name "${acme_domain}" 2>/dev/null || true)"
+    [[ -n "${managed_domain}" && "${managed_domain,,}" == "${acme_domain,,}" ]] || return 1
+    validate_tls_certificate_pair \
+        "${source_dir}/fullchain.pem" "${source_dir}/privkey.pem" || return 1
+
+    consumer_lines="$(list_active_acme_certificate_consumers "${managed_domain}")" || return 1
+    while IFS=$'\t' read -r managed_domain consumer server_name target_dir; do
+        [[ -n "${managed_domain}" ]] || continue
+        validate_cdn_direct_certificate \
+            "${source_dir}/fullchain.pem" "${source_dir}/privkey.pem" \
+            "${server_name}" || return 1
+        target_key="${target_dir}"
+        if [[ -n "${target_consumers[${target_key}]:-}" ]]; then
+            [[ "${target_consumers[${target_key}]}" == "${consumer}" ]] || return 1
+            continue
+        fi
+        target_consumers["${target_key}"]="${consumer}"
+        consumers+=("${consumer}")
+        server_names+=("${server_name}")
+        target_dirs+=("${target_dir}")
+        consumer_count=$((consumer_count + 1))
+    done <<<"${consumer_lines}"
+
+    for ((index = 0; index < consumer_count; index++)); do
+        consumer="${consumers[${index}]}"
+        server_name="${server_names[${index}]}"
+        target_dir="${target_dirs[${index}]}"
+        if [[ "${target_dir}" == "${source_dir}" ]]; then
+            if [[ "${consumer}" == 'xray' ]]; then
+                set_xray_certificate_permissions "${target_dir}" || return 1
+            else
+                set_nginx_certificate_permissions "${target_dir}" || return 1
+            fi
+        elif [[ "${consumer}" == 'xray' ]]; then
+            install_custom_xray_certificate_pair \
+                "${source_dir}/fullchain.pem" "${source_dir}/privkey.pem" \
+                "${server_name}" "${target_dir}" || return 1
+        else
+            install_custom_nginx_certificate_pair \
+                "${source_dir}/fullchain.pem" "${source_dir}/privkey.pem" \
+                "${server_name}" "${target_dir}" || return 1
+        fi
+        if [[ "${consumer}" == 'xray' ]]; then
+            reload_xray=1
+        else
+            reload_nginx=1
+        fi
+    done
+
+    if [[ "${reload_nginx}" -eq 1 ]]; then
+        reload_certificate_consumer nginx || reload_status=1
+    fi
+    if [[ "${reload_xray}" -eq 1 ]]; then
+        reload_certificate_consumer xray || reload_status=1
+    fi
+    return "${reload_status}"
+}
+
+function acme_manages_certificate() {
+    [[ -n "$(acme_main_domain_for_name "$1")" ]]
+}
+
+function current_config_uses_acme_main_domain() {
+    local target_main_domain="${1,,}"
+    local requested_domain="${2,,}"
+    local config_tag candidate managed_domain candidate_lines=''
+    local hy2_source='' multi_has_hy2='false'
+    local usage_status=1
+    local -a candidates=()
+
+    ACME_CONFIG_USES_REQUESTED_DOMAIN=0
+
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')" || return 2
+    case "${config_tag,,}" in
+    sni)
+        candidate_lines="$(echo "${SCRIPT_CONFIG}" | jq -r '
+            [.nginx.certificates.domain, .nginx.certificates.cdn][]? |
+            select((.source // "" | tostring) == "1") |
+            .hostname // empty
+        ')" || return 2
+        ;;
+    cdn)
+        if [[ "$(get_cdn_backend)" == 'xray' ]]; then
+            candidate_lines="$(echo "${SCRIPT_CONFIG}" | jq -r '
+                if (.xray.cdnCertSource // "" | tostring) == "1" then
+                    .xray.cdnCertHostname // empty
+                else empty end,
+                if (.xray.cdnDownCertSource // "" | tostring) == "1" then
+                    .xray.cdnDownCertHostname // empty
+                else empty end
+            ')" || return 2
+        else
+            candidate_lines="$(echo "${SCRIPT_CONFIG}" | jq -r '
+                [.nginx.certificates.cdn, .nginx.certificates.cdnDown][]? |
+                select((.source // "" | tostring) == "1") |
+                .hostname // empty
+            ')" || return 2
+        fi
+        ;;
+    esac
+    while IFS= read -r candidate; do
+        [[ -n "${candidate}" ]] && candidates+=("${candidate}")
+    done <<<"${candidate_lines}"
+
+    if [[ "${config_tag,,}" == 'multi' ]]; then
+        multi_has_hy2="$(echo "${SCRIPT_CONFIG}" |
+            jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')" || return 2
+    fi
+    hy2_source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')" || return 2
+    if { [[ "${config_tag,,}" == 'hy2' ]] || [[ "${multi_has_hy2}" == 'true' ]]; } &&
+        [[ "${hy2_source}" =~ ^[12]$ ]]; then
+        candidate_lines="$(echo "${SCRIPT_CONFIG}" | jq -r '
+            .xray.hy2CertDomain // empty,
+            .xray.hy2CertAcmeDomain // empty
+        ')" || return 2
+        while IFS= read -r candidate; do
+            [[ -n "${candidate}" ]] && candidates+=("${candidate}")
+        done <<<"${candidate_lines}"
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -n "${requested_domain}" && "${candidate,,}" == "${requested_domain}" ]]; then
+            ACME_CONFIG_USES_REQUESTED_DOMAIN=1
+        fi
+        managed_domain="$(acme_main_domain_for_name "${candidate}" 2>/dev/null || true)"
+        if [[ -n "${managed_domain}" && "${managed_domain,,}" == "${target_main_domain}" ]]; then
+            usage_status=0
+        fi
+    done
+    return "${usage_status}"
+}
+
+function cleanup_acme_certificate_if_unused() {
+    local domain="$1"
+    local delete_deployed="${2:-y}"
+    local deployed_dir="${3:-${NGINX_CONFIG_DIR}/certs/${domain}}"
+    local managed_domain='' usage_status=1
+
+    ACME_CONFIG_USES_REQUESTED_DOMAIN=0
+    managed_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+    if [[ -n "${managed_domain}" ]]; then
+        current_config_uses_acme_main_domain "${managed_domain}" "${domain}"
+        usage_status=$?
+        case "${usage_status}" in
+        0) ;;
+        1) exec_ssl '--stop-renew' "--domain=${domain}" '--keep-cert' || return 1 ;;
+        *) return 1 ;;
+        esac
+    fi
+    if [[ "${delete_deployed}" == 'y' && "${ACME_CONFIG_USES_REQUESTED_DOMAIN:-0}" -eq 0 ]]; then
+        [[ -n "${deployed_dir}" && "${deployed_dir}" != '/' ]] || return 1
+        rm -rf -- "${deployed_dir}" || return 1
+    fi
 }
 
 function run_with_nginx_temporarily_stopped() (
@@ -3063,70 +3904,25 @@ function run_with_nginx_temporarily_stopped() (
 )
 
 function handler_restore_certificate_renewal_hooks() {
-    local config_tag domain cert_dir source acme_domain
-    local domains=()
+    local consumer_lines managed_domain consumer server_name target_dir domain_key
+    local -A restored_domains=()
 
-    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
-    case "${config_tag,,}" in
-    cdn)
-        domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-        if [[ "$(get_cdn_backend)" == 'xray' ]]; then
-            local direct_role
-            for direct_role in cdn cdnDown; do
-                domain="$(echo "${SCRIPT_CONFIG}" | jq -r --arg role "${direct_role}" '.nginx[$role] // ""')"
-                [[ -n "${domain}" ]] || continue
-                if [[ "${direct_role}" == 'cdn' ]]; then
-                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')"
-                else
-                    source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')"
-                fi
-                if [[ "${source}" == '1' ]] && acme_manages_certificate "${domain}"; then
-                    cert_dir="$(get_cdn_direct_cert_dir "${domain}" "${source}")" || return 1
-                    install_acme_xray_certificate "${domain}" "${domain}" "${cert_dir}" || return 1
-                fi
-            done
+    consumer_lines="$(list_active_acme_certificate_consumers)" || return 1
+    while IFS=$'\t' read -r managed_domain consumer server_name target_dir; do
+        [[ -n "${managed_domain}" ]] || continue
+        domain_key="${managed_domain,,}"
+        if [[ -n "${restored_domains[${domain_key}]:-}" ]]; then
+            continue
+        fi
+        if [[ "${consumer}" == 'xray' ]]; then
+            install_acme_xray_certificate \
+                "${managed_domain}" "${server_name}" "${target_dir}" || return 1
         else
-            domains+=("${domain}")
-            domains+=("$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')")
+            install_acme_nginx_certificate \
+                "${managed_domain}" "${server_name}" "${target_dir}" || return 1
         fi
-        ;;
-    sni)
-        domains+=(
-            "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
-            "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-        )
-        ;;
-    hy2|multi)
-        if [[ "${config_tag,,}" == 'multi' ]] &&
-            ! echo "${SCRIPT_CONFIG}" |
-                jq -e 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")' >/dev/null; then
-            return 0
-        fi
-        source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')"
-        domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')"
-        acme_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '
-            (.xray.hy2CertAcmeDomain // "") as $acme_domain |
-            if $acme_domain == "" then (.xray.hy2CertDomain // "") else $acme_domain end
-        ')"
-        if [[ "${source}" =~ ^[12]$ ]] && acme_manages_certificate "${acme_domain}"; then
-            if ! cert_dir="$(get_xray_runtime_cert_dir 2>/dev/null)"; then
-                cert_dir="$(get_hy2_cert_dir "${domain}" "${source}")" || return 1
-            fi
-            install_acme_xray_certificate "${acme_domain}" "${domain}" "${cert_dir}" ||
-                return 1
-        fi
-        ;;
-    esac
-
-    for domain in "${domains[@]}"; do
-        [[ -n "${domain}" ]] || continue
-        exec_check '--domain-format' "${domain}" >/dev/null 2>&1 || return 1
-        if acme_manages_certificate "${domain}"; then
-            cert_dir="${NGINX_CONFIG_DIR}/certs/${domain}"
-            install_acme_nginx_certificate "${domain}" "${domain}" "${cert_dir}" ||
-                return 1
-        fi
-    done
+        restored_domains["${domain_key}"]=1
+    done <<<"${consumer_lines}"
 }
 
 function read_current_crontab() {
@@ -3152,8 +3948,6 @@ function configure_hy2_ip_renewal_cron() {
     local cert_domain="$2"
     local existing_cron='' rendered_cron='' line
     local removed_managed_line=0
-    local legacy_prefix="17 3 */3 * * ${HOME}/.acme.sh/acme.sh --renew -d "
-    local legacy_suffix=" --ecc --force --home ${HOME}/.acme.sh >/dev/null 2>&1"
 
     if ! command -v crontab >/dev/null 2>&1; then
         [[ "${cert_source}" != '2' ]]
@@ -3161,8 +3955,7 @@ function configure_hy2_ip_renewal_cron() {
     fi
     existing_cron="$(read_current_crontab)" || return 1
     while IFS= read -r line || [[ -n "${line}" ]]; do
-        if [[ "${line}" == *'# xray-script-hy2-ip-renew' ||
-            "${line}" == "${legacy_prefix}"*"${legacy_suffix}" ]]; then
+        if is_managed_hy2_ip_cron_line "${line}"; then
             removed_managed_line=1
             continue
         fi
@@ -3194,7 +3987,7 @@ function handler_cdn_direct_cert_role() {
     local role="${2:-cdn}"
     local domain source cached_hostname custom_fullchain custom_privkey account_email
     local cert_dir=''
-    local acme_exists=0 target_ready=0
+    local acme_exists=0 target_ready=0 managed_acme_domain=''
     local acme_action='' acme_status=0
 
     if [[ "${role}" == 'cdn' ]]; then
@@ -3269,7 +4062,7 @@ function handler_cdn_direct_cert_role() {
     else
         account_email="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca // ""')"
         if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
-            exec_read 'email'
+            exec_read 'email' || return 1
             account_email="${CONFIG_DATA['email']:-}"
             if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
@@ -3280,7 +4073,8 @@ function handler_cdn_direct_cert_role() {
         fi
         handler_ssl_install || return 1
 
-        if acme_manages_certificate "${domain}"; then
+        managed_acme_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+        if [[ -n "${managed_acme_domain}" ]]; then
             acme_exists=1
         fi
         if validate_cdn_direct_certificate \
@@ -3301,7 +4095,7 @@ function handler_cdn_direct_cert_role() {
         if [[ -n "${acme_action}" ]]; then
             if [[ "${acme_action}" == 'renew' ]]; then
                 if run_with_nginx_temporarily_stopped \
-                    "${ACME_PATH}" --renew -d "${domain}" --ecc --force \
+                    "${ACME_PATH}" --renew -d "${managed_acme_domain}" --ecc --force \
                     --home "${HOME}/.acme.sh"; then
                     acme_status=0
                 else
@@ -3340,6 +4134,8 @@ function handler_cdn_direct_cert_role() {
                 return 1
             fi
             acme_exists=1
+            managed_acme_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+            [[ -n "${managed_acme_domain}" ]] || return 1
         fi
 
         # Reinstall on every prepare, even when the current files are valid.
@@ -3347,7 +4143,7 @@ function handler_cdn_direct_cert_role() {
         # renewal target and reload command to the selected backend.
         if [[ "${acme_exists}" -ne 1 ]] ||
             ! install_acme_xray_certificate \
-                "${domain}" "${domain}" "${cert_dir}"; then
+                "${managed_acme_domain}" "${domain}" "${cert_dir}"; then
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
             return 1
         fi
@@ -3382,16 +4178,45 @@ function handler_cdn_direct_cert_role() {
 
 function handler_cdn_direct_cert() {
     local action="${1:-prepare}"
-    handler_cdn_direct_cert_role "${action}" 'cdn' || return 1
-    local cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    local role role_action domain source managed_domain domain_key cdn_down
+    local -a roles=(cdn)
+    local -A renewed_domains=()
+
+    cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')" || return 1
     if [[ -n "${cdn_down}" ]]; then
-        handler_cdn_direct_cert_role "${action}" 'cdnDown' || return 1
+        roles+=(cdnDown)
     fi
+    for role in "${roles[@]}"; do
+        role_action="${action}"
+        if [[ "${action}" == 'renew' ]]; then
+            domain="$(echo "${SCRIPT_CONFIG}" | jq -r \
+                --arg role "${role}" '.nginx[$role] // ""')" || return 1
+            if [[ "${role}" == 'cdn' ]]; then
+                source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnCertSource // ""')" || return 1
+            else
+                source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.cdnDownCertSource // ""')" || return 1
+            fi
+            if [[ "${source}" == '1' ]]; then
+                managed_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+                [[ -n "${managed_domain}" ]] || return 1
+                domain_key="${managed_domain,,}"
+                if [[ -n "${renewed_domains[${domain_key}]:-}" ]]; then
+                    role_action='prepare'
+                fi
+            fi
+        fi
+        handler_cdn_direct_cert_role "${role_action}" "${role}" || return 1
+        if [[ "${action}" == 'renew' && "${source:-}" == '1' ]]; then
+            renewed_domains["${domain_key}"]=1
+        fi
+    done
 }
 
 function handler_change_cdn_down_direct() {
     local old_config="${SCRIPT_CONFIG}"
     local old_domain old_source new_domain runtime_snapshot=''
+    local new_acme_preexisting=0 new_acme_created=0
+    local acme_cert_dir custom_cert_dir acme_cert_dir_preexisting=0 custom_cert_dir_preexisting=0
     local runtime_state='missing' operation_status=0
 
     old_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
@@ -3399,6 +4224,14 @@ function handler_change_cdn_down_direct() {
     exec_read 'cdn-down' || return 1
     new_domain="${CONFIG_DATA['cdn-down']:-}"
     [[ "${new_domain}" != "${old_domain}" ]] || return 0
+
+    if [[ -n "${new_domain}" ]]; then
+        acme_manages_certificate "${new_domain}" && new_acme_preexisting=1
+        acme_cert_dir="$(get_cdn_direct_cert_dir "${new_domain}" '1')" || return 1
+        custom_cert_dir="$(get_cdn_direct_cert_dir "${new_domain}" '2')" || return 1
+        [[ -e "${acme_cert_dir}" ]] && acme_cert_dir_preexisting=1
+        [[ -e "${custom_cert_dir}" ]] && custom_cert_dir_preexisting=1
+    fi
 
     if [[ -L "${XRAY_CONFIG_PATH}" ]]; then
         return 1
@@ -3427,6 +4260,9 @@ function handler_change_cdn_down_direct() {
     fi
     if [[ "${operation_status}" -eq 0 && -n "${new_domain}" ]]; then
         handler_cdn_direct_cert_role 'prepare' 'cdnDown' || operation_status=1
+        if [[ "${new_acme_preexisting}" -eq 0 ]] && acme_manages_certificate "${new_domain}"; then
+            new_acme_created=1
+        fi
     fi
     if [[ "${operation_status}" -eq 0 ]]; then
         handler_xray_config 1 || operation_status=1
@@ -3444,9 +4280,15 @@ function handler_change_cdn_down_direct() {
             rm -f -- "${XRAY_CONFIG_PATH}" || true
         fi
         handler_restart >/dev/null 2>&1 || true
-        if [[ -n "${new_domain}" && "${new_domain}" != "${old_domain}" ]] &&
-            acme_manages_certificate "${new_domain}"; then
-            exec_ssl '--stop-renew' "--domain=${new_domain}" '--delete-cert' >/dev/null 2>&1 || true
+        if [[ "${new_acme_created}" -eq 1 ]]; then
+            cleanup_acme_certificate_if_unused \
+                "${new_domain}" 'y' "${acme_cert_dir}" >/dev/null 2>&1 || true
+        fi
+        if [[ "${acme_cert_dir_preexisting}" -eq 0 && -n "${acme_cert_dir}" ]]; then
+            rm -rf -- "${acme_cert_dir}"
+        fi
+        if [[ "${custom_cert_dir_preexisting}" -eq 0 && -n "${custom_cert_dir}" ]]; then
+            rm -rf -- "${custom_cert_dir}"
         fi
         [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.config_fail")" >&2
@@ -3456,7 +4298,11 @@ function handler_change_cdn_down_direct() {
     [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
     if [[ -n "${old_domain}" && "${old_domain}" != "${new_domain}" && "${old_source}" == '1' ]] &&
         acme_manages_certificate "${old_domain}"; then
-        exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+        local old_acme_cert_dir=''
+        old_acme_cert_dir="$(get_cdn_direct_cert_dir "${old_domain}" '1')" || true
+        [[ -z "${old_acme_cert_dir}" ]] ||
+            cleanup_acme_certificate_if_unused \
+                "${old_domain}" 'y' "${old_acme_cert_dir}" || true
     fi
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
 }
@@ -3517,7 +4363,7 @@ function handler_change_cdn_down_nginx() {
     [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
     if [[ -n "${old_domain}" && "${old_domain}" != "${new_domain}" ]] &&
         acme_manages_certificate "${old_domain}"; then
-        exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+        cleanup_acme_certificate_if_unused "${old_domain}" 'y' || true
     fi
     echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
 }
@@ -3525,20 +4371,30 @@ function handler_change_cdn_down_nginx() {
 function handler_cleanup_stale_cdn_down() {
     local stale_domain="$1"
     local cleanup_mode="${2:-all}"
+    local nginx_cert_dir direct_acme_dir direct_custom_dir
+
     [[ -n "${stale_domain}" ]] || return 0
     exec_check '--domain-format' "${stale_domain}" >/dev/null 2>&1 || return 1
-    if [[ "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')" ||
+    if [[ "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')" ||
+        "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')" ||
         "${stale_domain}" == "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')" ]]; then
         return 0
     fi
+    nginx_cert_dir="${NGINX_CONFIG_DIR}/certs/${stale_domain}"
+    direct_acme_dir="$(get_cdn_direct_cert_dir "${stale_domain}" '1')" || return 1
+    direct_custom_dir="$(get_cdn_direct_cert_dir "${stale_domain}" '2')" || return 1
     if [[ "${cleanup_mode}" != 'renew-only' ]]; then
         rm -f -- \
             "${NGINX_CONFIG_DIR}/sites-available/${stale_domain}.conf" \
             "${NGINX_CONFIG_DIR}/sites-enabled/${stale_domain}.conf" || return 1
     fi
     if acme_manages_certificate "${stale_domain}"; then
-        exec_ssl '--stop-renew' "--domain=${stale_domain}" '--delete-cert' || return 1
+        cleanup_acme_certificate_if_unused \
+            "${stale_domain}" 'y' "${nginx_cert_dir}" || return 1
+    else
+        rm -rf -- "${nginx_cert_dir}" || return 1
     fi
+    rm -rf -- "${direct_acme_dir}" "${direct_custom_dir}" || return 1
 }
 
 # =============================================================================
@@ -3589,6 +4445,7 @@ function handler_hy2_cert() {
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing")" >&2
             mkdir -p "${CERT_DIR}"
             local reuse_acme_domain="${cert_reuse_choice}"
+            local managed_reuse_acme_domain=''
             if [[ "${cert_reuse_choice}" == "xray-certs" ||
                 "${cert_reuse_choice}" == "legacy-xray-certs" ]]; then
                 reuse_acme_domain="${CERT_ACME_DOMAIN:-${CERT_DOMAIN}}"
@@ -3597,13 +4454,14 @@ function handler_hy2_cert() {
             # still has a matching ECC record in acme.sh. Reinstalling it here
             # also rebinds the renewal target and reload hook to this isolated
             # HY2 directory instead of leaving an old fixed-path hook behind.
-            if ! acme_manages_certificate "${reuse_acme_domain}" ||
+            managed_reuse_acme_domain="$(acme_main_domain_for_name "${reuse_acme_domain}" 2>/dev/null || true)"
+            if [[ -z "${managed_reuse_acme_domain}" ]] ||
                 ! install_acme_xray_certificate \
-                    "${reuse_acme_domain}" "${CERT_DOMAIN}" "${CERT_DIR}"; then
+                    "${managed_reuse_acme_domain}" "${CERT_DOMAIN}" "${CERT_DIR}"; then
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             fi
-            CERT_ACME_DOMAIN="${reuse_acme_domain}"
+            CERT_ACME_DOMAIN="${managed_reuse_acme_domain}"
             if [[ ! -r "${CERT_DIR}/fullchain.pem" || ! -r "${CERT_DIR}/privkey.pem" ]]; then
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
@@ -3697,12 +4555,13 @@ function handler_hy2_cert() {
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_ok")" >&2
 
             # 安装证书到 Xray 目录
+            CERT_ACME_DOMAIN="$(acme_main_domain_for_name "${CERT_DOMAIN}" 2>/dev/null || true)"
+            [[ -n "${CERT_ACME_DOMAIN}" ]] || return 1
             install_acme_xray_certificate \
-                "${CERT_DOMAIN}" "${CERT_DOMAIN}" "${CERT_DIR}" || {
+                "${CERT_ACME_DOMAIN}" "${CERT_DOMAIN}" "${CERT_DIR}" || {
                 echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             }
-            CERT_ACME_DOMAIN="${CERT_DOMAIN}"
 
             if ! validate_cdn_direct_certificate \
                     "${CERT_DIR}/fullchain.pem" \
@@ -3855,7 +4714,7 @@ function handler_xray_version() {
         ;;
     custom)
         # 读取用户自定义的版本
-        exec_read 'version'
+        exec_read 'version' || return 1
         ;;
     *)
         # 获取最新的 release 版本
@@ -3882,13 +4741,15 @@ function handler_change_xray_port() {
     local XRAY_PORT="443"
     # 获取配置标签
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
+    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
 
     if ! protocol_reads_public_port "${CONFIG_TAG}"; then
-        _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.fixed")"
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.fixed")" >&2
+        return 1
     fi
 
     # 读取端口
-    exec_read 'port'
+    exec_read 'port' || return 1
 
     # 根据配置标签处理端口
     case "${CONFIG_TAG,,}" in
@@ -3903,9 +4764,9 @@ function handler_change_xray_port() {
     esac
 
     # 更新脚本配置中的 Xray 端口
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.xray.port = $port')"
-    # 将更新后的脚本配置写入文件
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${XRAY_PORT}" '.xray.port = $port')" || return 1
+    apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"
 }
 
 # =============================================================================
@@ -4149,7 +5010,9 @@ function handler_restart() {
         finalize_non_nginx=1
     elif current_protocol_uses_nginx; then
         handler_sync_nginx_xhttp_path || return 1
-        if [[ "${NGINX_CONFIG_CHANGED}" -eq 1 ]]; then
+        if [[ "${NGINX_CONFIG_CHANGED}" -eq 1 ]] ||
+            ! systemctl -q is-active nginx ||
+            ! systemctl -q is-enabled nginx; then
             handler_nginx_restart || return 1
         fi
     fi
@@ -4287,37 +5150,58 @@ function handler_docker() {
 # 返回值: 无 (通过调用其他函数和脚本执行操作，修改配置文件)
 # =============================================================================
 function handler_warp() {
-    # 确保 Docker 已安装
     handler_docker || return 1
-    # 从脚本配置中读取当前 WARP 状态
-    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
-    # 从 Xray 配置文件加载配置
-    XRAY_CONFIG="$(jq '.' "${XRAY_CONFIG_PATH}")"
-    # 如果 WARP 已启用 (状态为 1)
-    if [[ ${WARP_STATUS} -eq 1 ]]; then
-        WARP_STATUS=0 # 设置状态为禁用
-        # 调用 docker.sh 禁用 WARP 容器
-        exec_docker '--disable-warp' || return 1
-        # 从 Xray 配置中删除 WARP 出站和相关路由规则
-        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq 'del(.outbounds[] | select(.tag == "warp")) | del(.routing.rules[] | select(.outboundTag == "warp"))')
+    local warp_status previous_script_config previous_xray_config
+    local container_was_running=0
+    warp_status="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
+    previous_script_config="${SCRIPT_CONFIG}"
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    if docker inspect xray-script-warp >/dev/null 2>&1 &&
+        [[ "$(docker inspect --format='{{.State.Running}}' xray-script-warp 2>/dev/null)" == 'true' ]]; then
+        container_was_running=1
+    fi
+
+    if [[ "${warp_status}" -eq 1 ]]; then
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
+            .xray.warp = 0 |
+            .rules = [(.rules // [])[] | select((.outboundTag // "") != "warp")]
+        ')" || return 1
+        apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}" || return 1
+        if ! exec_docker '--disable-warp'; then
+            exec_docker '--enable-warp' >/dev/null 2>&1 || true
+            local disabled_script_config="${SCRIPT_CONFIG}"
+            local disabled_xray_config
+            disabled_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}" 2>/dev/null || echo "${previous_xray_config}")"
+            SCRIPT_CONFIG="${previous_script_config}"
+            if ! apply_xray_state_transaction "${disabled_script_config}" "${disabled_xray_config}"; then
+                # The state transaction restores the disabled files on failure;
+                # keep the container aligned with that recovered runtime.
+                exec_docker '--disable-warp' >/dev/null 2>&1 || true
+            fi
+            return 1
+        fi
     else
-        WARP_STATUS=1 # 设置状态为启用
-        # 调用 docker.sh 构建并启用 WARP 容器
         exec_docker '--build-warp' || return 1
         local container_ip=''
-        container_ip="$(exec_docker '--enable-warp')" || return 1 # 获取 WARP 容器 IP
-        [[ -n "${container_ip}" ]] || return 1
-        # 构造 WARP Socks 出站配置 JSON
-        local socks_config='[{"tag":"warp","protocol":"socks","settings":{"servers":[{"address":"'"${container_ip}"'","port":40001}]}}]'
-        # 将 WARP 出站配置添加到 Xray 配置中
-        XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')
+        if ! container_ip="$(exec_docker '--enable-warp')" || [[ -z "${container_ip}" ]]; then
+            if [[ "${container_was_running}" -eq 0 ]]; then
+                exec_docker '--disable-warp' >/dev/null 2>&1 || true
+            fi
+            return 1
+        fi
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.warp = 1')" || {
+            if [[ "${container_was_running}" -eq 0 ]]; then
+                exec_docker '--disable-warp' >/dev/null 2>&1 || true
+            fi
+            return 1
+        }
+        if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+            if [[ "${container_was_running}" -eq 0 ]]; then
+                exec_docker '--disable-warp' || true
+            fi
+            return 1
+        fi
     fi
-    # 更新脚本配置中的 WARP 状态
-    SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg warp "${WARP_STATUS}" '.xray.warp = $warp')
-    # 将更新后的脚本配置和 Xray 配置写入文件
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
-    write_xray_runtime_config "${XRAY_CONFIG}" || return 1
-    sleep 2
 }
 
 # =============================================================================
@@ -4331,21 +5215,48 @@ function handler_warp() {
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 function handler_reset_warp() {
-    # 确保 Docker 已安装
     handler_docker || return 1
-    # 从脚本配置中读取当前 WARP 状态
-    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
-    # 从 Xray 配置文件加载配置
-    XRAY_CONFIG="$(jq '.' "${XRAY_CONFIG_PATH}")"
-    # 如果 WARP 已启用 (状态为 1)
-    if [[ ${WARP_STATUS} -eq 1 ]]; then
-        # 清空 WARP 容器日志数据
-        exec_docker '--clean-container-logs' || return 1
-        # 调用 docker.sh 禁用 WARP 容器
-        exec_docker '--disable-warp' || return 1
-        # 调用 docker.sh 构建并启用 WARP 容器
-        exec_docker '--build-warp' || return 1
-        exec_docker '--enable-warp' || return 1
+    local warp_status previous_script_config previous_xray_config container_ip
+    local rollback_status=0
+    warp_status="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
+    [[ "${warp_status}" -eq 1 ]] || return 0
+    previous_script_config="${SCRIPT_CONFIG}"
+    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+
+    exec_docker '--clean-container-logs' || return 1
+    if ! container_ip="$(exec_docker '--prepare-reset-warp')"; then
+        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || true
+        return 1
+    fi
+    if [[ -z "${container_ip}" ]]; then
+        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || rollback_status=1
+        SCRIPT_CONFIG="${previous_script_config}"
+        if [[ "${rollback_status}" -eq 0 ]] &&
+            { ! handler_xray_config 1 || ! handler_restart; }; then
+            rollback_status=1
+        fi
+        if [[ "${rollback_status}" -ne 0 ]]; then
+            echo 'WARP reset rollback failed.' >&2
+        fi
+        return 1
+    fi
+
+    if ! exec_docker '--commit-reset-warp'; then
+        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || rollback_status=1
+        SCRIPT_CONFIG="${previous_script_config}"
+        if [[ "${rollback_status}" -eq 0 ]] &&
+            { ! handler_xray_config 1 || ! handler_restart; }; then
+            rollback_status=1
+        fi
+        if [[ "${rollback_status}" -ne 0 ]]; then
+            echo 'WARP reset rollback failed.' >&2
+        fi
+        return 1
     fi
 }
 
@@ -4830,7 +5741,7 @@ function handler_nginx_restart() {
             ! grep -Eq '^UMask=0007[[:space:]]*$' "${NGINX_SERVICE_PATH}" ||
             ! grep -Fq -- '-m 2770 /dev/shm/nginx' "${NGINX_SERVICE_PATH}" ||
             ! grep -Fq 'xray-nginx' "${NGINX_SERVICE_PATH}"; then
-            bash "${NGINX_PATH}" --service-config
+            bash "${NGINX_PATH}" --service-config || return 1
         fi
     fi
     # 动态检测 nginx 二进制是否包含 brotli 压缩模块，如果不包含，则自动注释 general.conf 中的 brotli 配置，以防 Nginx 启动/重载报错
@@ -4891,6 +5802,42 @@ function valid_change_domain_transaction_domain() {
     local domain_regex='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
 
     ((${#domain} <= 250)) && [[ "${domain}" =~ ${domain_regex} ]]
+}
+
+function render_managed_site_domain() {
+    local source_file="$1"
+    local output_file="$2"
+    local domain="$3"
+    local cert_root="${NGINX_CONFIG_DIR}/certs/${domain}"
+
+    [[ -f "${source_file}" && ! -L "${source_file}" ]] || return 1
+    [[ "$(head -n 1 "${source_file}" | tr -d '\r')" == '# xray_script' ]] || return 1
+    awk -v domain="${domain}" -v cert_root="${cert_root}" '
+        /^[[:space:]]*ssl_certificate[[:space:]]+/ {
+            sub(/ssl_certificate[[:space:]]+[^;]+;/, "ssl_certificate              " cert_root "/fullchain.pem;")
+        }
+        /^[[:space:]]*ssl_certificate_key[[:space:]]+/ {
+            sub(/ssl_certificate_key[[:space:]]+[^;]+;/, "ssl_certificate_key          " cert_root "/privkey.pem;")
+        }
+        /^[[:space:]]*server_name[[:space:]]+/ {
+            sub(/server_name[[:space:]]+[^;]+;/, "server_name               " domain ";")
+        }
+        { print }
+    ' "${source_file}" >"${output_file}"
+}
+
+function render_nginx_stream_config() {
+    local output_file="$1"
+    local domain cdn
+    domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
+    cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    [[ -n "${domain}" && -n "${cdn}" ]] || return 1
+
+    awk -v domain="${domain}" -v cdn="${cdn}" '
+        $2 == "nginx_to_xray_vision;" { sub(/[^[:space:]]+/, domain) }
+        $2 == "cdn_to_nginx;" { sub(/[^[:space:]]+/, cdn) }
+        { print }
+    ' "${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf" >"${output_file}"
 }
 
 function change_domain_transaction_relative_path_is_safe() {
@@ -5033,7 +5980,7 @@ function restore_change_domain_transaction_target() {
 
 function restore_change_domain_transaction() {
     local transaction_dir="$1"
-    local state relative_path target_path payload_path
+    local state relative_path target_path payload_path script_state=''
     local restore_status=0
 
     change_domain_transaction_dir_is_safe "${transaction_dir}" || return 1
@@ -5053,11 +6000,16 @@ function restore_change_domain_transaction() {
             restore_status=1
     done <"${transaction_dir}/manifest.tsv"
 
-    state="$(<"${transaction_dir}/script-config.state")" || restore_status=1
-    restore_change_domain_transaction_target \
-        "${SCRIPT_CONFIG_PATH}" "${state}" \
-        "${transaction_dir}/script-config.payload" 'n' ||
+    if [[ -f "${transaction_dir}/script-config.state" &&
+        ! -L "${transaction_dir}/script-config.state" ]] &&
+        script_state="$(<"${transaction_dir}/script-config.state")"; then
+        restore_change_domain_transaction_target \
+            "${SCRIPT_CONFIG_PATH}" "${script_state}" \
+            "${transaction_dir}/script-config.payload" 'n' ||
+            restore_status=1
+    else
         restore_status=1
+    fi
     if [[ "${restore_status}" -eq 0 ]]; then
         SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")" || restore_status=1
     fi
@@ -5159,13 +6111,14 @@ function rollback_change_domain_transaction() {
 # =============================================================================
 function handler_change_domain() {
     # 获取 XHTTP PATH
-    local XHTTP_PATH
+    local XHTTP_PATH CONFIG_TAG
     XHTTP_PATH="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
-    if [[ -n "${XHTTP_PATH}" ]] && ! validate_xhttp_path "${XHTTP_PATH}"; then
+    CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
+    if { protocol_uses_xhttp "${CONFIG_TAG}" && [[ -z "${XHTTP_PATH}" ]]; } ||
+        ! validate_xhttp_path "${XHTTP_PATH}"; then
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
         return 1
     fi
-    local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"
     # 获取目标域名类型参数
     local target_domain="$1"
     # 获取管理停止证书签发服务参数
@@ -5181,8 +6134,10 @@ function handler_change_domain() {
     local input_domain_key="${target_domain}"
     [[ "${target_domain}" == 'cdnDown' ]] && input_domain_key='cdn-down'
     if [[ -z "${CONFIG_DATA["${input_domain_key}"]+set}" && "${stop_cert_service}" == "y" ]]; then
-        [[ "${old_domain}" ]] && exec_read 'only-change-domain'
-        exec_read "${input_domain_key}"
+        if [[ -n "${old_domain}" ]]; then
+            exec_read 'only-change-domain' || return 1
+        fi
+        exec_read "${input_domain_key}" || return 1
     elif [[ -z "${CONFIG_DATA["${input_domain_key}"]+set}" ]]; then
         CONFIG_DATA["${input_domain_key}"]="${old_domain}"
     fi
@@ -5232,7 +6187,7 @@ function handler_change_domain() {
             return 1
         fi
         if [[ -n "${old_domain}" && "${stop_cert_service}" == 'y' ]] && acme_manages_certificate "${old_domain}"; then
-            exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' || true
+            cleanup_acme_certificate_if_unused "${old_domain}" 'y' || true
         fi
         cleanup_change_domain_transaction "${transaction_dir}" || return 1
         return 0
@@ -5393,9 +6348,11 @@ function handler_change_domain() {
             echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
             local src_cert_dir="${NGINX_CONFIG_DIR}/certs/${cert_reuse_choice}"
             local dst_cert_dir="${NGINX_CONFIG_DIR}/certs/${new_domain}"
-            if acme_manages_certificate "${cert_reuse_choice}"; then
+            local managed_reuse_domain=''
+            managed_reuse_domain="$(acme_main_domain_for_name "${cert_reuse_choice}" 2>/dev/null || true)"
+            if [[ -n "${managed_reuse_domain}" ]]; then
                 if install_acme_nginx_certificate \
-                    "${cert_reuse_choice}" "${new_domain}" "${dst_cert_dir}"; then
+                    "${managed_reuse_domain}" "${new_domain}" "${dst_cert_dir}"; then
                     cert_ok=true
                 fi
             elif [[ "${cert_reuse_choice}" == "${new_domain}" &&
@@ -5420,7 +6377,11 @@ function handler_change_domain() {
             # 用户选择重新申请证书
             # 如果 CA 邮箱为空，则读取邮箱
             if [[ -z "${CA_EMAIL}" ]]; then
-                exec_read 'email'
+                exec_read 'email' || {
+                    rollback_change_domain_transaction \
+                        "${transaction_dir}" "${restart_nginx}" || true
+                    return 1
+                }
                 CA_EMAIL="${CONFIG_DATA['email']}"
                 SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ca "${CA_EMAIL}" '.nginx.ca = $ca')"
                 if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
@@ -5475,26 +6436,18 @@ function handler_change_domain() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${new_domain}" 'if $key == "domain" then .xray.target = $domain else . end')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${new_domain}" 'if $key == "domain" then .xray.serverNames = [$domain] else . end')"
     if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
+        local stream_temp
+        stream_temp="$(mktemp "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf.tmp.XXXXXX")" || {
+            rollback_change_domain_transaction \
+                "${transaction_dir}" "${restart_nginx}" || true
+            return 1
+        }
         if ! remove_change_domain_transaction_target \
                 "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" 'n' ||
-            ! cp -f \
-                "${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf" \
+            ! render_nginx_stream_config "${stream_temp}" ||
+            ! mv -f -- "${stream_temp}" \
                 "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"; then
-            rollback_change_domain_transaction \
-                "${transaction_dir}" "${restart_nginx}" || true
-            return 1
-        fi
-        # 替换 stream.conf 的 example.com 与 cdn.example.com 为实际域名。
-        # 仅在域名非空时替换，避免把占位符替换成空字符串而破坏 server_name。
-        local stream_conf="${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"
-        local stream_cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-        local stream_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
-        if [[ -n "${stream_cdn}" ]] && ! sed -i "s|cdn.example.com|${stream_cdn}|g" "${stream_conf}"; then
-            rollback_change_domain_transaction \
-                "${transaction_dir}" "${restart_nginx}" || true
-            return 1
-        fi
-        if [[ -n "${stream_domain}" ]] && ! sed -i "s|example.com|${stream_domain}|g" "${stream_conf}"; then
+            rm -f -- "${stream_temp}"
             rollback_change_domain_transaction \
                 "${transaction_dir}" "${restart_nginx}" || true
             return 1
@@ -5527,32 +6480,20 @@ function handler_change_domain() {
                 "${transaction_dir}" "${restart_nginx}" || true
             return 1
         fi
-        if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
-            local stream_snapshot="${transaction_dir}/root/modules-enabled/stream.conf"
-            if [[ ! -f "${stream_snapshot}" || -L "${stream_snapshot}" ]] ||
-                ! remove_change_domain_transaction_target \
-                    "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" 'n' ||
-                ! cp -a -- "${stream_snapshot}" \
-                    "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"; then
-                rollback_change_domain_transaction \
-                    "${transaction_dir}" "${restart_nginx}" || true
-                return 1
-            fi
-        fi
-        # 更新域名
-        if ! sed -i "s|${old_domain}|${new_domain}|g" \
-            "${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf"; then
+        local site_temp
+        site_temp="$(mktemp "${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf.tmp.XXXXXX")" || {
             rollback_change_domain_transaction \
                 "${transaction_dir}" "${restart_nginx}" || true
             return 1
-        fi
-        if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
-            if ! sed -i "s|${old_domain}|${new_domain}|g" \
-                "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"; then
-                rollback_change_domain_transaction \
-                    "${transaction_dir}" "${restart_nginx}" || true
-                return 1
-            fi
+        }
+        if ! render_managed_site_domain \
+            "${old_site_snapshot}" "${site_temp}" "${new_domain}" ||
+            ! mv -f -- "${site_temp}" \
+                "${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf"; then
+            rm -f -- "${site_temp}"
+            rollback_change_domain_transaction \
+                "${transaction_dir}" "${restart_nginx}" || true
+            return 1
         fi
         # 创建从 available 到 enabled 的软链接
         if ! ln -sfn \
@@ -5574,10 +6515,10 @@ function handler_change_domain() {
     if [[ -n "${old_domain}" && "${stop_cert_service}" == 'y' ]] &&
         acme_manages_certificate "${old_domain}"; then
         if [[ "${old_domain}" != "${new_domain}" ]]; then
-            exec_ssl '--stop-renew' "--domain=${old_domain}" '--delete-cert' ||
+            cleanup_acme_certificate_if_unused "${old_domain}" 'y' ||
                 true
         elif [[ "${cert_source_reply}" == '2' ]]; then
-            exec_ssl '--stop-renew' "--domain=${old_domain}" '--keep-cert' ||
+            cleanup_acme_certificate_if_unused "${old_domain}" 'n' ||
                 true
         fi
     fi
@@ -5597,6 +6538,7 @@ function handler_renew_ssl() {
     local config_tag
     config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     if [[ "${config_tag,,}" == 'cdn' && "$(get_cdn_backend)" == 'xray' ]]; then
+        handler_restore_certificate_renewal_hooks || return 1
         handler_cdn_direct_cert 'renew' || return 1
         handler_restart
         return $?
@@ -5604,6 +6546,7 @@ function handler_renew_ssl() {
 
     # 任何续签或服务重载失败都必须反馈给调用者，不能让 if 的空分支
     # 把失败状态吞掉。
+    handler_restore_certificate_renewal_hooks || return 1
     exec_ssl '--renew' || return 1
     if current_protocol_uses_nginx; then
         handler_nginx_restart || return 1
@@ -5732,8 +6675,10 @@ function handler_restore_configured_web_backend() {
 function handler_web() {
     reject_nginx_action_in_cdn_direct_mode || return 1
 
-    local web="${1:-normal}" # 获取 Web 类型参数，默认为 normal
+    local web="${1:-normal}"
     local restart_xray="${2:-y}"
+    local previous_script_config="${SCRIPT_CONFIG}"
+    local transaction_dir=''
     # 从脚本配置中读取域名和 CDN
     local config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     local domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
@@ -5750,48 +6695,117 @@ function handler_web() {
         [[ -n "${cdn}" ]] && site_domains+=("${cdn}")
         ;;
     esac
-    # 根据 Web 类型启动/停止 Cloudreve 容器
+    case "${web}" in
+    normal | v3 | v4) ;;
+    *) return 1 ;;
+    esac
+    if [[ "${web}" != 'normal' && "${#site_domains[@]}" -eq 0 ]]; then
+        return 1
+    fi
+
+    transaction_dir="$(mktemp -d "${SCRIPT_CONFIG_DIR}/web-change.XXXXXX")" || return 1
+    local -a site_files=() backup_files=()
+    local site_domain site_file backup_file
+    for site_domain in "${site_domains[@]}"; do
+        site_file="${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+        [[ -f "${site_file}" ]] || {
+            rm -rf -- "${transaction_dir}"
+            return 1
+        }
+        backup_file="${transaction_dir}/${#backup_files[@]}.conf"
+        cp -p -- "${site_file}" "${backup_file}" || {
+            rm -rf -- "${transaction_dir}"
+            return 1
+        }
+        site_files+=("${site_file}")
+        backup_files+=("${backup_file}")
+    done
+
+    function rollback_web_change() {
+        local index rollback_status=0
+        SCRIPT_CONFIG="${previous_script_config}"
+        for ((index = 0; index < ${#site_files[@]}; index++)); do
+            cp -p -- "${backup_files[index]}" "${site_files[index]}" || rollback_status=1
+        done
+        handler_restore_configured_web_backend || rollback_status=1
+        handler_nginx_restart || rollback_status=1
+        if [[ "${restart_xray}" != 'n' ]]; then
+            handler_restart || rollback_status=1
+        fi
+        if [[ "${rollback_status}" -eq 0 ]]; then
+            rm -rf -- "${transaction_dir}"
+        else
+            echo "Web change rollback failed; recovery files retained at: ${transaction_dir}" >&2
+        fi
+        return "${rollback_status}"
+    }
+
     case "${web}" in
     v3)
-        # 启动 v3，停止 v4
-        handler_cloudreve_v4 'stop'
-        handler_cloudreve_v3 'start'
+        handler_cloudreve_v4 'stop' && handler_cloudreve_v3 'start' || {
+            rollback_web_change || true
+            return 1
+        }
         ;;
     v4)
-        # 启动 v4，停止 v3
-        handler_cloudreve_v3 'stop'
-        handler_cloudreve_v4 'start'
+        handler_cloudreve_v3 'stop' && handler_cloudreve_v4 'start' || {
+            rollback_web_change || true
+            return 1
+        }
         ;;
     *)
-        # 停止 v3 和 v4
-        handler_cloudreve_v3 'stop'
-        handler_cloudreve_v4 'stop'
+        handler_cloudreve_v3 'stop' && handler_cloudreve_v4 'stop' || {
+            rollback_web_change || true
+            return 1
+        }
         ;;
     esac
-    # 根据 Web 类型修改 Nginx 配置以包含或排除 Cloudreve
+
     case "${web}" in
     v3 | v4)
-        # 启用 Cloudreve 配置 (取消注释)
         for site_domain in "${site_domains[@]}"; do
-            sed -i "s|# include web/cloudreve.conf;|include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+            site_file="${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+            if ! sed -i 's|^[[:space:]]*#[[:space:]]*include web/cloudreve\.conf;|  include web/cloudreve.conf;|' \
+                    "${site_file}" ||
+                [[ "$(grep -Ec '^[[:space:]]*include[[:space:]]+web/cloudreve\.conf;[[:space:]]*$' "${site_file}")" -ne 1 ]] ||
+                grep -Eq '^[[:space:]]*#[[:space:]]*include[[:space:]]+web/cloudreve\.conf;' "${site_file}"; then
+                rollback_web_change || true
+                return 1
+            fi
         done
         ;;
     *)
-        # 禁用 Cloudreve 配置 (添加注释)
         for site_domain in "${site_domains[@]}"; do
-            sed -i "s|[^#] include web/cloudreve.conf;|  # include web/cloudreve.conf;|" "${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+            site_file="${NGINX_CONFIG_DIR}/sites-available/${site_domain}.conf"
+            if ! sed -i 's|^[[:space:]]*include web/cloudreve\.conf;|  # include web/cloudreve.conf;|' \
+                    "${site_file}" ||
+                [[ "$(grep -Ec '^[[:space:]]*#[[:space:]]*include[[:space:]]+web/cloudreve\.conf;[[:space:]]*$' "${site_file}")" -ne 1 ]] ||
+                grep -Eq '^[[:space:]]*include[[:space:]]+web/cloudreve\.conf;' "${site_file}"; then
+                rollback_web_change || true
+                return 1
+            fi
         done
         ;;
     esac
-    # 重启或启动 Nginx 与 xray 服务
-    handler_nginx_restart || return 1
-    if [[ "${restart_xray}" != 'n' ]]; then
-        handler_restart || return 1
+    if ! handler_nginx_restart; then
+        rollback_web_change || true
+        return 1
     fi
-    # 更新脚本配置中的 Web 类型
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg web "${web}" '.nginx.web = $web')"
-    # 将更新后的脚本配置写入文件
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+    if [[ "${restart_xray}" != 'n' ]]; then
+        if ! handler_restart; then
+            rollback_web_change || true
+            return 1
+        fi
+    fi
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg web "${web}" '.nginx.web = $web')" || {
+        rollback_web_change || true
+        return 1
+    }
+    if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
+        rollback_web_change || true
+        return 1
+    fi
+    rm -rf -- "${transaction_dir}"
 }
 
 # =============================================================================
@@ -5801,26 +6815,37 @@ function handler_web() {
 # 返回值: 无 (修改全局变量 XRAY_CONFIG)
 # =============================================================================
 function handler_reverse_config() {
-    local reverse_uuid=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid // ""')
-    local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
+    local reverse_uuid reverse_port config_tag reverse_network
+    reverse_uuid="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid // ""')"
+    reverse_port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')"
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
+    protocol_supports_reverse "${config_tag}" || {
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy is not supported by ${config_tag}." >&2
+        return 1
+    }
+    [[ -n "${reverse_uuid}" ]] || return 1
+    [[ "${config_tag,,}" == 'xhttp' ]] && reverse_network='xhttp' || reverse_network='raw'
 
-    [[ -z "${reverse_uuid}" ]] && return 0
-
-    # 1. 向所有 vless inbound 追加反向代理 client
-    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg uuid "${reverse_uuid}" '
+    XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg uuid "${reverse_uuid}" --arg network "${reverse_network}" '
         .inbounds |= map(
-            if .protocol? == "vless" then
-                .settings.clients += [{
+            if .protocol? == "vless" and (.streamSettings.network? // "raw") == $network then
+                ({
                     "email": "reverse@xtls.reality",
                     "id": $uuid,
                     "flow": (.settings.clients[0].flow // "xtls-rprx-vision"),
-                    "reverse": {
-                        "tag": "reverse-out"
-                    }
-                }]
+                    "reverse": {"tag": "reverse-out"}
+                }) as $client |
+                if any(.settings.clients[]?; .email == "reverse@xtls.reality") then
+                    .settings.clients |= map(if .email == "reverse@xtls.reality" then $client else . end)
+                else
+                    .settings.clients += [$client]
+                end
             else . end
         )
-    ')"
+    ')" || return 1
+    if ! echo "${XRAY_CONFIG}" | jq -e 'any(.inbounds[]?; any(.settings.clients[]?; .email == "reverse@xtls.reality"))' >/dev/null; then
+        return 1
+    fi
 
     # 2. 追加 tunnel 协议的 inbound
     XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson port "${reverse_port}" '
@@ -5834,7 +6859,7 @@ function handler_reverse_config() {
                 "protocol": "tunnel"
             }]
         end
-    ')"
+    ')" || return 1
 
     # 3. 追加对应的路由规则
     local route_rule='{"ruleTag":"reverse-portal","inboundTag":["reverse-portal"],"outboundTag":"reverse-out"}'
@@ -5849,7 +6874,7 @@ function handler_reverse_config() {
                 .routing.rules = (.routing.rules[:$private_index] + [$new_rule] + .routing.rules[$private_index:])
             end
         end
-    ')"
+    ')" || return 1
 }
 
 # =============================================================================
@@ -5859,22 +6884,36 @@ function handler_reverse_config() {
 # 返回值: 无
 # =============================================================================
 function handler_reverse_toggle() {
+    local requested_state="${1,,}"
     local original_script_config="${SCRIPT_CONFIG}"
-    local original_xray_config="${XRAY_CONFIG:-}"
-    local script_config_backup=''
-    local xray_config_backup=''
-    local had_xray_config=0
+    local original_xray_config=''
     local reverse_status=''
     local reverse_port=''
     local reverse_target=''
     local reverse_uuid=''
     local xray_ver=''
 
-    reverse_status="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')" || return 1
-    if [[ "${reverse_status}" -ne 1 ]]; then
+    case "${requested_state}" in
+    enable | disable) ;;
+    *) return 1 ;;
+    esac
+    reverse_status="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.reverse // 0) | tonumber? // 0')" || return 1
+    if [[ "${requested_state}" == 'enable' && "${reverse_status}" -eq 1 ]] ||
+        [[ "${requested_state}" == 'disable' && "${reverse_status}" -eq 0 ]]; then
+        return 0
+    fi
+    original_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+
+    if [[ "${requested_state}" == 'enable' ]]; then
         xray_ver="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')" || return 1
         if [[ -z "${xray_ver}" ]]; then
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.not_installed")" >&2
+            return 1
+        fi
+        local config_tag
+        config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')" || return 1
+        if ! protocol_supports_reverse "${config_tag}"; then
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy is not supported by ${config_tag}." >&2
             return 1
         fi
 
@@ -5889,71 +6928,39 @@ function handler_reverse_toggle() {
         [[ -n "${reverse_uuid}" ]] || return 1
     fi
 
-    script_config_backup="$(mktemp "${SCRIPT_CONFIG_PATH}.reverse-backup.XXXXXX")" || return 1
-    if ! cp -p -- "${SCRIPT_CONFIG_PATH}" "${script_config_backup}"; then
-        rm -f -- "${script_config_backup}"
-        return 1
-    fi
-    if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
-        xray_config_backup="$(mktemp "${XRAY_CONFIG_PATH}.reverse-backup.XXXXXX")" || {
-            rm -f -- "${script_config_backup}"
+    if [[ "${requested_state}" == 'disable' ]]; then
+        local previous_reverse_port
+        previous_reverse_port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')"
+        close_owned_firewall_ports 'reverse' "${previous_reverse_port}" 1 || return 1
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
+            .xray.reverse = 0 |
+            .xray.reverseUuid = "" |
+            .xray.reverseTarget = "" |
+            .xray.reverseMode = "" |
+            del(.xray.reversePort)
+        ')" || {
+            restore_owned_firewall_feature_state \
+                "${original_script_config}" 'reverse' "${previous_reverse_port}" tcp || true
             return 1
         }
-        if ! cp -p -- "${XRAY_CONFIG_PATH}" "${xray_config_backup}"; then
-            rm -f -- "${script_config_backup}" "${xray_config_backup}"
+        if ! apply_xray_state_transaction "${original_script_config}" "${original_xray_config}"; then
+            restore_owned_firewall_feature_state \
+                "${original_script_config}" 'reverse' "${previous_reverse_port}" tcp || true
             return 1
         fi
-        had_xray_config=1
-    fi
-
-    function rollback_reverse_toggle() {
-        local rollback_status=0
-
-        if ! mv -f -- "${script_config_backup}" "${SCRIPT_CONFIG_PATH}"; then
-            rollback_status=1
-        else
-            script_config_backup=''
-        fi
-        if [[ "${had_xray_config}" -eq 1 ]]; then
-            if ! mv -f -- "${xray_config_backup}" "${XRAY_CONFIG_PATH}"; then
-                rollback_status=1
-            else
-                xray_config_backup=''
-            fi
-        else
-            rm -f -- "${XRAY_CONFIG_PATH}" || rollback_status=1
-        fi
-        SCRIPT_CONFIG="${original_script_config}"
-        XRAY_CONFIG="${original_xray_config}"
-        return "${rollback_status}"
-    }
-
-    if [[ "${reverse_status}" -eq 1 ]]; then
-        # 禁用反向代理
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.reverse = 0')"
-        handler_xray_config 1 || {
-            rollback_reverse_toggle ||
-                echo 'Reverse proxy rollback failed.' >&2
-            rm -f -- "${script_config_backup}" "${xray_config_backup}"
-            return 1
-        }
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.disabled")" >&2
     else
-        # 写入脚本配置
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson val 1 '.xray.reverse = $val')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson port "${reverse_port}" '.xray.reversePort = $port')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg target "${reverse_target}" '.xray.reverseTarget = $target')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${reverse_uuid}" '.xray.reverseUuid = $uuid')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg mode "forward" '.xray.reverseMode = $mode')"
-        handler_xray_config 1 || {
-            rollback_reverse_toggle ||
-                echo 'Reverse proxy rollback failed.' >&2
-            rm -f -- "${script_config_backup}" "${xray_config_backup}"
-            return 1
-        }
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
+            --argjson port "${reverse_port}" --arg target "${reverse_target}" --arg uuid "${reverse_uuid}" '
+            .xray.reverse = 1 |
+            .xray.reversePort = $port |
+            .xray.reverseTarget = $target |
+            .xray.reverseUuid = $uuid |
+            .xray.reverseMode = "forward"
+        ')" || return 1
+        apply_xray_state_transaction "${original_script_config}" "${original_xray_config}" || return 1
         echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.enabled")" >&2
     fi
-    rm -f -- "${script_config_backup}" "${xray_config_backup}"
 }
 
 # =============================================================================
@@ -5963,15 +6970,15 @@ function handler_reverse_toggle() {
 # 返回值: 无
 # =============================================================================
 function handler_reverse_share() {
-    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
+    local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.reverse // 0) | tonumber? // 0')
     if [[ "${reverse_status}" -ne 1 ]]; then
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.no_reverse")" >&2
         return 1
     fi
 
-    local reverse_uuid=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid')
-    local reverse_target=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseTarget')
-    local current_tag=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')
+    local reverse_uuid=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseUuid // ""')
+    local reverse_target=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverseTarget // ""')
+    local current_tag=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')
     local xray_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port // 443')
     local server_name=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.serverNames[0] // ""')
     local public_key=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')
@@ -5979,15 +6986,31 @@ function handler_reverse_share() {
     local xhttp_path=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')
     local xhttp_mode=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')
 
+    if ! protocol_supports_reverse "${current_tag}"; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy sharing is not supported by ${current_tag}." >&2
+        return 1
+    fi
+    if [[ -z "${reverse_uuid}" || -z "${reverse_target}" || -z "${server_name}" || -z "${public_key}" ]]; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy state is incomplete." >&2
+        return 1
+    fi
+    if [[ "${current_tag,,}" == 'xhttp' && -z "${xhttp_path}" ]]; then
+        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy XHTTP path is missing." >&2
+        return 1
+    fi
+    parse_host_port "${reverse_target}" || return 1
+    local target_host="${PARSED_HOST}"
+    local target_port="${PARSED_PORT}"
+    local target_is_ip=false
+    [[ "${PARSED_HOST_IS_IP}" -eq 1 ]] && target_is_ip=true
+    reverse_target="$(format_host_port "${target_host}" "${target_port}")" || return 1
+
     local server_ip
     server_ip="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
-    if [[ -z "${server_ip}" ]] || ! exec_check '--ip' "${server_ip}"; then
+    if [[ -z "${server_ip}" ]] || ! valid_ip_literal "${server_ip}"; then
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.ip_fetch_fail")" >&2
         return 1
     fi
-
-    local target_ip="${reverse_target%%:*}"
-    local target_port="${reverse_target##*:}"
 
     # 构造 VLESS outbound settings
     local vless_settings
@@ -6070,8 +7093,9 @@ function handler_reverse_share() {
     config=$(jq -n \
         --argjson vless_s "${vless_settings}" \
         --argjson stream_s "${stream_settings}" \
-        --arg target_ip "${target_ip}" \
-        --arg target_port "${target_port}" \
+        --arg target_host "${target_host}" \
+        --argjson target_port "${target_port}" \
+        --argjson target_is_ip "${target_is_ip}" \
         --arg redirect_str "${reverse_target}" \
         '{
             "log": {
@@ -6094,14 +7118,13 @@ function handler_reverse_share() {
                     "tag": "reverse-direct",
                     "settings": {
                         "redirect": $redirect_str,
-                        "finalRules": [
+                        "finalRules": [(
                             {
                                 "action": "allow",
                                 "network": "tcp",
-                                "ip": $target_ip,
                                 "port": $target_port
-                            }
-                        ]
+                            } + (if $target_is_ip then {ip: $target_host} else {} end)
+                        )]
                     }
                 },
                 {
@@ -6174,6 +7197,7 @@ function handler_quick_install() {
     handler_geodata_cron 1
     # 重启 Xray 服务
     handler_restart || return 1
+    handler_restore_certificate_renewal_hooks || return 1
     # 显示分享链接
     handler_share
 }
@@ -6220,6 +7244,8 @@ function main() {
         ;;
     --cleanup-cdn-down) handler_cleanup_stale_cdn_down "$@" ;;
     --recover-runtime) handler_recover_runtime_services ;; # 按当前运行配置恢复服务
+    --deploy-acme-certificate) handler_deploy_acme_certificate "$@" ;;
+    --restore-certificate-hooks) handler_restore_certificate_renewal_hooks ;;
     --script-config)
         if [[ "${1,,}" == 'multi' ]]; then
             handler_read_multi_xray_config || return 1
@@ -6276,6 +7302,7 @@ function main() {
         handler_change_domain "$1" || return 1 # 处理域名配置
         handler_xray_config || return 1         # 更新 Xray 配置
         handler_restart || return 1             # 重启 Xray
+        handler_restore_certificate_renewal_hooks || return 1
         if ! [[ "${CONFIG_DATA['only-change-domain'],,}" == "y" ]]; then
             # 还原 Web 服务
             handler_web "$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.web')" || return 1
@@ -6293,7 +7320,7 @@ function main() {
     --warp) handler_warp ;;                     # 管理 WARP
     --reset-warp) handler_reset_warp ;;         # 重置 WARP
     --traffic) handler_traffic ;;               # 显示流量统计
-    --reverse) handler_reverse_toggle ;;         # 开启/关闭反向代理
+    --reverse) handler_reverse_toggle "$1" ;;    # 开启/关闭反向代理
     --reverse-share) handler_reverse_share ;;   # 查看内网端配置模板
     --lan-enable) handler_lan_enable ;;          # 启用异地组网 Hub
     --lan-disable) handler_lan_disable ;;        # 禁用异地组网 Hub
@@ -6303,8 +7330,6 @@ function main() {
     --lan-export) handler_lan_export_site ;;     # 导出站点端配置包
     --change-port)
         handler_change_xray_port || return 1 # 处理 Xray 端口配置
-        handler_xray_config || return 1      # 更新 Xray 配置
-        handler_restart || return 1          # 重启 Xray
         handler_share                        # 显示分享链接
         ;;                        # 修改 Xray 端口
     --start) handler_start ;;     # 启动 Xray

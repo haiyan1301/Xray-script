@@ -27,6 +27,7 @@ readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)"
 
 # 引入公共库
 source "${PROJECT_ROOT}/lib/common.sh"
+source "${PROJECT_ROOT}/lib/protocols.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
@@ -90,30 +91,6 @@ function menu_index() {
     # 打印退出选项
     echo -e "------------------------------------------------------"
     echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option0")"
-}
-
-# =============================================================================
-# 函数名称: menu_full_installation
-# 功能描述: 显示完整安装选项菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function menu_full_installation() {
-    # 打印完整安装菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.full_installation.title") ------------------"
-    # 打印选项 1 (默认)
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.full_installation.option1")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
-    # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.full_installation.option2")"
-
-    # 打印分隔线
-    echo -e "------------------------------------------------------"
-    # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.full_installation.info1")"
-    # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.full_installation.info2")"
-    # 打印分隔线
-    echo -e "------------------------------------------------------"
 }
 
 # =============================================================================
@@ -225,16 +202,20 @@ function menu_cdn_backend() {
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_config() {
+    local config_tag
+    config_tag="$(jq -r '.xray.tag // ""' "${SCRIPT_CONFIG_PATH}")"
     # 打印配置管理菜单标题
     echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.title") ------------------"
     # 打印选项 1
     echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option1")"
     # 打印选项 2
     echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option2")"
-    # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option3")"
-    # 打印选项 4
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option4")"
+    if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
+        echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option3")"
+    fi
+    if protocol_reads_public_port "${config_tag}"; then
+        echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option4")"
+    fi
     # 打印选项 5
     echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option5")"
     # 打印选项 6
@@ -249,10 +230,12 @@ function menu_config() {
     echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info1")"
     # 打印选项 2 的说明信息
     echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info2")"
-    # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info3")"
-    # 打印选项 4 的说明信息
-    echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info4")"
+    if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
+        echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info3")"
+    fi
+    if protocol_reads_public_port "${config_tag}"; then
+        echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info4")"
+    fi
     # 打印选项 5 的说明信息
     echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info5")"
     # 打印选项 7 的说明信息
@@ -427,11 +410,11 @@ function print_status() {
     local SCRIPT_CONFIG=$(jq '.' "${SCRIPT_CONFIG_PATH}")
 
     # 从配置中提取 Xray 版本、配置标签和 WARP 状态
-    local XRAY_VERSION=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')
-    local CONFIG_TAG=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')
-    local WARP_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')
-    local REVERSE_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reverse // 0')
-    local LAN_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')
+    local XRAY_VERSION=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')
+    local CONFIG_TAG=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')
+    local WARP_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')
+    local REVERSE_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.reverse // 0) | tonumber? // 0')
+    local LAN_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.lan.enabled // 0) | tonumber? // 0')
 
     # 从 i18n 数据中读取状态描述文本
     local not_installed=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.not_installed")
@@ -484,7 +467,7 @@ function get_choose() {
     # 空输入仅采用当前菜单标注的默认项；显式输入 0 始终表示取消。
     if [[ -z "${choose}" ]]; then
         case "${i18n}" in
-        --config | --web | --full | --cdn-backend) return 1 ;;
+        --config | --web | --cdn-backend) return 1 ;;
         --xray) return 2 ;;
         *) return 0 ;;
         esac
@@ -525,7 +508,6 @@ function main() {
     # 使用 case 语句根据第一个参数调用对应的菜单或信息显示函数
     case "$1" in
     --index) menu_index >&2 ;;            # 显示主菜单
-    --full) menu_full_installation >&2 ;; # 显示完整安装菜单
     --xray) menu_xray >&2 ;;              # 显示 Xray 版本菜单
     --config) menu_xray_config >&2 ;;     # 显示协议配置菜单
     --web) menu_web_config >&2 ;;         # 显示 Web 配置菜单

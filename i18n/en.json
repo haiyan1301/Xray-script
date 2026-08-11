@@ -34,7 +34,7 @@
       "configuration": "Configuration",
       "option1": "Install or Reconfigure a Node",
       "option2": "Update Xray Core Only",
-      "option3": "Uninstall",
+      "option3": "Uninstall Xray (keep Nginx/certificates/Docker)",
       "option4": "Start",
       "option5": "Stop",
       "option6": "Restart",
@@ -98,7 +98,7 @@
       "option1": "Nginx Default Page",
       "option2": "Cloudreve v3",
       "option3": "Cloudreve v4",
-      "option0": "Cancel",
+      "option0": "Cancel this installation",
       "info1": "Cloudreve v3 auto-generates admin account",
       "info2": "First registered user in Cloudreve v4 becomes admin"
     },
@@ -106,7 +106,7 @@
       "title": "Select CDN Origin Backend",
       "option1": "Nginx TLS reverse proxy (with camouflage site)",
       "option2": "Direct Xray TLS (low-resource VPS)",
-      "option0": "Cancel",
+      "option0": "Cancel this installation",
       "info1": "Keeps camouflage sites, Cloudreve, and Nginx management features",
       "info2": "Stops and disables Nginx; Xray listens on 443 directly to reduce memory and background processes",
       "warning": "Direct mode requires HTTPS origin mode (Full/Strict, not Flexible); enable HTTP/2/gRPC at the CDN for streaming XHTTP, and restrict origin port 443 to CDN source IPs where possible."
@@ -260,6 +260,8 @@
       "unsupported": "This option is unavailable in multi-node mode; choose 1-7 from the list.",
       "node_count_prompt": "How many nodes do you want to create? [2]: ",
       "node_count_invalid": "Enter an integer from 2 to 100.",
+      "port_prompt": "Leave the port empty for automatic assignment: the first eligible node uses 443; later nodes use random ports.",
+      "port_assigned": "Assigned port: {port}",
       "port_conflict": "Port {port} is reserved or already assigned to another node; generating a random port.",
       "hy2_shared_cert": "HY2 nodes share one TLS certificate in multi-node mode.",
       "no_nodes": "Multi-node configuration contains no nodes."
@@ -356,6 +358,7 @@
     },
     "lan": {
       "error": "Error",
+      "invalid_state": "Virtual LAN state is incomplete or invalid",
       "not_enabled": "Virtual LAN is not enabled; initialize the Hub first",
       "already_enabled": "Virtual LAN Hub is already enabled",
       "xray_required": "Xray-core with TUN support must be installed first",

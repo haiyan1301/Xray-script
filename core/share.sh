@@ -84,7 +84,7 @@ declare SHARE_LINK_COMPONENT_VLESS_ENC # VLESS enc 的 encryption 参数部分
 # =============================================================================
 function load_i18n() {
     # 从脚本配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
@@ -174,65 +174,15 @@ function format_uri_host() {
 }
 
 function is_valid_ipv4_literal() {
-    local value="$1"
-    local octet numeric
-    local -a octets=()
-
-    [[ "${value}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
-    IFS='.' read -r -a octets <<<"${value}"
-    [[ "${#octets[@]}" -eq 4 ]] || return 1
-    for octet in "${octets[@]}"; do
-        [[ "${#octet}" -le 3 ]] || return 1
-        numeric=$((10#${octet}))
-        ((numeric <= 255)) || return 1
-    done
+    valid_ipv4_literal "$1"
 }
 
 function is_valid_ipv6_literal() {
-    local value="$1"
-    local ipv4_tail normalized suffix part
-    local has_compression=0
-    local group_count=0
-    local -a groups=()
-
-    [[ "${value}" == *:* ]] || return 1
-
-    # IPv4-mapped IPv6 addresses use the final IPv4 literal as two hextets.
-    if [[ "${value}" == *.* ]]; then
-        ipv4_tail="${value##*:}"
-        is_valid_ipv4_literal "${ipv4_tail}" || return 1
-        value="${value%:*}:0:0"
-    fi
-
-    [[ "${value}" =~ ^[0-9a-fA-F:]+$ ]] || return 1
-    [[ "${value}" != *:::* ]] || return 1
-
-    if [[ "${value}" == *::* ]]; then
-        has_compression=1
-        suffix="${value#*::}"
-        [[ "${suffix}" != *::* ]] || return 1
-        normalized="${value/::/:__compressed__:}"
-    else
-        [[ "${value}" != :* && "${value}" != *: ]] || return 1
-        normalized="${value}"
-    fi
-
-    IFS=':' read -r -a groups <<<"${normalized}"
-    for part in "${groups[@]}"; do
-        [[ -z "${part}" || "${part}" == '__compressed__' ]] && continue
-        [[ "${part}" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
-        group_count=$((group_count + 1))
-    done
-
-    if [[ "${has_compression}" -eq 1 ]]; then
-        ((group_count < 8))
-    else
-        ((group_count == 8))
-    fi
+    valid_ipv6_literal "$1"
 }
 
 function is_valid_ip_literal() {
-    is_valid_ipv4_literal "$1" || is_valid_ipv6_literal "$1"
+    valid_ip_literal "$1"
 }
 
 function resolve_public_host() {
@@ -275,9 +225,22 @@ function resolve_public_host() {
 # =============================================================================
 function cache_json_data() {
     # 读取 Xray 配置文件的完整 JSON 内容到全局变量 XRAY_CONFIG
-    XRAY_CONFIG="$(jq '.' "${XRAY_CONFIG_PATH}")"
+    XRAY_CONFIG="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
     # 读取脚本配置文件的完整 JSON 内容到全局变量 SCRIPT_CONFIG
-    SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
+    SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")" || return 1
+}
+
+function require_client_fields() {
+    local context="$1"
+    local field value
+    shift
+    for field in "$@"; do
+        value="${CLIENT_CONFIG[$field]:-}"
+        if [[ -z "${value}" ]]; then
+            echo -e "${RED}[Error]${NC} Missing ${field} for ${context} share link." >&2
+            return 1
+        fi
+    done
 }
 
 # =============================================================================
@@ -304,12 +267,12 @@ function get_common_config() {
     if [[ -n "${inbound_port}" ]]; then
         CLIENT_CONFIG[port]="${inbound_port}"
     else
-        CLIENT_CONFIG[port]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.port")"
+        CLIENT_CONFIG[port]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port // ""')"
     fi
     # 从脚本配置中获取 Reality 公钥
-    CLIENT_CONFIG[public_key]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.publicKey")"
+    CLIENT_CONFIG[public_key]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')"
     # 从脚本配置中获取配置标签 (tag)
-    CLIENT_CONFIG[tag]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.tag")"
+    CLIENT_CONFIG[tag]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
 
     # 从 Xray 配置中获取协议类型 (如 vless, trojan)
     CLIENT_CONFIG[protocol]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].protocol? | if . == null then empty else . end')"
@@ -333,9 +296,15 @@ function get_common_config() {
     CLIENT_CONFIG[path]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.path? | if . == null then empty else . end')"
     CLIENT_CONFIG[mode]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.mode? | if . == null then empty else . end')"
     # 从 Xray 配置中随机获取一个 Reality 的服务器名称 (serverNames)
-    CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.serverNames? | if . == null then empty else .[$random % length] end')"
+    CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[$i].streamSettings.realitySettings.serverNames? // []) as $names |
+        if ($names | type) == "array" and ($names | length) > 0 then $names[$random % ($names | length)] else "" end
+    ')"
     # 从 Xray 配置中随机获取一个 Reality 的 Short ID (shortIds)
-    CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds? | if . == null then empty else .[$random % length] end')"
+    CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[$i].streamSettings.realitySettings.shortIds? // []) as $ids |
+        if ($ids | type) == "array" and ($ids | length) > 0 then $ids[$random % ($ids | length)] else "" end
+    ')"
     # 从脚本配置中获取 ML-DSA-65 Verify 公钥（后量子签名验证）
     CLIENT_CONFIG[mldsa65_verify]="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.mldsa65Verify // ""')"
     # 只有服务端当前入口实际启用了 VLESS enc，客户端链接才携带
@@ -387,15 +356,17 @@ function build_xhttp_obfs_extra() {
 # =============================================================================
 function setup_xhttp_obfs_extra() {
     local inbound_index=${1:-1}
-    local obfs_json="$(build_xhttp_obfs_extra ${inbound_index})"
-    if [[ "$(echo "${obfs_json}" | jq 'length')" -gt 0 && -n "${XHTTP_EXTRA}" ]]; then
+    local obfs_json='' obfs_length
+    obfs_json="$(build_xhttp_obfs_extra "${inbound_index}")" || return 1
+    obfs_length="$(echo "${obfs_json}" | jq 'length')" || return 1
+    if [[ "${obfs_length}" -gt 0 && -n "${XHTTP_EXTRA}" ]]; then
         # 合并到已有的 XHTTP_EXTRA (如包含 downloadSettings)
-        XHTTP_EXTRA="$(echo "${XHTTP_EXTRA}" | jq --argjson obfs "${obfs_json}" '. + $obfs')"
-    elif [[ "$(echo "${obfs_json}" | jq 'length')" -gt 0 ]]; then
+        XHTTP_EXTRA="$(echo "${XHTTP_EXTRA}" | jq --argjson obfs "${obfs_json}" '. + $obfs')" || return 1
+    elif [[ "${obfs_length}" -gt 0 ]]; then
         XHTTP_EXTRA="${obfs_json}"
     fi
     if [[ -n "${XHTTP_EXTRA}" ]]; then
-        XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode)
+        XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -c '.' | urlencode) || return 1
     fi
 }
 
@@ -425,9 +396,11 @@ function reset_share_state() {
 # =============================================================================
 function get_tls_down_json() {
     # 从脚本配置中获取 CDN 域名作为服务器名称
-    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
     # 从脚本配置中获取 Xray 的路径
-    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.path")"
+    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"
+
+    [[ -n "${server_name}" && -n "${sni_path}" ]] || return 1
 
     # 使用 Here Document 构造 XHTTP 下行设置的 JSON 字符串
     XHTTP_EXTRA=$(
@@ -457,7 +430,7 @@ EOF
     )
 
     # 将生成的 JSON 字符串通过管道传递给 jq 格式化，再传递给 urlencode 进行编码
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode)
+    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode) || return 1
 }
 
 # =============================================================================
@@ -472,13 +445,19 @@ function get_reality_down_json() {
     local inbound_index=1 # 指定要读取的 inbound 索引 (通常为 fallback inbound)
 
     # 从脚本配置中获取主域名作为服务器名称
-    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.domain")"
+    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
     # 从脚本配置中获取 Reality 公钥
-    local public_key="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.publicKey")"
+    local public_key="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')"
     # 从脚本配置中获取 Xray 路径
-    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.path")"
+    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"
     # 从 Xray 配置中随机获取一个 Reality 的 Short ID
-    local short_id="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds | .[$random % length?]')"
+    local short_id="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[$i].streamSettings.realitySettings.shortIds // []) as $ids |
+        if ($ids | length) > 0 then $ids[$random % ($ids | length)] else "" end
+    ')"
+
+    [[ -n "${server_name}" && -n "${public_key}" &&
+        -n "${sni_path}" ]] || return 1
 
     # 使用 Here Document 构造 Reality 下行设置的 JSON 字符串
     XHTTP_EXTRA=$(
@@ -508,7 +487,7 @@ EOF
     )
 
     # 将生成的 JSON 字符串通过管道传递给 jq 格式化，再传递给 urlencode 进行编码
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode)
+    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode) || return 1
 }
 
 # =============================================================================
@@ -567,6 +546,7 @@ function show_client_config() {
 # =============================================================================
 function get_share_link_component() {
     local uri_host encoded_trojan_password encoded_mkcp_seed xhttp_path
+    require_client_fields 'client' remote_host port protocol type || return 1
     uri_host="$(format_uri_host "${CLIENT_CONFIG[remote_host]}")"
     encoded_trojan_password="$(urlencode "${CLIENT_CONFIG[password]}")"
     encoded_mkcp_seed="$(urlencode "${CLIENT_CONFIG[seed]}")"
@@ -621,8 +601,9 @@ function get_share_link_component() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_mkcp_share_link() {
+    require_client_fields 'mKCP' uuid seed || return 1
     # 获取分享链接的各个组件
-    get_share_link_component
+    get_share_link_component || return 1
     # 将 VLESS 基础部分、mKCP 参数部分和可选的 VLESS enc 拼接成完整链接，并显式指定 security=none 确保客户端解析兼容性
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}&security=none${SHARE_LINK_COMPONENT_MKCP}${SHARE_LINK_COMPONENT_VLESS_ENC}"
 }
@@ -634,8 +615,9 @@ function get_mkcp_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_vision_share_link() {
+    require_client_fields 'Vision' uuid security server_name public_key flow || return 1
     # 获取分享链接的各个组件
-    get_share_link_component
+    get_share_link_component || return 1
     # 将 VLESS 基础部分、Reality 安全参数、Flow 控制参数和可选的 VLESS enc 拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_FLOW}${SHARE_LINK_COMPONENT_VLESS_ENC}"
 }
@@ -647,8 +629,9 @@ function get_vision_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_xhttp_share_link() {
+    require_client_fields 'XHTTP' uuid security server_name public_key path || return 1
     # 获取分享链接的各个组件
-    get_share_link_component
+    get_share_link_component || return 1
     # 将 VLESS 基础部分、Reality 安全参数、XHTTP 路径参数、可选的 VLESS enc 和额外混淆参数拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
@@ -667,6 +650,7 @@ function get_cdn_share_link() {
     CLIENT_CONFIG[host]="${CLIENT_CONFIG[server_name]}"
     cdn_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
     CLIENT_CONFIG[cdn_down]="${cdn_down}"
+    require_client_fields 'CDN' uuid remote_host port server_name path || return 1
 
     if [[ -n "${cdn_down}" ]]; then
         xhttp_mode="${CLIENT_CONFIG[mode]:-auto}"
@@ -696,8 +680,8 @@ function get_cdn_share_link() {
         ')" || return 1
     fi
 
-    setup_xhttp_obfs_extra 1
-    get_share_link_component
+    setup_xhttp_obfs_extra 1 || return 1
+    get_share_link_component || return 1
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
 
@@ -709,10 +693,11 @@ function get_cdn_share_link() {
 # =============================================================================
 function get_trojan_share_link() {
     local inbound_index="${1:-1}"
+    require_client_fields 'Trojan' password security server_name public_key path || return 1
     # 设置混淆额外参数
-    setup_xhttp_obfs_extra "${inbound_index}"
+    setup_xhttp_obfs_extra "${inbound_index}" || return 1
     # 获取分享链接的各个组件
-    get_share_link_component
+    get_share_link_component || return 1
     # 将 Trojan 基础部分、Reality 安全参数、XHTTP 路径参数和额外混淆参数拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_TROJAN}${SHARE_LINK_COMPONENT_REALITY}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_HOST}${SHARE_LINK_COMPONENT_EXTRA}"
 }
@@ -729,6 +714,7 @@ function get_hy2_share_link() {
     local host="${CLIENT_CONFIG[remote_host]}"
     local port="${CLIENT_CONFIG[port]}"
     local sni="${CLIENT_CONFIG[hy2_cert_domain]}"
+    require_client_fields 'Hysteria2' hy2_auth remote_host port hy2_cert_domain || return 1
 
     local encoded_auth uri_host
     encoded_auth="$(urlencode "${auth}")"
@@ -752,6 +738,7 @@ function get_ss2022_share_link() {
     local password="${CLIENT_CONFIG[ss2022_password]}"
     local host="${CLIENT_CONFIG[remote_host]}"
     local port="${CLIENT_CONFIG[port]}"
+    require_client_fields 'Shadowsocks 2022' ss2022_method ss2022_password remote_host port || return 1
 
     # 对 method:password 进行 URL-safe Base64 编码并移除换行与 Padding (=)
     local userinfo
@@ -774,14 +761,20 @@ function get_fallback_xhttp_share_link() {
     # 从 Xray 配置中重新读取 fallback inbound 的安全类型
     CLIENT_CONFIG[security]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.security? | if . == null then empty else . end')"
     # 从 Xray 配置中重新随机读取 fallback inbound 的服务器名称
-    CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.serverNames | .[$random % length?]')"
+    CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[$i].streamSettings.realitySettings.serverNames // []) as $names |
+        if ($names | length) > 0 then $names[$random % ($names | length)] else "" end
+    ')"
     # 从 Xray 配置中重新随机读取 fallback inbound 的 Short ID
-    CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '.inbounds[$i].streamSettings.realitySettings.shortIds | .[$random % length?]')"
+    CLIENT_CONFIG[short_id]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[$i].streamSettings.realitySettings.shortIds // []) as $ids |
+        if ($ids | length) > 0 then $ids[$random % ($ids | length)] else "" end
+    ')"
 
     # 设置 XHTTP 混淆额外参数 (XHTTP inbound 是 index 2)
-    setup_xhttp_obfs_extra "${xhttp_inbound_index}"
+    setup_xhttp_obfs_extra "${xhttp_inbound_index}" || return 1
     # 调用通用的 XHTTP 链接生成函数
-    get_xhttp_share_link
+    get_xhttp_share_link || return 1
 }
 
 function build_multi_current_share_link() {
@@ -793,7 +786,7 @@ function build_multi_current_share_link() {
         get_mkcp_share_link
         ;;
     xhttp)
-        setup_xhttp_obfs_extra "${inbound_index}"
+        setup_xhttp_obfs_extra "${inbound_index}" || return 1
         get_xhttp_share_link
         ;;
     trojan)
@@ -863,20 +856,20 @@ function show_multi_config() {
         apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}" "${node_port}"
 
         if [[ "${node_tag_lower}" == "fallback" ]]; then
-            get_vision_share_link
+            get_vision_share_link || return 1
             show_config
 
             reset_share_state
             get_common_config "$((inbound_index + 1))" || return 1
             apply_multi_node_overrides "${node}" "${node_tag_lower}" "${node_name}-xhttp" "${node_port}"
-            get_fallback_xhttp_share_link "${inbound_index}" "$((inbound_index + 1))"
+            get_fallback_xhttp_share_link "${inbound_index}" "$((inbound_index + 1))" || return 1
             show_config
 
             inbound_index=$((inbound_index + span))
             continue
         fi
 
-        build_multi_current_share_link "${node_tag_lower}" "${inbound_index}"
+        build_multi_current_share_link "${node_tag_lower}" "${inbound_index}" || return 1
         show_config
         inbound_index=$((inbound_index + span))
     done
@@ -893,14 +886,15 @@ function get_sni_tls_share_link() {
     # 设置安全类型为 tls
     CLIENT_CONFIG[security]="tls"
     # 从脚本配置中读取 CDN 域名作为服务器名称
-    CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
     # 将远程主机地址也设置为 CDN 域名
-    CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r ".nginx.cdn")"
+    CLIENT_CONFIG[remote_host]="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    require_client_fields 'SNI TLS' uuid remote_host port server_name path || return 1
 
     # 设置 XHTTP 混淆额外参数 (XHTTP inbound 是 index 2)
-    setup_xhttp_obfs_extra 2
+    setup_xhttp_obfs_extra 2 || return 1
     # 获取分享链接的各个组件
-    get_share_link_component
+    get_share_link_component || return 1
     # 将 VLESS 基础部分、TLS 安全参数、XHTTP 路径参数、可选的 VLESS enc 和额外混淆参数拼接成完整链接
     SHARE_LINK="${SHARE_LINK_COMPONENT_VLESS}${SHARE_LINK_COMPONENT_TLS}${SHARE_LINK_COMPONENT_XHTTP}${SHARE_LINK_COMPONENT_VLESS_ENC}${SHARE_LINK_COMPONENT_EXTRA}"
 }
@@ -913,7 +907,7 @@ function get_sni_tls_share_link() {
 # =============================================================================
 function get_sni_tls_down_share_link() {
     # 首先获取 fallback 的 XHTTP 链接 (基础部分，已包含 obfs extra)
-    get_fallback_xhttp_share_link
+    get_fallback_xhttp_share_link || return 1
 }
 
 # =============================================================================
@@ -924,7 +918,7 @@ function get_sni_tls_down_share_link() {
 # =============================================================================
 function get_sni_reality_down_share_link() {
     # 首先获取 SNI + TLS 的链接 (基础部分，已包含 obfs extra)
-    get_sni_tls_share_link
+    get_sni_tls_share_link || return 1
 }
 
 # =============================================================================
@@ -976,7 +970,7 @@ function show_fallback_config() {
     # 设置第一个配置的标签为 'fallbak_vision_reality'
     CLIENT_CONFIG[tag]='fallbak_vision_reality'
     # 生成 Vision 分享链接
-    get_vision_share_link
+    get_vision_share_link || return 1
     # 显示第一个配置
     show_config
 
@@ -985,7 +979,7 @@ function show_fallback_config() {
     # 设置第二个配置的标签为 'fallbak_xhttp_reality'
     CLIENT_CONFIG[tag]='fallbak_xhttp_reality'
     # 生成 fallback 的 XHTTP 分享链接
-    get_fallback_xhttp_share_link
+    get_fallback_xhttp_share_link || return 1
 }
 
 # =============================================================================
@@ -1002,7 +996,7 @@ function show_sni_config() {
     # 设置第一个配置的标签为 'sni_vision_reality'
     CLIENT_CONFIG[tag]='sni_vision_reality'
     # 生成 Vision 分享链接
-    get_vision_share_link
+    get_vision_share_link || return 1
     # 显示第一个配置
     show_config
 
@@ -1011,7 +1005,7 @@ function show_sni_config() {
     # 设置第二个配置的标签为 'sni_xhttp_reality'
     CLIENT_CONFIG[tag]='sni_xhttp_reality'
     # 生成 fallback 的 XHTTP 分享链接
-    get_fallback_xhttp_share_link
+    get_fallback_xhttp_share_link || return 1
     # 显示第二个配置
     show_config
 
@@ -1020,9 +1014,9 @@ function show_sni_config() {
     # 设置第三个配置的标签为 'sni_tls_down'
     CLIENT_CONFIG[tag]='sni_tls_down'
     # 生成 TLS 下行的额外配置
-    get_tls_down_json
+    get_tls_down_json || return 1
     # 生成 SNI TLS Down 分享链接
-    get_sni_tls_down_share_link
+    get_sni_tls_down_share_link || return 1
     # 显示第三个配置
     show_config
 
@@ -1034,7 +1028,7 @@ function show_sni_config() {
     XHTTP_EXTRA=""
     XHTTP_EXTRA_ENCODED=""
     # 生成 SNI TLS 分享链接
-    get_sni_tls_share_link
+    get_sni_tls_share_link || return 1
     # 显示第四个配置
     show_config
 
@@ -1043,9 +1037,9 @@ function show_sni_config() {
     # 设置第五个配置的标签为 'sni_reality_down'
     CLIENT_CONFIG[tag]='sni_reality_down'
     # 生成 Reality 下行的额外配置
-    get_reality_down_json
+    get_reality_down_json || return 1
     # 生成 SNI Reality Down 分享链接
-    get_sni_reality_down_share_link
+    get_sni_reality_down_share_link || return 1
 }
 
 # =============================================================================
@@ -1071,9 +1065,13 @@ function main() {
     load_i18n
 
     # 缓存 Xray 和脚本配置数据
-    cache_json_data
+    cache_json_data || return 1
 
-    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag | ascii_downcase')"
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.tag // "") | ascii_downcase')"
+    [[ -n "${config_tag}" ]] || {
+        echo -e "${RED}[Error]${NC} Missing configured protocol tag." >&2
+        return 1
+    }
     case "${config_tag}" in
     cdn)
         common_host_override="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // empty')"
@@ -1092,7 +1090,7 @@ function main() {
 
     case "${config_tag}" in
     mkcp) get_mkcp_share_link ;;      # mKCP 模式
-    xhttp) setup_xhttp_obfs_extra 1; get_xhttp_share_link ;;    # XHTTP 模式
+    xhttp) setup_xhttp_obfs_extra 1 && get_xhttp_share_link ;;  # XHTTP 模式
     trojan) get_trojan_share_link ;;  # Trojan 模式
     fallback) show_fallback_config || return 1 ;; # Fallback 模式
     sni) show_sni_config || return 1 ;;           # SNI 模式

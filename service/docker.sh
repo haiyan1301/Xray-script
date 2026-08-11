@@ -80,7 +80,7 @@ declare I18N_DATA=''  # 存储从 i18n JSON 文件中读取的全部数据
 # =============================================================================
 function load_i18n() {
     # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
@@ -256,8 +256,32 @@ function install_docker() {
 # 返回值: 容器的 IP 地址 (echo 输出)
 # =============================================================================
 function get_container_ip() {
-    # 使用 docker inspect 命令获取容器的 IP 地址
-    docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"
+    local container_name="$1"
+    local addresses
+
+    addresses="$(docker inspect --format='{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{println .GlobalIPv6Address}}{{end}}' "${container_name}" 2>/dev/null)" || return 1
+    addresses="$(printf '%s\n' "${addresses}" | awk 'NF && !seen[$0]++')"
+    [[ "$(printf '%s\n' "${addresses}" | awk 'NF {count++} END {print count + 0}')" -eq 1 ]] || return 1
+    printf '%s\n' "${addresses}"
+}
+
+function wait_for_warp() {
+    local container_name="$1"
+    local container_ip=''
+    local attempt
+
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if [[ "$(docker inspect --format='{{.State.Running}}' "${container_name}" 2>/dev/null)" == 'true' ]]; then
+            container_ip="$(get_container_ip "${container_name}" 2>/dev/null || true)"
+            if [[ -n "${container_ip}" ]] &&
+                timeout 1 bash -c 'exec 3<>"/dev/tcp/$1/40001"' bash "${container_ip}" 2>/dev/null; then
+                printf '%s\n' "${container_ip}"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 # =============================================================================
@@ -285,45 +309,320 @@ function build_warp() {
 # 返回值: 容器的 IP 地址 (echo 输出)，或无输出
 # =============================================================================
 function enable_warp() {
-    # 检查名为 xray-script-warp 的容器是否已在运行
-    if ! docker ps --format "{{.Names}}" | grep -q "^xray-script-warp\$"; then
-        # 打印开始启用的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.enable.start')"
-        # 创建 Cloudflare WARP 容器所需的目录
-        mkdir -vp "${WARP_DIR}" >&2
-        # 使用 docker run 命令启动容器，失败则调用 print_error 退出
-        docker run -d --restart=always --name=xray-script-warp --log-driver json-file --log-opt max-size=100m --log-opt max-file=3 -v "${WARP_DIR}":/var/lib/cloudflare-warp:rw xray-script-warp >&2 || print_error "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.fail')"
-        # 获取新启动容器的 IP 地址
-        local container_ip=$(get_container_ip xray-script-warp)
-        # 打印启用成功的消息，并包含容器 IP
-        print_info "$(echo "$I18N_DATA" | jq -r ".docker.warp.enable.success" | sed "s/\${container_ip}/${container_ip}/")"
-        # 输出容器 IP 地址
-        echo "${container_ip}"
+    local container_ip=''
+    local container_state='missing'
+
+    if docker inspect xray-script-warp >/dev/null 2>&1; then
+        container_state="$(docker inspect --format='{{if .State.Running}}running{{else}}stopped{{end}}' xray-script-warp 2>/dev/null)" || return 1
     fi
+    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.enable.start')"
+    case "${container_state}" in
+    running) ;;
+    stopped)
+        docker start xray-script-warp >&2 || return 1
+        ;;
+    missing)
+        mkdir -vp "${WARP_DIR}" >&2 || return 1
+        docker run -d --restart=always --name=xray-script-warp \
+            --log-driver json-file --log-opt max-size=100m --log-opt max-file=3 \
+            -v "${WARP_DIR}":/var/lib/cloudflare-warp:rw xray-script-warp >&2 || return 1
+        ;;
+    *) return 1 ;;
+    esac
+
+    container_ip="$(wait_for_warp xray-script-warp)" || {
+        if [[ "${container_state}" != 'running' ]]; then
+            docker stop xray-script-warp >/dev/null 2>&1 || true
+        fi
+        print_error "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.fail')"
+        return 1
+    }
+    print_info "$(echo "$I18N_DATA" | jq -r ".docker.warp.enable.success" | sed "s/\${container_ip}/${container_ip}/")"
+    printf '%s\n' "${container_ip}"
 }
 
 # =============================================================================
 # 函数名称: disable_warp
-# 功能描述: 停止并删除 Cloudflare WARP 容器，并清理相关数据。
+# 功能描述: 停止 Cloudflare WARP 容器，并保留容器与注册数据供下次启用。
 # 参数: 无
 # 返回值: 无 (执行停止和清理过程)
 # =============================================================================
 function disable_warp() {
-    # 检查名为 xray-script-warp 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^xray-script-warp\$"; then
-        # 打印停止容器的警告信息
+    local state
+    docker inspect xray-script-warp >/dev/null 2>&1 || return 0
+    state="$(docker inspect --format='{{.State.Running}}' xray-script-warp 2>/dev/null)" || return 1
+    if [[ "${state}" == 'true' ]]; then
         print_warn "$(echo "$I18N_DATA" | jq -r '.docker.warp.disable.stop')"
-        # 停止容器
-        docker stop xray-script-warp
-        # 删除容器
-        docker rm xray-script-warp
-        # 删除镜像
-        docker image rm xray-script-warp
-        # 删除 WARP 数据目录
-        rm -rf "${WARP_DIR}"
-        # 打印禁用成功的消息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.disable.success')"
+        docker stop xray-script-warp >/dev/null || return 1
     fi
+    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.disable.success')"
+}
+
+function rollback_warp_reset() {
+    local running_backup='xray-script-warp-reset-backup-running'
+    local stopped_backup='xray-script-warp-reset-backup-stopped'
+    local data_transaction="${DOCKER_DIR}/.warp-reset-transaction"
+    local backup_container='' restore_running=0 restore_status=0
+    local current_image='' reset_image='' remove_current=0
+    local data_transaction_exists=0 data_swapped=0 data_was_present=0
+
+    if [[ -d "${data_transaction}" && ! -L "${data_transaction}" ]]; then
+        data_transaction_exists=1
+        if [[ -e "${data_transaction}/data" ||
+            -e "${data_transaction}/swapped" ||
+            -e "${data_transaction}/had-data" ]]; then
+            data_swapped=1
+        fi
+    elif [[ -e "${data_transaction}" || -L "${data_transaction}" ]]; then
+        return 1
+    fi
+
+    if [[ "${data_transaction_exists}" -eq 1 &&
+        -f "${data_transaction}/committed" ]]; then
+        if docker inspect "${running_backup}" >/dev/null 2>&1; then
+            docker rm -f "${running_backup}" >/dev/null 2>&1 || restore_status=1
+        fi
+        if docker inspect "${stopped_backup}" >/dev/null 2>&1; then
+            docker rm -f "${stopped_backup}" >/dev/null 2>&1 || restore_status=1
+        fi
+        if [[ "${restore_status}" -eq 0 ]]; then
+            if docker image inspect xray-script-warp:reset-new >/dev/null 2>&1; then
+                docker image rm xray-script-warp:reset-new >/dev/null 2>&1 || restore_status=1
+            fi
+            if docker image inspect xray-script-warp:reset-backup >/dev/null 2>&1; then
+                docker image rm xray-script-warp:reset-backup >/dev/null 2>&1 || restore_status=1
+            fi
+        fi
+        if [[ "${restore_status}" -eq 0 ]]; then
+            rm -rf -- "${data_transaction}" || restore_status=1
+        fi
+        return "${restore_status}"
+    fi
+
+    if docker inspect "${running_backup}" >/dev/null 2>&1; then
+        backup_container="${running_backup}"
+        restore_running=1
+    elif docker inspect "${stopped_backup}" >/dev/null 2>&1; then
+        backup_container="${stopped_backup}"
+    fi
+
+    if [[ -n "${backup_container}" ]]; then
+        remove_current=1
+    elif docker inspect xray-script-warp >/dev/null 2>&1 &&
+        docker image inspect xray-script-warp:reset-new >/dev/null 2>&1 &&
+        [[ "${data_transaction_exists}" -eq 1 &&
+            "${data_swapped}" -eq 1 ]]; then
+        current_image="$(docker inspect --format='{{.Image}}' xray-script-warp 2>/dev/null)" ||
+            restore_status=1
+        reset_image="$(docker image inspect --format='{{.Id}}' xray-script-warp:reset-new 2>/dev/null)" ||
+            restore_status=1
+        if [[ "${restore_status}" -eq 0 && "${current_image}" == "${reset_image}" ]]; then
+            remove_current=1
+        fi
+    fi
+    if [[ "${remove_current}" -eq 1 ]] && docker inspect xray-script-warp >/dev/null 2>&1; then
+        docker rm -f xray-script-warp >/dev/null 2>&1 || restore_status=1
+    fi
+    if [[ "${data_transaction_exists}" -eq 1 && "${restore_status}" -eq 0 ]]; then
+        if [[ "${data_swapped}" -eq 1 ]]; then
+            if docker inspect xray-script-warp >/dev/null 2>&1; then
+                restore_status=1
+            else
+                if [[ -e "${data_transaction}/data" ||
+                    -L "${data_transaction}/data" ||
+                    -f "${data_transaction}/had-data" ]]; then
+                    data_was_present=1
+                fi
+                if [[ -e "${data_transaction}/data" ||
+                    -L "${data_transaction}/data" ]]; then
+                    if [[ -e "${WARP_DIR}" || -L "${WARP_DIR}" ]]; then
+                        rm -rf -- "${WARP_DIR}" || restore_status=1
+                    fi
+                    if [[ -d "${data_transaction}/data" &&
+                        ! -L "${data_transaction}/data" &&
+                        "${restore_status}" -eq 0 ]]; then
+                        mv -- "${data_transaction}/data" "${WARP_DIR}" ||
+                            restore_status=1
+                    else
+                        restore_status=1
+                    fi
+                elif [[ "${data_was_present}" -eq 0 &&
+                    ( -e "${WARP_DIR}" || -L "${WARP_DIR}" ) ]]; then
+                    rm -rf -- "${WARP_DIR}" || restore_status=1
+                fi
+                if [[ "${restore_status}" -eq 0 ]]; then
+                    rm -f -- "${data_transaction}/swapped" || restore_status=1
+                fi
+                if [[ "${restore_status}" -eq 0 ]]; then
+                    rm -f -- "${data_transaction}/had-data" || restore_status=1
+                fi
+                if [[ "${restore_status}" -eq 0 ]]; then
+                    rmdir -- "${data_transaction}" 2>/dev/null || restore_status=1
+                fi
+            fi
+        else
+            rmdir -- "${data_transaction}" 2>/dev/null || restore_status=1
+        fi
+    fi
+    if [[ -n "${backup_container}" && "${restore_status}" -eq 0 ]]; then
+        docker rename "${backup_container}" xray-script-warp >/dev/null 2>&1 || restore_status=1
+        if [[ "${restore_status}" -eq 0 && "${restore_running}" -eq 1 ]]; then
+            docker start xray-script-warp >/dev/null 2>&1 || restore_status=1
+            if [[ "${restore_status}" -eq 0 ]]; then
+                wait_for_warp xray-script-warp >/dev/null 2>&1 || restore_status=1
+            fi
+        fi
+    fi
+    if docker image inspect xray-script-warp:reset-backup >/dev/null 2>&1; then
+        docker tag xray-script-warp:reset-backup xray-script-warp:latest >/dev/null 2>&1 ||
+            restore_status=1
+    fi
+    if [[ "${restore_status}" -eq 0 ]]; then
+        docker image rm xray-script-warp:reset-new >/dev/null 2>&1 || true
+        docker image rm xray-script-warp:reset-backup >/dev/null 2>&1 || true
+    fi
+    return "${restore_status}"
+}
+
+function prepare_warp_reset() (
+    local running_backup='xray-script-warp-reset-backup-running'
+    local stopped_backup='xray-script-warp-reset-backup-stopped'
+    local data_transaction="${DOCKER_DIR}/.warp-reset-transaction"
+    local container_state='missing' backup_container='' container_ip=''
+    local old_container_stopped=0
+
+    function finish_warp_reset_preparation() {
+        local status="$1"
+        local restore_status=0
+
+        trap - EXIT HUP INT TERM
+        if [[ "${status}" -ne 0 ]]; then
+            if docker inspect "${running_backup}" >/dev/null 2>&1 ||
+                docker inspect "${stopped_backup}" >/dev/null 2>&1 ||
+                [[ -e "${data_transaction}" || -L "${data_transaction}" ]] ||
+                { [[ "${container_state}" == 'missing' ]] &&
+                    docker inspect xray-script-warp >/dev/null 2>&1; }; then
+                rollback_warp_reset || restore_status=1
+            else
+                if [[ "${old_container_stopped}" -eq 1 ]]; then
+                    docker start xray-script-warp >/dev/null 2>&1 || restore_status=1
+                    if [[ "${restore_status}" -eq 0 ]]; then
+                        wait_for_warp xray-script-warp >/dev/null 2>&1 || restore_status=1
+                    fi
+                fi
+                docker image rm xray-script-warp:reset-new >/dev/null 2>&1 || true
+                if [[ "${restore_status}" -eq 0 ]]; then
+                    docker image rm xray-script-warp:reset-backup >/dev/null 2>&1 || true
+                fi
+            fi
+            if [[ "${restore_status}" -ne 0 ]]; then
+                print_warn 'WARP reset preparation rollback failed; reset artifacts were retained.'
+            fi
+        fi
+        exit "${status}"
+    }
+
+    trap 'finish_warp_reset_preparation "$?"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    if docker inspect "${running_backup}" >/dev/null 2>&1 ||
+        docker inspect "${stopped_backup}" >/dev/null 2>&1 ||
+        docker image inspect xray-script-warp:reset-backup >/dev/null 2>&1 ||
+        docker image inspect xray-script-warp:reset-new >/dev/null 2>&1 ||
+        [[ -e "${data_transaction}" || -L "${data_transaction}" ]]; then
+        print_warn 'A previous WARP reset transaction still needs recovery.'
+        return 1
+    fi
+    if docker inspect xray-script-warp >/dev/null 2>&1; then
+        container_state="$(docker inspect --format='{{if .State.Running}}running{{else}}stopped{{end}}' xray-script-warp 2>/dev/null)" || return 1
+    fi
+    if [[ "${container_state}" != 'missing' ]]; then
+        local current_image
+        current_image="$(docker inspect --format='{{.Image}}' xray-script-warp 2>/dev/null)" || return 1
+        docker tag "${current_image}" xray-script-warp:reset-backup >/dev/null 2>&1 || return 1
+    elif docker image inspect xray-script-warp:latest >/dev/null 2>&1; then
+        docker tag xray-script-warp:latest xray-script-warp:reset-backup >/dev/null 2>&1 || return 1
+    fi
+
+    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.start')"
+    if ! docker build --no-cache -t xray-script-warp:reset-new "${CONFIG_DIR}/cloudflare-warp" >&2; then
+        return 1
+    fi
+
+    case "${container_state}" in
+    running)
+        backup_container="${running_backup}"
+        docker stop xray-script-warp >/dev/null 2>&1 || return 1
+        old_container_stopped=1
+        ;;
+    stopped) backup_container="${stopped_backup}" ;;
+    missing) ;;
+    *) return 1 ;;
+    esac
+    if [[ -n "${backup_container}" ]]; then
+        docker rename xray-script-warp "${backup_container}" >/dev/null 2>&1 || return 1
+    fi
+
+    mkdir -p -- "${DOCKER_DIR}" || return 1
+    mkdir -- "${data_transaction}" || return 1
+    if [[ -e "${WARP_DIR}" || -L "${WARP_DIR}" ]]; then
+        [[ -d "${WARP_DIR}" && ! -L "${WARP_DIR}" ]] || return 1
+        mv -- "${WARP_DIR}" "${data_transaction}/data" || return 1
+        touch -- "${data_transaction}/had-data" || return 1
+    fi
+    touch -- "${data_transaction}/swapped" || return 1
+    mkdir -- "${WARP_DIR}" || return 1
+    if ! docker run -d --restart=always --name=xray-script-warp \
+        --log-driver json-file --log-opt max-size=100m --log-opt max-file=3 \
+        -v "${WARP_DIR}":/var/lib/cloudflare-warp:rw \
+        xray-script-warp:reset-new >&2; then
+        return 1
+    fi
+    container_ip="$(wait_for_warp xray-script-warp)" || return 1
+    trap - EXIT HUP INT TERM
+    printf '%s\n' "${container_ip}"
+)
+
+function commit_warp_reset() {
+    local running_backup='xray-script-warp-reset-backup-running'
+    local stopped_backup='xray-script-warp-reset-backup-stopped'
+    local data_transaction="${DOCKER_DIR}/.warp-reset-transaction"
+    local backup_container='' cleanup_status=0
+
+    [[ -d "${data_transaction}" && ! -L "${data_transaction}" &&
+        -f "${data_transaction}/swapped" ]] || return 1
+    docker inspect xray-script-warp >/dev/null 2>&1 || return 1
+    [[ "$(docker inspect --format='{{.State.Running}}' xray-script-warp 2>/dev/null)" == 'true' ]] || return 1
+    wait_for_warp xray-script-warp >/dev/null 2>&1 || return 1
+    docker tag xray-script-warp:reset-new xray-script-warp:latest >/dev/null 2>&1 || return 1
+    mv -- "${data_transaction}/swapped" \
+        "${data_transaction}/committed" || return 1
+
+    if docker inspect "${running_backup}" >/dev/null 2>&1; then
+        backup_container="${running_backup}"
+    elif docker inspect "${stopped_backup}" >/dev/null 2>&1; then
+        backup_container="${stopped_backup}"
+    fi
+    if [[ -n "${backup_container}" ]]; then
+        docker rm "${backup_container}" >/dev/null 2>&1 || cleanup_status=1
+    fi
+    if [[ "${cleanup_status}" -eq 0 ]]; then
+        if docker image inspect xray-script-warp:reset-new >/dev/null 2>&1; then
+            docker image rm xray-script-warp:reset-new >/dev/null 2>&1 || cleanup_status=1
+        fi
+        if docker image inspect xray-script-warp:reset-backup >/dev/null 2>&1; then
+            docker image rm xray-script-warp:reset-backup >/dev/null 2>&1 || cleanup_status=1
+        fi
+    fi
+    if [[ "${cleanup_status}" -eq 0 ]]; then
+        rm -rf -- "${data_transaction}" || cleanup_status=1
+    fi
+    if [[ "${cleanup_status}" -ne 0 ]]; then
+        print_warn "WARP reset committed, but old transaction artifacts were retained at: ${data_transaction}"
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -629,8 +928,13 @@ function stop_cloudreve_v4() {
 function clean_container_logs() {
     # 获取容器名称或 ID
     local container_name_or_id="${1:-xray-script-warp}"
-    # 找到容器的日志文件并清空
-    truncate -s 0 $(docker inspect --format='{{.LogPath}}' "${container_name_or_id}")
+    local log_path=''
+    if ! docker inspect "${container_name_or_id}" >/dev/null 2>&1; then
+        return 0
+    fi
+    log_path="$(docker inspect --format='{{.LogPath}}' "${container_name_or_id}" 2>/dev/null)" || return 1
+    [[ -z "${log_path}" || ! -e "${log_path}" ]] && return 0
+    truncate -s 0 -- "${log_path}"
 }
 
 # =============================================================================
@@ -644,11 +948,11 @@ function obtain_container_ip() {
     # 获取容器名称
     local container_name="${1:-xray-script-warp}"
     # 获取容器的 IP 地址
-    local container_ip=$(get_container_ip "${container_name}")
-    if [[ -n "${container_ip}" ]]; then
-        # 输出容器 IP 地址
-        echo "${container_ip}"
-    fi
+    [[ "$(docker inspect --format='{{.State.Running}}' "${container_name}" 2>/dev/null)" == 'true' ]] || return 1
+    local container_ip=''
+    container_ip="$(get_container_ip "${container_name}")" || return 1
+    [[ -n "${container_ip}" ]] || return 1
+    printf '%s\n' "${container_ip}"
 }
 
 # =============================================================================
@@ -670,6 +974,9 @@ function main() {
     --build-warp) build_warp ;;                             # 构建 WARP 镜像
     --enable-warp) enable_warp ;;                           # 启用 WARP 容器
     --disable-warp) disable_warp ;;                         # 禁用 WARP 容器
+    --prepare-reset-warp) prepare_warp_reset ;;             # 构建并暂存新的 WARP 容器
+    --commit-reset-warp) commit_warp_reset ;;               # 提交 WARP 重建事务
+    --rollback-reset-warp) rollback_warp_reset ;;           # 回滚 WARP 重建事务
     --install-cloudreve-v3) install_cloudreve_v3 ;;         # 安装 Cloudreve v3
     --get-cloudreve-v3-admin) get_cloudreve_v3_admin ;;     # 获取 Cloudreve v3 管理员信息
     --get-aria2-token) get_aria2_token ;;                   # 获取 Cloudreve v3 Aria2 Token

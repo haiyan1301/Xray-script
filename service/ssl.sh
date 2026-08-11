@@ -77,7 +77,7 @@ declare I18N_DATA=''     # 存储从 i18n JSON 文件中读取的全部数据
 # =============================================================================
 function load_i18n() {
     # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
@@ -737,13 +737,18 @@ function stop_renew_certificates() {
 
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -gt 0 ]]; then
+        local managed_domain
+        managed_domain="$(find_acme_main_domain "${DOMAIN}")" || {
+            print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
+            return 1
+        }
         # 执行 acme.sh 的移除命令（停止续期）
-        if ! "${HOME}/.acme.sh/acme.sh" --remove -d "${DOMAIN}" --ecc; then
+        if ! "${HOME}/.acme.sh/acme.sh" --remove -d "${managed_domain}" --ecc; then
             print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
             return 1
         fi
         # 删除该域名的 acme.sh 本地存储目录
-        rm -rf -- "${HOME}/.acme.sh/${DOMAIN}_ecc" || return 1
+        rm -rf -- "${HOME}/.acme.sh/${managed_domain}_ecc" || return 1
         # “停止续签”的公开操作默认保留正在被服务加载的证书。只有调用方
         # 已经成功切换到其他域名后，才显式要求清理旧部署目录。
         if [[ "${DELETE_DEPLOYED_CERT}" -eq 1 ]]; then
@@ -781,14 +786,29 @@ function check_certificate_status() {
         print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.no_domain")"
     fi
 
-    # 从 acme.sh 列表中查找匹配的域名
-    local main_domain=$(
-        "${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" |
-            awk -v domain="${DOMAIN}" 'NR > 1 && $1 == domain {print $1; exit}'
-    )
+    find_acme_main_domain "${DOMAIN}"
+}
 
-    # 比较找到的域名与提供的域名
-    [[ "${main_domain}" == "${DOMAIN}" ]]
+function find_acme_main_domain() {
+    local requested_domain="${1,,}"
+    local main_domain
+
+    main_domain="$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null |
+        awk -v requested="${requested_domain}" '
+            NR == 1 { next }
+            tolower($2) ~ /^ec-/ {
+                main = tolower($1)
+                if (main == requested) { print $1; exit }
+                sans = $3
+                gsub(/[,;]/, " ", sans)
+                count = split(sans, values, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    if (tolower(values[i]) == requested) { print $1; exit }
+                }
+            }
+        ')" || return 1
+    [[ -n "${main_domain}" ]] || return 1
+    printf '%s\n' "${main_domain}"
 }
 
 # =============================================================================
@@ -803,11 +823,13 @@ function show_certificate_info() {
         print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.info.no_domain")"
     fi
 
+    local managed_domain
+    managed_domain="$(find_acme_main_domain "${DOMAIN}")" || return 1
     # 打印显示信息
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.info.start")"
 
     # 执行 acme.sh 的信息显示命令
-    "${HOME}/.acme.sh/acme.sh" --info -d "${DOMAIN}"
+    "${HOME}/.acme.sh/acme.sh" --info -d "${managed_domain}" --ecc
 }
 
 # =============================================================================

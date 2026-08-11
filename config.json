@@ -6,6 +6,7 @@
     "version": "",
     "githubProxy": "",
     "warp": 0,
+    "firewallRules": [],
     "rules": {
       "reset": "",
       "bt": 0,

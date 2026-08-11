@@ -81,13 +81,26 @@ else
         printf -- "%s" "${main_ver%%.*}"
     }
     function write_config() {
-        # 防止写入空内容导致配置文件损坏
-        if [[ -z "$1" ]]; then
+        local content="$1"
+        local target="$2"
+        local temp_file
+        if [[ -z "${content}" ]] || ! printf '%s\n' "${content}" | jq empty 2>/dev/null; then
             echo -e "${RED}[错误]${NC} 拒绝写入空内容到 $2" >&2
             return 1
         fi
-        echo "$1" >"$2"
-        chmod 600 "$2"
+        temp_file="$(mktemp "${target}.tmp.XXXXXX")" || return 1
+        if ! printf '%s\n' "${content}" >"${temp_file}"; then
+            rm -f -- "${temp_file}"
+            return 1
+        fi
+        chmod 600 "${temp_file}" || {
+            rm -f -- "${temp_file}"
+            return 1
+        }
+        mv -f -- "${temp_file}" "${target}" || {
+            rm -f -- "${temp_file}"
+            return 1
+        }
         sync
     }
     function backup_config() {
@@ -112,6 +125,9 @@ declare -A I18N_DATA=(
     ['failed']='下载失败'
     ['downloaded']='文件已下载到'
     ['path_invalid']='安装目录必须是安全的绝对路径，且不能是系统根目录'
+    ['path_fallback']='保存的安装目录无效，已回退到 /usr/local/xray-script'
+    ['language_invalid']='语言只允许 zh、en 或 auto'
+    ['option_invalid']='未知选项'
 )
 declare PROJECT_ROOT=''
 declare I18N_DIR=''
@@ -175,7 +191,10 @@ function parse_args() {
             QUICK_INSTALL="$1"
             ;;
         --lang=*)
-            LANG_PARAM="${1}"
+            case "${1#*=}" in
+            zh | en | auto) LANG_PARAM="${1}" ;;
+            *) _error "${I18N_DATA['language_invalid']}: ${1#*=}" ;;
+            esac
             ;;
         -d)
             if [[ $# -lt 2 || -z "${2:-}" || "${2}" == -* ]]; then
@@ -190,6 +209,9 @@ function parse_args() {
         --version)
             echo "Xray-script ${SCRIPT_VERSION}"
             exit 0
+            ;;
+        *)
+            _error "${I18N_DATA['option_invalid']}: $1"
             ;;
         esac
         shift
@@ -208,7 +230,7 @@ function load_i18n() {
     # 如果存在脚本配置文件，则尝试从文件中获取语言代码
     if [[ -z "${lang}" && -f "${SCRIPT_CONFIG_PATH}" ]]; then
         # 尝试从脚本配置文件中获取语言代码
-        lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+        lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
     fi
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
@@ -237,6 +259,9 @@ function load_i18n() {
             ['failed']='Download failed'
             ['downloaded']='The file has been downloaded to'
             ['path_invalid']='The install directory must be a safe absolute path and not a system root directory'
+            ['path_fallback']='The saved install directory is invalid; using /usr/local/xray-script'
+            ['language_invalid']='Language must be zh, en, or auto'
+            ['option_invalid']='Unknown option'
         )
     fi
 }
@@ -848,13 +873,19 @@ function main() {
     local script_path="$(jq -r '.path // ""' "${SCRIPT_CONFIG_PATH}")"
     local requested_path="${PROJECT_ROOT}"
     if ! PROJECT_ROOT="$(choose_project_root "${requested_path}" "${script_path}")"; then
-        _error "${I18N_DATA['path_invalid']}: ${requested_path:-${script_path}}"
+        if [[ -n "${requested_path}" ]]; then
+            _error "${I18N_DATA['path_invalid']}: ${requested_path}"
+        fi
+        echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['path_fallback']}" >&2
+        PROJECT_ROOT="$(normalize_project_root '/usr/local/xray-script')" ||
+            _error "${I18N_DATA['path_invalid']}: /usr/local/xray-script"
     fi
 
     # 显式 -d 始终优先于历史保存路径；同时把默认值或规范化后的路径写回配置。
     if [[ "${script_path}" != "${PROJECT_ROOT}" ]]; then
-        SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
-        backup_config "${SCRIPT_CONFIG_PATH}"
+        SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")" ||
+            _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
+        backup_config "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH} backup"
         write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
     fi
 
@@ -876,7 +907,7 @@ function main() {
     fi
 
     # 检查配置文件中的语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
     if [[ -z "${lang}" && -z "${LANG_PARAM}" ]]; then
         # 如果语言未设置且未通过命令行指定，则运行菜单脚本选择语言
         bash "${CORE_DIR}/menu.sh" '--language'
@@ -884,13 +915,15 @@ function main() {
         2) LANG_PARAM="en" ;; # 选择英文
         *) LANG_PARAM="zh" ;; # 默认中文
         esac
-        SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")"
-        backup_config "${SCRIPT_CONFIG_PATH}"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")" ||
+            _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
+        backup_config "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH} backup"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
     elif [[ "${LANG_PARAM}" =~ ^--lang= ]]; then
-        SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM#*=}" '.language = $language' "${SCRIPT_CONFIG_PATH}")"
-        backup_config "${SCRIPT_CONFIG_PATH}"
-        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+        SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM#*=}" '.language = $language' "${SCRIPT_CONFIG_PATH}")" ||
+            _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
+        backup_config "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH} backup"
+        write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"
     fi
 
     # 启动主脚本，并传递快速安装选项

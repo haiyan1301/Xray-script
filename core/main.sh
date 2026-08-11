@@ -386,31 +386,6 @@ function create_nginx_artifact_journal() {
     printf '%s\n' "${journal_dir}"
 }
 
-function is_hy2_ip_cron_identifier() {
-    local identifier="$1"
-    local ipv4_regex='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
-    local ipv6_regex='^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'
-
-    [[ "${identifier}" =~ ${ipv4_regex} || "${identifier}" =~ ${ipv6_regex} ]]
-}
-
-function is_managed_hy2_ip_cron_line() {
-    local line="$1"
-    local legacy_prefix="17 3 */3 * * ${HOME}/.acme.sh/acme.sh --renew -d "
-    local legacy_suffix=" --ecc --force --home ${HOME}/.acme.sh >/dev/null 2>&1"
-    local identifier
-
-    if [[ "${line}" == *'# xray-script-hy2-ip-renew'* ]]; then
-        return 0
-    fi
-    [[ "${line}" == "${legacy_prefix}"*"${legacy_suffix}" ]] || return 1
-    identifier="${line#"${legacy_prefix}"}"
-    identifier="${identifier%"${legacy_suffix}"}"
-    [[ "${line}" == "${legacy_prefix}${identifier}${legacy_suffix}" ]] ||
-        return 1
-    is_hy2_ip_cron_identifier "${identifier}"
-}
-
 function read_protocol_crontab() {
     local target="$1"
     local error_file error_text status
@@ -755,6 +730,9 @@ function install_protocol() (
     if ! exec_handler '--restart'; then
         return 1
     fi
+    if ! exec_handler '--restore-certificate-hooks'; then
+        return 1
+    fi
 
     # The new runtime is healthy: from here on, cleanup/share failures are
     # post-commit warnings and must never roll back a working installation.
@@ -804,16 +782,12 @@ function processes_xray_config() {
 # 功能描述: 处理 Xray 安装相关的流程。
 #           1. 显示 Xray 安装菜单。
 #           2. 根据用户选择确定 Xray 版本 (release, latest, custom)。
-#           3. 根据 is_exec 参数决定是立即安装还是设置版本后进入配置流程。
-# 参数:
-#   $1: is_exec - 控制流程模式。'y' 表示立即执行安装；
-#                 'n' 表示仅设置版本，然后进入 Xray 配置流程。
-#                 默认为 'y'。
+#           3. 立即安装选择的版本。
+# 参数: 无
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 
 function processes_xray() {
-    local is_exec="${1:-y}" # 获取 is_exec 参数，默认为 'y'
     local version='release' # 初始化 Xray 版本为 'release'
     # 显示 Xray 安装菜单
     exec_menu '--xray'
@@ -827,14 +801,7 @@ function processes_xray() {
     3) version='custom' ;;  # 选择 3 对应 custom
     *) return 1 ;;
     esac
-    # 如果 is_exec 为 'y'，则立即执行安装
-    if [[ "${is_exec}" == 'y' ]]; then
-        exec_handler '--install' "${version}" 'y' # 安装指定版本的 Xray
-    else
-        # 如果 is_exec 为 'n'，则仅设置版本，然后进入配置流程
-        exec_handler '--version' "${version}" # 设置 Xray 版本
-        processes_xray_config                 # 进入 Xray 配置流程
-    fi
+    exec_handler '--install' "${version}" 'y' # 安装指定版本的 Xray
 }
 
 # =============================================================================
@@ -864,15 +831,14 @@ function processes_routing() {
     local choose=$(echo $?)
     # 根据用户选择执行不同的路由配置操作
     case ${choose} in
-    1) exec_handler '--warp' ;;                     # 选择 1：配置 WARP
-    2) exec_handler '--reset-warp' ;;               # 选择 2：重置 WARP
-    3) exec_handler '--routing' 'block' 'ip' ;;     # 选择 3：配置阻止 IP 规则
-    4) exec_handler '--routing' 'block' 'domain' ;; # 选择 4：配置阻止 Domain 规则
-    5) exec_handler '--routing' 'warp' 'ip' ;;      # 选择 5：配置 WARP IP 规则
-    6) exec_handler '--routing' 'warp' 'domain' ;;  # 选择 6：配置 WARP Domain 规则
-    *) exit 0 ;;                                    # 其他情况：退出脚本
+    1) exec_handler '--warp' ;;                               # 选择 1：配置 WARP
+    2) exec_handler '--reset-warp' ;;                         # 选择 2：重置 WARP
+    3) exec_handler '--routing' 'block' 'ip' ;;               # 选择 3：配置阻止 IP 规则
+    4) exec_handler '--routing' 'block' 'domain' ;;           # 选择 4：配置阻止 Domain 规则
+    5) exec_handler '--routing' 'warp' 'ip' ;;                # 选择 5：配置 WARP IP 规则
+    6) exec_handler '--routing' 'warp' 'domain' ;;            # 选择 6：配置 WARP Domain 规则
+    *) exit 0 ;;                                              # 其他情况：退出脚本
     esac
-    exec_handler '--restart' # 重启 Xray 服务
 }
 
 # =============================================================================
@@ -903,7 +869,10 @@ function processes_web_mode_config() {
             exec_menu '--cdn-config'
         fi
         ;;
-    *) _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.not_support")" ;;
+    *)
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.not_support")" >&2
+        return 1
+        ;;
     esac
     # 获取菜单选择的退出码 (代表用户选择)
     local choose=$(echo $?)
@@ -959,9 +928,9 @@ function processes_language() {
     *) LANG_PARAM="zh" ;; # 默认中文
     esac
     # 更新配置文件中的语言设置
-    backup_config "${SCRIPT_CONFIG_PATH}"
-    SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"
+    backup_config "${SCRIPT_CONFIG_PATH}" || return 1
+    SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")" || return 1
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
     bash "${CUR_DIR}/${CUR_FILE}.sh" && exit 0
 }
 
@@ -984,10 +953,8 @@ function processes_reverse() {
     exec_menu '--reverse'
     local choose=$(echo $?)
     case ${choose} in
-    1 | 2)
-        exec_handler '--reverse' || return 1
-        exec_handler '--restart' || return 1
-        ;;
+    1) exec_handler '--reverse' 'enable' ;;
+    2) exec_handler '--reverse' 'disable' ;;
     3)
         exec_handler '--reverse-share'
         ;;
@@ -999,24 +966,12 @@ function processes_lan() {
     exec_menu '--lan'
     local choose=$(echo $?)
     case ${choose} in
-    1)
-        exec_handler '--lan-enable' || return 1
-        exec_handler '--restart'
-        ;;
-    2)
-        exec_handler '--lan-add' || return 1
-        exec_handler '--restart'
-        ;;
-    3)
-        exec_handler '--lan-remove' || return 1
-        exec_handler '--restart'
-        ;;
+    1) exec_handler '--lan-enable' ;;
+    2) exec_handler '--lan-add' ;;
+    3) exec_handler '--lan-remove' ;;
     4) exec_handler '--lan-list' ;;
     5) exec_handler '--lan-export' ;;
-    6)
-        exec_handler '--lan-disable' || return 1
-        exec_handler '--restart'
-        ;;
+    6) exec_handler '--lan-disable' ;;
     *) exit 0 ;;
     esac
 }
@@ -1026,12 +981,28 @@ function processes_config() {
     exec_menu '--management'
     # 获取菜单选择的退出码 (代表用户选择)
     local choose=$(echo $?)
+    local config_tag
+    config_tag="$(jq -r '.xray.tag // ""' "${SCRIPT_CONFIG_PATH}")"
     # 根据用户选择进入不同的子流程
     case ${choose} in
     1) processes_xray_config ;;         # 选择 1：进入 Xray 配置流程
     2) processes_routing ;;             # 选择 2：进入路由规则配置流程
-    3) processes_web_mode_config ;;     # 选择 3：进入 CDN/SNI 配置流程
-    4) exec_handler '--change-port' ;;  # 选择 4：修改 Xray 端口
+    3)
+        if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
+            processes_web_mode_config
+        else
+            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.not_support")" >&2
+            return 1
+        fi
+        ;;
+    4)
+        if protocol_reads_public_port "${config_tag}"; then
+            exec_handler '--change-port'
+        else
+            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r '.handler.port.fixed')" >&2
+            return 1
+        fi
+        ;;
     5) exec_handler '--geodata-cron' ;; # 选择 5：配置 GeoData Cron 任务
     6) processes_language ;;            # 选择 6：设置语言
     7) processes_reverse ;;             # 选择 7：配置反向代理

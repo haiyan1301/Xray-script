@@ -97,13 +97,20 @@ function protocol_uses_xhttp() {
 
 function protocol_reads_public_port() {
     case "${1,,}" in
-    sni | cdn | multi) return 1 ;;
-    *) return 0 ;;
+    vision | xhttp | trojan | fallback | hy2 | ss2022 | mkcp) return 0 ;;
+    *) return 1 ;;
     esac
 }
 
 function protocol_uses_hy2_certificate() {
     [[ "${1,,}" == 'hy2' ]]
+}
+
+function protocol_supports_reverse() {
+    case "${1,,}" in
+    vision | xhttp | fallback | sni) return 0 ;;
+    *) return 1 ;;
+    esac
 }
 
 function normalize_xhttp_path() {

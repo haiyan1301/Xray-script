@@ -97,7 +97,7 @@ function egress() {
 # =============================================================================
 function load_i18n() {
     # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
     # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
     if [[ "$lang" == "auto" ]]; then
@@ -177,19 +177,7 @@ function print_error() {
 # 返回值: 0-命令存在 1-命令不存在 (由命令检查工具的退出码决定)
 # =============================================================================
 function cmd_exists() {
-    local cmd="$1" # 获取命令名称参数
-
-    # 尝试使用不同的方法检查命令是否存在
-    if eval type type >/dev/null 2>&1; then
-        # 使用 type 命令检查
-        eval type "$cmd" >/dev/null 2>&1
-    elif command >/dev/null 2>&1; then
-        # 使用 command -v 命令检查
-        command -v "$cmd" >/dev/null 2>&1
-    else
-        # 使用 which 命令检查
-        which "$cmd" >/dev/null 2>&1
-    fi
+    command -v "$1" >/dev/null 2>&1
 }
 
 # =============================================================================
@@ -286,6 +274,12 @@ function _version_ge() {
     test "$(echo "$@" | tr " " "\n" | sort -rV | head -n 1)" == "$1"
 }
 
+function rpm_package_installed() {
+    local package_name="$1"
+    rpm -q "${package_name}" >/dev/null 2>&1 ||
+        rpm -qa --qf '%{NAME}\n' 2>/dev/null | grep -Fxiq -- "${package_name}"
+}
+
 # =============================================================================
 # 函数名称: fetch_latest_nginx_version
 # 功能描述: 从官方源码目录解析最新 Nginx 版本号。
@@ -308,8 +302,7 @@ function fetch_latest_nginx_version() {
 # 返回值: 无 (执行包管理器命令安装软件)
 # =============================================================================
 function _install() {
-    local packages_name="$@"    # 获取所有要安装的包名
-    local installed_packages="" # 存储已安装的包列表
+    local packages_name="$@"
 
     case "$(_os)" in # 根据操作系统类型进行分支处理
     centos)
@@ -317,11 +310,10 @@ function _install() {
         if cmd_exists "dnf"; then
             # 添加必要的 dnf 插件和 EPEL 源
             packages_name="dnf-plugins-core epel-release epel-next-release ${packages_name}"
-            installed_packages="$(dnf list installed 2>/dev/null)" # 获取已安装包列表
             # 针对 CentOS 9 的特殊处理
             if [[ -n "$(_os_ver)" && "$(_os_ver)" -eq 9 ]]; then
                 # 启用 EPEL 和 Remi 仓库
-                if [[ "${packages_name}" =~ geoip\-devel ]] && ! echo "${installed_packages}" | grep -iwq "geoip-devel"; then
+                if [[ "${packages_name}" =~ geoip\-devel ]] && ! rpm_package_installed GeoIP-devel; then
                     dnf update -y
                     # 安装 EPEL 和 EPEL-Next 源
                     _error_detect "dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
@@ -345,17 +337,16 @@ function _install() {
             dnf update -y # 更新包列表
             # 遍历并安装每个包（如果尚未安装）
             for package_name in ${packages_name}; do
-                if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
+                if ! rpm_package_installed "${package_name}"; then
                     _error_detect "dnf install -y '${package_name}'"
                 fi
             done
         else
             # 使用 yum 包管理器 (较旧版本 CentOS)
             packages_name="epel-release yum-utils ${packages_name}"
-            installed_packages="$(yum list installed 2>/dev/null)"
             yum update -y
             for package_name in ${packages_name}; do
-                if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
+                if ! rpm_package_installed "${package_name}"; then
                     _error_detect "yum install -y '${package_name}'"
                 fi
             done
@@ -364,9 +355,8 @@ function _install() {
     # 处理 Debian 和 Ubuntu 系统
     ubuntu | debian)
         apt update -y                                            # 更新包列表
-        installed_packages="$(apt list --installed 2>/dev/null)" # 获取已安装包列表
         for package_name in ${packages_name}; do
-            if ! echo "${installed_packages}" | grep -iwq "${package_name}"; then
+            if ! dpkg -s "${package_name}" >/dev/null 2>&1; then
                 _error_detect "apt install -y '${package_name}'"
             fi
         done
@@ -422,27 +412,6 @@ function swap_on() {
             swapon "${TMPFILE_DIR}/swap"     # 启用 swap
         fi
     fi
-}
-
-# =============================================================================
-# 函数名称: backup_files
-# 功能描述: 备份指定目录下的所有文件。
-# 参数:
-#   $1: 要备份的目录路径
-# 返回值: 无 (执行文件备份操作)
-# =============================================================================
-function backup_files() {
-    local backup_dir="$1"            # 获取要备份的目录路径
-    local current_date="$(date +%F)" # 获取当前日期 (YYYY-MM-DD)
-    # 遍历目录中的所有文件
-    for file in "${backup_dir}/"*; do
-        if [[ -f "$file" ]]; then                                          # 检查是否为普通文件
-            local file_name="$(basename "$file")"                          # 获取文件名
-            local backup_file="${backup_dir}/${file_name}_${current_date}" # 构造备份文件名
-            mv "$file" "$backup_file"                                      # 重命名文件以进行备份
-            echo "$(echo "$I18N_DATA" | jq -r '.nginx.backup_files.backup'): ${file} -> ${backup_file}。"
-        fi
-    done
 }
 
 # =============================================================================
@@ -579,6 +548,152 @@ function install_nginx_modules_atomically() {
     done < <(find "${source_dir}" -maxdepth 1 -type f -name '*.so' -print0)
 }
 
+function install_nginx_update_transaction() (
+    local new_binary="$1"
+    local new_modules_dir="$2"
+    local backup_root="${NGINX_PATH}/backups"
+    local backup_dir='' staged_modules='' module=''
+    local old_modules_exist=0 command_link_existed=0
+    local nginx_was_active=0 cleanup_backup=1
+    local mutation_started=0 transaction_committed=0 rollback_attempted=0
+
+    function cleanup_nginx_update_transaction() {
+        if [[ -n "${staged_modules}" && -e "${staged_modules}" ]]; then
+            rm -rf -- "${staged_modules}"
+        fi
+        if [[ "${cleanup_backup}" -eq 1 &&
+            -n "${backup_dir}" && -d "${backup_dir}" ]]; then
+            rm -rf -- "${backup_dir}"
+        fi
+    }
+
+    function restore_previous_nginx_update() {
+        local restore_status=0
+        local failed_modules="${backup_dir}/failed-modules"
+
+        rollback_attempted=1
+        # A second signal during rollback must leave the backup available for
+        # manual recovery instead of letting the EXIT cleanup remove it.
+        cleanup_backup=0
+        if [[ "${old_modules_exist}" -eq 1 ]]; then
+            if [[ -d "${backup_dir}/modules" ]]; then
+                if [[ -e "${NGINX_PATH}/modules" ]]; then
+                    mv -- "${NGINX_PATH}/modules" "${failed_modules}" ||
+                        restore_status=1
+                fi
+                if [[ "${restore_status}" -eq 0 ]]; then
+                    mv -- "${backup_dir}/modules" "${NGINX_PATH}/modules" ||
+                        restore_status=1
+                fi
+            elif [[ ! -d "${NGINX_PATH}/modules" ]]; then
+                restore_status=1
+            fi
+        else
+            if [[ -e "${NGINX_PATH}/modules" ]]; then
+                mv -- "${NGINX_PATH}/modules" "${failed_modules}" ||
+                    restore_status=1
+            fi
+            if [[ "${restore_status}" -eq 0 ]]; then
+                mkdir -p -- "${NGINX_PATH}/modules" || restore_status=1
+            fi
+        fi
+        if [[ -f "${backup_dir}/nginx" ]]; then
+            install_nginx_binary_atomically \
+                "${backup_dir}/nginx" "${NGINX_PATH}/sbin/nginx" ||
+                restore_status=1
+        else
+            restore_status=1
+        fi
+        rm -f -- /usr/sbin/nginx || restore_status=1
+        if [[ "${command_link_existed}" -eq 1 && "${restore_status}" -eq 0 ]]; then
+            cp -a -- "${backup_dir}/usr-sbin-nginx" /usr/sbin/nginx ||
+                restore_status=1
+        fi
+        if [[ "${restore_status}" -eq 0 ]]; then
+            reload_nginx_after_binary_update "${nginx_was_active}" ||
+                restore_status=1
+        fi
+        if [[ "${restore_status}" -ne 0 ]]; then
+            print_warn "Nginx update rollback failed; retained at: ${backup_dir}"
+        else
+            cleanup_backup=1
+        fi
+        return "${restore_status}"
+    }
+
+    function finish_nginx_update_transaction() {
+        local status="$1"
+
+        trap - EXIT HUP INT TERM
+        if [[ "${mutation_started}" -eq 1 &&
+            "${transaction_committed}" -eq 0 &&
+            "${rollback_attempted}" -eq 0 ]]; then
+            restore_previous_nginx_update || status=1
+        fi
+        cleanup_nginx_update_transaction
+        exit "${status}"
+    }
+
+    trap 'finish_nginx_update_transaction "$?"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    [[ -x "${new_binary}" && -x "${NGINX_PATH}/sbin/nginx" &&
+        -f "${NGINX_PATH}/conf/nginx.conf" ]] || return 1
+    if systemctl is-active --quiet nginx; then
+        nginx_was_active=1
+    fi
+
+    mkdir -p -- "${backup_root}" || return 1
+    backup_dir="$(mktemp -d "${backup_root}/update-$(date +%Y%m%d_%H%M%S)-XXXXXX")" || return 1
+    staged_modules="$(mktemp -d "${NGINX_PATH}/modules.new.XXXXXX")" || return 1
+    if [[ -d "${new_modules_dir}" ]]; then
+        while IFS= read -r -d '' module; do
+            install -m 755 "${module}" "${staged_modules}/$(basename -- "${module}")" || return 1
+        done < <(find "${new_modules_dir}" -maxdepth 1 -type f -name '*.so' -print0)
+    fi
+
+    cp -p -- "${NGINX_PATH}/sbin/nginx" "${backup_dir}/nginx" || return 1
+    if [[ -e /usr/sbin/nginx || -L /usr/sbin/nginx ]]; then
+        cp -a -- /usr/sbin/nginx "${backup_dir}/usr-sbin-nginx" || return 1
+        command_link_existed=1
+    fi
+    if [[ -d "${NGINX_PATH}/modules" ]]; then
+        old_modules_exist=1
+    fi
+    mutation_started=1
+    if [[ "${old_modules_exist}" -eq 1 ]]; then
+        if ! mv -- "${NGINX_PATH}/modules" "${backup_dir}/modules"; then
+            restore_previous_nginx_update || true
+            return 1
+        fi
+    fi
+    if ! mv -- "${staged_modules}" "${NGINX_PATH}/modules"; then
+        restore_previous_nginx_update || true
+        return 1
+    fi
+    staged_modules=''
+    if ! "${new_binary}" -t -p "${NGINX_PATH}/" -c conf/nginx.conf; then
+        restore_previous_nginx_update || true
+        return 1
+    fi
+    if ! install_nginx_binary_atomically \
+        "${new_binary}" "${NGINX_PATH}/sbin/nginx"; then
+        restore_previous_nginx_update || true
+        return 1
+    fi
+
+    if ! ln -sfn "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx ||
+        ! reload_nginx_after_binary_update "${nginx_was_active}"; then
+        restore_previous_nginx_update || true
+        return 1
+    fi
+
+    transaction_committed=1
+    cleanup_backup=0
+    print_info "Nginx update backup: ${backup_dir}"
+)
+
 function prebuilt_install() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading')"
     # 获取当前仓库的 GitHub Releases，并按当前 CPU 架构选择最新的可用产物。
@@ -586,6 +701,7 @@ function prebuilt_install() {
     local repo_name="Xray-script"
     local machine_arch="$(uname -m)"
     local release_arch
+    local fresh_install=0
     case "${machine_arch}" in
     x86_64 | amd64)
         release_arch="amd64"
@@ -642,13 +758,23 @@ function prebuilt_install() {
     # 安装二进制文件到标准路径
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
     mkdir -p "${NGINX_PATH}/sbin" "${NGINX_PATH}/modules" "${NGINX_PATH}/conf" "${NGINX_PATH}/logs" "${NGINX_PATH}/html"
-    install_nginx_binary_atomically \
-        "${release_dir}/sbin/nginx" "${NGINX_PATH}/sbin/nginx" ||
-        print_error "Failed to install the prebuilt Nginx binary"
-    # 原子替换动态模块，避免破坏仍由旧 worker 映射的 inode。
-    install_nginx_modules_atomically \
-        "${release_dir}/modules" "${NGINX_PATH}/modules" ||
-        print_error "Failed to install the prebuilt Nginx modules"
+    if [[ -x "${NGINX_PATH}/sbin/nginx" ]]; then
+        [[ -f "${NGINX_PATH}/conf/nginx.conf" ]] ||
+            print_error "Refusing to update Nginx without its current configuration"
+        install_nginx_update_transaction \
+            "${release_dir}/sbin/nginx" "${release_dir}/modules" ||
+            print_error "Failed to validate, install, or reload the prebuilt Nginx update"
+    else
+        [[ ! -e "${NGINX_PATH}/sbin/nginx" && ! -L "${NGINX_PATH}/sbin/nginx" ]] ||
+            print_error "Refusing to overwrite a non-executable Nginx binary"
+        fresh_install=1
+        install_nginx_binary_atomically \
+            "${release_dir}/sbin/nginx" "${NGINX_PATH}/sbin/nginx" ||
+            print_error "Failed to install the prebuilt Nginx binary"
+        install_nginx_modules_atomically \
+            "${release_dir}/modules" "${NGINX_PATH}/modules" ||
+            print_error "Failed to install the prebuilt Nginx modules"
+    fi
     # 如果是全新安装且 conf 目录为空，拷贝默认配置
     if [[ ! -f "${NGINX_PATH}/conf/nginx.conf" ]]; then
         # 从 release 中复制日志目录内容或创建默认配置
@@ -679,13 +805,18 @@ CONFEOF
     fi
     mkdir -p "${NGINX_LOG_PATH}"
     chown -R nginx:nginx "${NGINX_LOG_PATH}"
-    ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
+    if [[ "${fresh_install}" -eq 1 ]]; then
+        ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx ||
+            print_error "Failed to create the Nginx command link"
+    fi
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.install_ok')"
 }
 
 function reload_nginx_after_binary_update() {
-    nginx -t || return 1
-    if systemctl is-active --quiet nginx; then
+    local nginx_was_active="${1:-0}"
+
+    "${NGINX_PATH}/sbin/nginx" -t || return 1
+    if [[ "${nginx_was_active}" -eq 1 ]]; then
         systemctl restart nginx
     fi
 }
@@ -874,33 +1005,8 @@ function source_update() {
     if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}"; then
         source_compile # 重新编译新版本
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.start_update')"
-        # 备份旧的 nginx 二进制文件
-        mv "${NGINX_PATH}/sbin/nginx" "${NGINX_PATH}/sbin/nginx_$(date +%F)"
-        # 备份旧的动态模块
-        backup_files "${NGINX_PATH}/modules"
-        # 复制新编译的 nginx 二进制文件和动态模块
-        install_nginx_binary_atomically objs/nginx "${NGINX_PATH}/sbin/nginx" ||
-            print_error "Failed to install the compiled Nginx binary"
-        install_nginx_modules_atomically objs "${NGINX_PATH}/modules" ||
-            print_error "Failed to install the compiled Nginx modules"
-        # 更新软链接
-        ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
-
-        # 如果 Nginx 服务正在运行，则执行平滑升级
-        if systemctl is-active --quiet nginx; then
-            print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.smooth_upgrade')"
-            # 启动新的 Nginx 主进程 (旧进程仍在运行)
-            kill -USR2 $(cat /run/nginx.pid)
-            # 检查旧主进程是否存在
-            if [[ -e "/run/nginx.pid.oldbin" ]]; then
-                # 优雅地关闭旧工作进程
-                kill -WINCH $(cat /run/nginx.pid.oldbin)
-                # 等待旧 worker 处理完现有请求后优雅退出旧主进程
-                kill -QUIT $(cat /run/nginx.pid.oldbin)
-            else
-                print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.no_old_process')"
-            fi
-        fi
+        install_nginx_update_transaction objs/nginx objs ||
+            print_error "Failed to validate, install, or reload the compiled Nginx update"
         return 0 # 表示执行了更新
     fi
     return 1 # 表示无需更新
@@ -1142,10 +1248,6 @@ function main() {
             source_update        # 检查并更新
         fi
         systemctl_config_nginx # 更新时同步迁移 systemd 服务和共享目录
-        if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
-            reload_nginx_after_binary_update ||
-                print_error "Failed to validate or restart Nginx after the binary update"
-        fi
         ;;
     service-config)
         systemctl_config_nginx # 重新生成 systemd 服务和共享目录配置

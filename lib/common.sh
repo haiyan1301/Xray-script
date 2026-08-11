@@ -36,6 +36,143 @@ function cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+function valid_ipv4_literal() {
+    local value="$1"
+    local octet numeric
+    local -a octets=()
+
+    [[ "${value}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+    IFS='.' read -r -a octets <<<"${value}"
+    [[ "${#octets[@]}" -eq 4 ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ "${#octet}" -le 3 ]] || return 1
+        numeric=$((10#${octet}))
+        ((numeric <= 255)) || return 1
+    done
+}
+
+function valid_ipv6_literal() {
+    local value="$1"
+    local ipv4_tail suffix normalized part
+    local has_compression=0 group_count=0
+    local -a groups=()
+
+    [[ "${value}" == *:* ]] || return 1
+    if [[ "${value}" == *.* ]]; then
+        ipv4_tail="${value##*:}"
+        valid_ipv4_literal "${ipv4_tail}" || return 1
+        value="${value%:*}:0:0"
+    fi
+    [[ "${value}" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "${value}" != *:::* ]] || return 1
+    [[ "${value}" != :* || "${value}" == ::* ]] || return 1
+    [[ "${value}" != *: || "${value}" == *:: ]] || return 1
+
+    if [[ "${value}" == *::* ]]; then
+        has_compression=1
+        suffix="${value#*::}"
+        [[ "${suffix}" != *::* ]] || return 1
+        normalized="${value/::/:__compressed__:}"
+    else
+        normalized="${value}"
+    fi
+
+    IFS=':' read -r -a groups <<<"${normalized}"
+    for part in "${groups[@]}"; do
+        [[ -z "${part}" || "${part}" == '__compressed__' ]] && continue
+        [[ "${part}" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        group_count=$((group_count + 1))
+    done
+    if [[ "${has_compression}" -eq 1 ]]; then
+        ((group_count < 8))
+    else
+        ((group_count == 8))
+    fi
+}
+
+function valid_ip_literal() {
+    valid_ipv4_literal "$1" || valid_ipv6_literal "$1"
+}
+
+function valid_hostname() {
+    local value="$1"
+    local label
+    local -a labels=()
+
+    ((${#value} >= 1 && ${#value} <= 253)) || return 1
+    [[ "${value}" != .* && "${value}" != *. &&
+        "${value}" != *[[:space:]]* && "${value}" != *..* ]] || return 1
+    IFS='.' read -r -a labels <<<"${value}"
+    for label in "${labels[@]}"; do
+        ((${#label} >= 1 && ${#label} <= 63)) || return 1
+        [[ "${label}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] || return 1
+    done
+}
+
+declare PARSED_HOST=''
+declare PARSED_PORT=''
+declare PARSED_HOST_IS_IP=0
+
+function parse_host_port() {
+    local value="$1"
+    local host='' port=''
+
+    PARSED_HOST=''
+    PARSED_PORT=''
+    PARSED_HOST_IS_IP=0
+    if [[ "${value}" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+        valid_ipv6_literal "${host}" || return 1
+        PARSED_HOST_IS_IP=1
+    elif [[ "${value}" == *:* && "${value}" != *:*:* ]]; then
+        host="${value%:*}"
+        port="${value##*:}"
+        if valid_ipv4_literal "${host}"; then
+            PARSED_HOST_IS_IP=1
+        else
+            valid_hostname "${host}" || return 1
+        fi
+    else
+        return 1
+    fi
+    [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+    port=$((10#${port}))
+    ((port >= 1 && port <= 65535)) || return 1
+    PARSED_HOST="${host}"
+    PARSED_PORT="${port}"
+}
+
+function format_host_port() {
+    local host="$1"
+    local port="$2"
+    if valid_ipv6_literal "${host}"; then
+        printf '[%s]:%s' "${host}" "${port}"
+    else
+        printf '%s:%s' "${host}" "${port}"
+    fi
+}
+
+function hy2_ip_cron_identifier() {
+    local line="$1"
+    local prefix="17 3 */3 * * ${HOME}/.acme.sh/acme.sh --renew -d "
+    local suffix=" --ecc --force --home ${HOME}/.acme.sh >/dev/null 2>&1"
+    local marker=' # xray-script-hy2-ip-renew'
+    local identifier
+
+    [[ "${line}" == *"${marker}" ]] && line="${line%"${marker}"}"
+    [[ "${line}" == "${prefix}"*"${suffix}" ]] || return 1
+    identifier="${line#"${prefix}"}"
+    identifier="${identifier%"${suffix}"}"
+    [[ "${line}" == "${prefix}${identifier}${suffix}" ]] || return 1
+    valid_ip_literal "${identifier}" || return 1
+    printf '%s\n' "${identifier}"
+}
+
+function is_managed_hy2_ip_cron_line() {
+    hy2_ip_cron_identifier "$1" >/dev/null
+}
+
 # =============================================================================
 # 函数名称: _os
 # 功能描述: 检测当前操作系统的发行版名称。
@@ -91,7 +228,7 @@ function _os_ver() {
 # 返回值: 无 (直接修改全局变量 I18N_DATA)
 # =============================================================================
 function load_i18n() {
-    local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"
+    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
     if [[ "$lang" == "auto" ]]; then
         lang="${LANG:-}"
         lang="${lang%%.*}"
