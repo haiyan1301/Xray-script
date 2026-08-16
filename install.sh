@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.08.17"
+readonly SCRIPT_VERSION="v2026.08.18"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -748,7 +748,7 @@ function update_xray_script_transaction() (
 function check_xray_script_version() {
     # 定义 GitHub API URL 和本地版本文件路径（使用本仓库）
     local script_config_github_url="https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"
-    local is_update='n' # 初始化更新标志为 'n' (不更新)
+    local is_update='' # 初始化更新标志，直接回车时使用默认更新
     local remote_config=''
     local installed_config="${PROJECT_ROOT}/config.json"
     local local_version=''
@@ -787,11 +787,11 @@ function check_xray_script_version() {
         # 如果不一致，则提示用户有新版本
         echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['new']}"
         # 询问用户是否更新
-        read -rp "${I18N_DATA['now']}" -e -i "Y" is_update
+        read -rp "${I18N_DATA['now']}" -e is_update
 
         # 根据用户选择决定是否更新
         case "${is_update,,}" in # ${is_update,,} 转换为小写
-        y | yes)
+        '' | y | yes)
             # 如果用户选择更新
             local safe_project_root=''
             safe_project_root="$(normalize_project_root "${PROJECT_ROOT}")" || _error "${I18N_DATA['path_invalid']}: ${PROJECT_ROOT}"
