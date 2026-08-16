@@ -544,7 +544,8 @@ EOF
             --keylength ec-256 \
             --accountkeylength ec-256 \
             --server zerossl \
-            --ocsp; then
+            --ocsp \
+            --force; then
         # 如果首次签发失败，则尝试启用调试模式重新签发
         print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_first_attempt")"
         if ! "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
@@ -553,6 +554,7 @@ EOF
                 --accountkeylength ec-256 \
                 --server zerossl \
                 --ocsp \
+                --force \
                 --debug; then
             operation_failed=1
             error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_ecc_issue")"
@@ -796,7 +798,10 @@ function find_acme_main_domain() {
     main_domain="$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null |
         awk -v requested="${requested_domain}" '
             NR == 1 { next }
-            tolower($2) ~ /^ec-/ {
+            {
+                key_length = tolower($2)
+                gsub(/"/, "", key_length)
+                if (key_length !~ /^ec-/) next
                 main = tolower($1)
                 if (main == requested) { print $1; exit }
                 sans = $3

@@ -584,7 +584,7 @@ function exec_check() {
 #           3. 扫描 acme.sh 管理的证书列表
 #           4. 去重后输出证书域名列表（一行一个）
 # 参数:
-#   $1: cert_type - 证书类型 ("nginx" 或 "xray")，默认为 "nginx"
+#   $1: cert_type - 证书类型 ("nginx"、"xray" 或仅 "acme")，默认为 "nginx"
 # 返回值: 证书域名列表 (echo 输出，一行一个)
 # =============================================================================
 function list_existing_certs() {
@@ -639,7 +639,11 @@ function list_existing_certs() {
         # Every install path below uses acme.sh --ecc. Do not offer an
         # RSA-only record that --install-cert --ecc cannot actually install.
         acme_list=$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null |
-            awk 'NR > 1 && tolower($2) ~ /^ec-/ {print $1}')
+            awk 'NR > 1 {
+                key_length = tolower($2)
+                gsub(/"/, "", key_length)
+                if (key_length ~ /^ec-/) print $1
+            }')
         for cert_domain in ${acme_list}; do
             # 去重：检查是否已存在于 certs 数组中
             found=false
@@ -663,7 +667,7 @@ function list_existing_certs() {
 #           4. 返回用户选择的证书域名或 "new"。
 # 参数:
 #   $1: target_domain - 当前要配置的域名
-#   $2: cert_type - 证书类型 ("nginx" 或 "xray")，默认为 "nginx"
+#   $2: cert_type - 证书类型 ("nginx"、"xray" 或仅 "acme")，默认为 "nginx"
 # 返回值: 选择的证书域名或 "new" (echo 输出)
 # =============================================================================
 function prompt_cert_reuse() {
@@ -3587,7 +3591,10 @@ function acme_main_domain_for_name() {
     [[ -x "${ACME_PATH}" ]] || return 1
     "${ACME_PATH}" --list --home "${HOME}/.acme.sh" 2>/dev/null |
         awk -v domain="${domain,,}" '
-            NR > 1 && tolower($2) ~ /^ec-/ {
+            NR > 1 {
+                key_length = tolower($2)
+                gsub(/"/, "", key_length)
+                if (key_length !~ /^ec-/) next
                 if (tolower($1) == domain) { print $1; exit }
                 sans = $3
                 gsub(/[,;]/, " ", sans)
@@ -3987,8 +3994,9 @@ function handler_cdn_direct_cert_role() {
     local role="${2:-cdn}"
     local domain source cached_hostname custom_fullchain custom_privkey account_email
     local cert_dir=''
-    local acme_exists=0 target_ready=0 managed_acme_domain=''
-    local acme_action='' acme_status=0
+    local acme_exists=0 managed_acme_domain=''
+    local acme_action='' acme_status=0 cert_reuse_choice='new'
+    local reused_acme_certificate=0
 
     if [[ "${role}" == 'cdn' ]]; then
         domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
@@ -4060,39 +4068,50 @@ function handler_cdn_direct_cert_role() {
             return 1
         fi
     else
-        account_email="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca // ""')"
-        if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
-            exec_read 'email' || return 1
-            account_email="${CONFIG_DATA['email']:-}"
-            if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
-                return 1
+        if [[ "${action}" == 'renew' ]]; then
+            managed_acme_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+            if [[ -n "${managed_acme_domain}" ]]; then
+                acme_exists=1
+                acme_action='renew'
+            else
+                acme_action='issue'
             fi
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg email "${account_email}" '.nginx.ca = $email')"
-            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-        fi
-        handler_ssl_install || return 1
-
-        managed_acme_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
-        if [[ -n "${managed_acme_domain}" ]]; then
+        elif [[ "${action}" == 'install' ]]; then
+            managed_acme_domain="$(acme_main_domain_for_name "${domain}" 2>/dev/null || true)"
+            [[ -n "${managed_acme_domain}" ]] || return 1
             acme_exists=1
-        fi
-        if validate_cdn_direct_certificate \
-                "${cert_dir}/fullchain.pem" \
-                "${cert_dir}/privkey.pem" \
-                "${domain}"; then
-            target_ready=1
+        else
+            cert_reuse_choice="$(prompt_cert_reuse "${domain}" 'acme')"
+            if [[ "${cert_reuse_choice}" == 'new' ]]; then
+                acme_action='issue'
+            else
+                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
+                managed_acme_domain="$(acme_main_domain_for_name "${cert_reuse_choice}" 2>/dev/null || true)"
+                if [[ -z "${managed_acme_domain}" ]]; then
+                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
+                    return 1
+                fi
+                acme_exists=1
+                reused_acme_certificate=1
+            fi
         fi
 
-        if [[ "${action}" == 'renew' && "${acme_exists}" -eq 1 ]]; then
-            acme_action='renew'
-        elif [[ "${acme_exists}" -eq 0 ]]; then
-            acme_action='issue'
-        elif [[ "${target_ready}" -ne 1 && -e "${cert_dir}/fullchain.pem" ]]; then
-            acme_action='renew'
+        if [[ "${acme_action}" == 'issue' ]]; then
+            account_email="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca // ""')"
+            if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
+                exec_read 'email' || return 1
+                account_email="${CONFIG_DATA['email']:-}"
+                if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
+                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
+                    return 1
+                fi
+                SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg email "${account_email}" '.nginx.ca = $email')"
+                write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+            fi
         fi
 
         if [[ -n "${acme_action}" ]]; then
+            handler_ssl_install || return 1
             if [[ "${acme_action}" == 'renew' ]]; then
                 if run_with_nginx_temporarily_stopped \
                     "${ACME_PATH}" --renew -d "${managed_acme_domain}" --ecc --force \
@@ -4110,7 +4129,8 @@ function handler_cdn_direct_cert_role() {
                     --accountkeylength ec-256 \
                     --accountemail "${account_email}" \
                     --server zerossl \
-                    --ocsp; then
+                    --ocsp \
+                    --force; then
                     acme_status=0
                 else
                     acme_status=$?
@@ -4146,6 +4166,9 @@ function handler_cdn_direct_cert_role() {
                 "${managed_acme_domain}" "${domain}" "${cert_dir}"; then
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
             return 1
+        fi
+        if [[ "${reused_acme_certificate}" -eq 1 ]]; then
+            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
         fi
     fi
 
@@ -4201,7 +4224,7 @@ function handler_cdn_direct_cert() {
                 [[ -n "${managed_domain}" ]] || return 1
                 domain_key="${managed_domain,,}"
                 if [[ -n "${renewed_domains[${domain_key}]:-}" ]]; then
-                    role_action='prepare'
+                    role_action='install'
                 fi
             fi
         fi
@@ -4512,7 +4535,8 @@ function handler_hy2_cert() {
                     --accountkeylength ec-256 \
                     --accountemail "${ACCOUNT_EMAIL}" \
                     --server zerossl \
-                    --ocsp; then
+                    --ocsp \
+                    --force; then
                     acme_status=0
                 else
                     acme_status=$?
@@ -4536,7 +4560,8 @@ function handler_hy2_cert() {
                     --accountemail "${ACCOUNT_EMAIL}" \
                     --server letsencrypt \
                     --certificate-profile shortlived \
-                    --days 3; then
+                    --days 3 \
+                    --force; then
                     acme_status=0
                 else
                     acme_status=$?
