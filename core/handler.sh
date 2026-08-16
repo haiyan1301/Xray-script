@@ -3467,7 +3467,7 @@ function reload_certificate_consumer() {
     case "${consumer}" in
     xray)
         if systemctl -q is-active xray; then
-            systemctl -q reload xray || systemctl -q restart xray
+            systemctl -q restart xray
         fi
         ;;
     nginx)

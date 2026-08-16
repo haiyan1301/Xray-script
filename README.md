@@ -81,6 +81,7 @@
 9. Xray 直连 CDN 要求 CDN 使用 HTTPS 回源（Cloudflare 为 Full 或 Full (strict)，不能使用 Flexible）；使用流式 XHTTP 时还需在 CDN 开启 HTTP/2/gRPC。建议在 VPS 防火墙/安全组中将源站 443 仅放行 CDN 回源 IP；该模式不提供伪装站点或 Cloudreve。
 10. v2026.07.28 修复 CDN 路径未同步 Nginx、多节点纯 HY2 误显示 VLESS enc、HY2 证书失败后仍生成配置，以及 ACME 邮箱误校验、X25519 新版输出解析、服务失败后仍继续分享和脚本自更新误降级等安装流程问题。
 11. v2026.08.16 修复 ACME ECC 证书列表解析、HY2/CDN 证书复用选择和重复申请失败问题；重新申请证书会强制使用 `--force`，复用证书则只重新部署已有 ACME 证书。
+12. v2026.08.17 修复独立分享脚本未加载公网 IP 校验函数导致分享链接生成失败的问题，并修复 Xray 证书部署时错误调用不支持的 systemd reload。
 
 ## 分享链接
 

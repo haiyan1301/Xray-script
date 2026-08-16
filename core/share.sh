@@ -24,20 +24,13 @@
 # set -Eeuxo pipefail
 
 # --- 环境与常量设置 ---
-# 将常用路径添加到 PATH 环境变量，确保脚本能在不同环境中找到所需命令
-PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
-export PATH
-
-# 定义颜色代码，用于在终端输出带颜色的信息
-readonly GREEN='\033[32m'  # 绿色
-readonly YELLOW='\033[33m' # 黄色
-readonly RED='\033[31m'    # 红色
-readonly NC='\033[0m'      # 无颜色（重置）
-
 # 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "${BASH_SOURCE[0]}" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+
+# 引入公共库
+source "${PROJECT_ROOT}/lib/common.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
