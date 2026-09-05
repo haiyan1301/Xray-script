@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.08.18"
+readonly SCRIPT_VERSION="v2026.09.05"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -349,7 +349,12 @@ function check_dependencies() {
         packages+=("cron" "bsdmainutils" "iproute2" "procps" "dnsutils")
         # 遍历包列表，检查是否安装
         for pkg in "${packages[@]}"; do
-            if ! dpkg -s "$pkg" &>/dev/null; then
+            if [[ "$pkg" == "dnsutils" ]]; then
+                # Debian 12+ 将 dnsutils 重命名为 bind9-dnsutils
+                if ! dpkg -s "dnsutils" &>/dev/null && ! dpkg -s "bind9-dnsutils" &>/dev/null; then
+                    missing_packages+=("$pkg")
+                fi
+            elif ! dpkg -s "$pkg" &>/dev/null; then
                 missing_packages+=("$pkg") # 如果未安装，添加到缺失列表
             fi
         done
