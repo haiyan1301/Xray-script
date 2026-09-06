@@ -54,8 +54,8 @@
   * 实现输入值为 0 到 8, 则自动生成对 0-16 长度的 shortId
   * 支持逗号分隔的多个值
 * path 默认与自填:
-  * 随机生成(格式: /8ugSUeNJ.9OEnTErb.dVZMUAFu)
-  * 自定义输入(格式: /8ugSUeNJ, 加不加 `/` 都可以)
+  * 随机生成(格式: /8ugSUeNJ.9OEnTErb.dVZMUAFu/)
+  * 自定义输入(格式: /8ugSUeNJ/，必须以 `/` 开头和结尾)
 
 ## 最新功能与流程调整
 
@@ -97,7 +97,7 @@ CDN 独立模式的配置字段为 `.nginx.cdn`（上行）和 `.nginx.cdnDown`�
     "cdnDown": "download-cdn.example.net"
   },
   "xray": {
-    "path": "/same-xhttp-path",
+    "path": "/same-xhttp-path/",
     "xhttpMode": "packet-up"
   }
 }

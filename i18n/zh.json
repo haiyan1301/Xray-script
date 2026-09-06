@@ -251,7 +251,10 @@
       "fetch_fail": "下载 Xray 安装脚本失败，请检查网络或稍后重试",
       "invalid_script": "下载到的 Xray 安装脚本为空或格式无效",
       "install_fail": "Xray 安装失败",
-      "xray_missing": "安装器已结束，但系统中仍找不到 xray 命令"
+      "xray_missing": "安装器已结束，但系统中仍找不到 xray 命令",
+      "version_mismatch": "安装器已结束，但实际安装的 Xray 版本与所选版本不一致",
+      "config_commit_fail": "Xray 已安装，但准备好的版本配置未能提交",
+      "binary_restore_fail": "无法恢复原 Xray 二进制，恢复数据保留于："
     },
     "multi": {
       "label": "多节点",
@@ -415,7 +418,7 @@
     "email": "请输入 ACME 账户邮箱: ",
     "short": "请输入 shortId (多个值请用英文逗号分隔，默认自动生成): ",
     "short_id_tip": "支持输入 0 到 8 自动生成对应倍数长度的 shortId",
-    "path": "请输入 path (默认自动生成): ",
+    "path": "请输入 path（必须以 / 开头和结尾，默认自动生成）：",
     "xhttp_mode": "请输入 XHTTP 传输模式 (默认 auto): ",
     "xhttp_mode_tip": "可选模式: auto、packet-up、stream-up、stream-one。留空默认 auto",
     "hy2_auth": "请输入 HY2 认证密码 auth (默认自动生成): ",
@@ -483,7 +486,8 @@
       "length_error": "路径长度不能超过 128 个字符：",
       "char_error": "路径包含非法字符（只允许字母、数字、斜杠、连字符、下划线、点）：",
       "double_slash_error": "路径不能包含连续斜杠：",
-      "root_error": "路径不能使用根目录 / ："
+      "root_error": "路径不能使用根目录 / ：",
+      "slash_error": "XHTTP 路径必须以 / 开头和结尾："
     },
     "short": {
       "check": "正在检查 shortId 合法性：",

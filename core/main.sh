@@ -98,6 +98,9 @@ function exec_handler() {
 # =============================================================================
 # 函数名称: choose_web_backend / install_protocol
 # 功能描述: 选择可选的伪装站点，并通过统一顺序完成协议安装。
+# 参数:
+#   install_protocol $1: 协议标签
+#   install_protocol $2: 可选的、已解析的 Xray 具体版本
 # =============================================================================
 
 function choose_web_backend() {
@@ -588,7 +591,7 @@ function rollback_protocol_install() {
 }
 
 function install_protocol() (
-    local config_tag script_snapshot='' runtime_snapshot=''
+    local config_tag xray_version="${2:-}" script_snapshot='' runtime_snapshot=''
     local cron_snapshot='' cron_snapshot_state='unavailable' cron_current=''
     local nginx_artifact_journal=''
     local install_lock_fd=''
@@ -635,6 +638,12 @@ function install_protocol() (
     exec {install_lock_fd}>"${SCRIPT_CONFIG_PATH}.lock" || return 1
     if ! flock -n "${install_lock_fd}"; then
         echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.install_busy')" >&2
+        return 1
+    fi
+
+    # 版本切换先独立提交，再以新内核状态建立协议事务快照。
+    if [[ -n "${xray_version}" ]] &&
+        ! exec_handler '--install' "${xray_version}" 'y' 'y'; then
         return 1
     fi
 
@@ -758,22 +767,36 @@ function install_protocol() (
 )
 
 # =============================================================================
-# 函数名称: processes_xray_config
+# 函数名称: choose_xray_version / choose_xray_protocol / processes_xray_config
 # 功能描述: 处理 Xray 配置相关的流程。
-#           1. 显示 Xray 配置菜单。
+#           1. 选择 Xray 版本或协议。
 #           2. 使用集中映射把菜单选项转换为协议标签。
 #           3. 所有协议进入同一个安装流程，CDN/SNI 的差异由能力表处理。
 # 参数: 无
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 
-function processes_xray_config() {
-    # 显示 Xray 配置菜单
+function choose_xray_version() {
+    exec_menu '--xray'
+    local choose=$?
+    case ${choose} in
+    0) return 0 ;;
+    1) echo 'latest' ;;
+    2) echo 'release' ;;
+    3) echo 'custom' ;;
+    *) return 1 ;;
+    esac
+}
+
+function choose_xray_protocol() {
     exec_menu '--config'
-    # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    local choose=$?
+    protocol_from_menu_choice "${choose}"
+}
+
+function processes_xray_config() {
     local XTLS_CONFIG
-    XTLS_CONFIG="$(protocol_from_menu_choice "${choose}")" || return 0
+    XTLS_CONFIG="$(choose_xray_protocol)" || return 0
     install_protocol "${XTLS_CONFIG}"
 }
 
@@ -788,31 +811,29 @@ function processes_xray_config() {
 # =============================================================================
 
 function processes_xray() {
-    local version='release' # 初始化 Xray 版本为 'release'
-    # 显示 Xray 安装菜单
-    exec_menu '--xray'
-    # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
-    # 根据用户选择设置具体的 Xray 版本
-    case ${choose} in
-    0) return 0 ;;          # 显式取消
-    1) version='latest' ;;  # 选择 1 对应 latest
-    2) version='release' ;; # 选择 2 对应 release
-    3) version='custom' ;;  # 选择 3 对应 custom
-    *) return 1 ;;
-    esac
+    local version
+    version="$(choose_xray_version)" || return 1
+    [[ -n "${version}" ]] || return 0
     exec_handler '--install' "${version}" 'y' # 安装指定版本的 Xray
 }
 
 # =============================================================================
 # 函数名称: processes_full_installation
-# 功能描述: 进入协议选择并执行完整安装，不再增加额外的一键/自定义嵌套菜单。
+# 功能描述: 先选择 Xray 版本，再进入协议选择并执行完整安装。
 # 参数: 无
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
 
 function processes_full_installation() {
-    processes_xray_config
+    local version resolved_version XTLS_CONFIG
+    version="$(choose_xray_version)" || return 1
+    [[ -n "${version}" ]] || return 0
+    resolved_version="$(exec_handler '--resolve-version' "${version}")" || return 1
+    [[ -n "${resolved_version}" ]] || return 1
+    XTLS_CONFIG="$(choose_xray_protocol)" || return 0
+
+    # install_protocol 会在建快照前提交已解析的内核版本。
+    install_protocol "${XTLS_CONFIG}" "${resolved_version}"
 }
 
 # =============================================================================
@@ -1015,7 +1036,7 @@ function processes_config() {
 # 函数名称: processes_index
 # 功能描述: 处理脚本主界面的流程。
 #           1. 显示 Banner、状态和主菜单。
-#           2. 根据用户选择执行不同的主操作 (一键安装, Xray 安装, 卸载, 启动, 停止, 重启, 分享链接, 流量统计, 配置管理)。
+#           2. 根据用户选择执行不同的主操作 (安装/重装节点, Xray 安装, 卸载, 启动, 停止, 重启, 分享链接, 流量统计, 配置管理)。
 # 参数: 无
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
 # =============================================================================
@@ -1031,7 +1052,7 @@ function processes_index() {
     local choose=$(echo $?)
     # 根据用户选择执行不同的主操作
     case ${choose} in
-    1) processes_full_installation ;; # 选择 1：选择协议并执行完整安装
+    1) processes_full_installation ;; # 选择 1：选择版本、协议并执行完整安装
     2) processes_xray ;;              # 选择 2：进入 Xray 安装流程
     3) exec_handler '--purge' ;;      # 选择 3：卸载
     4) exec_handler '--start' ;;      # 选择 4：启动服务

@@ -472,6 +472,12 @@ function check_path_required() {
         return 1
     fi
 
+    # XHTTP paths must be absolute and end at a path boundary.
+    if [[ "${path}" != /* || "${path}" != */ ]]; then
+        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.slash_error")$path"
+        return 1
+    fi
+
     if [[ "${path}" == *" "* ]]; then
         _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
         return 1

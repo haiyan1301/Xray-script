@@ -91,7 +91,7 @@
         },
         "xhttpSettings": {
           "host": "",
-          "path": "/yourpath",
+          "path": "/yourpath/",
           "mode": "auto",
           "xPaddingObfsMode": true,
           "xPaddingKey": "requestId",

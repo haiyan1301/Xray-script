@@ -251,7 +251,10 @@
       "fetch_fail": "Failed to download Xray install script, check network or retry later",
       "invalid_script": "The downloaded Xray install script is empty or invalid",
       "install_fail": "Xray installation failed",
-      "xray_missing": "The installer finished, but the xray command is still unavailable"
+      "xray_missing": "The installer finished, but the xray command is still unavailable",
+      "version_mismatch": "The installer finished, but the installed Xray version does not match the selected version",
+      "config_commit_fail": "Xray was installed, but the prepared version configuration could not be committed",
+      "binary_restore_fail": "The previous Xray binary could not be restored; recovery data was retained at:"
     },
     "multi": {
       "label": "Multi",
@@ -415,7 +418,7 @@
     "email": "Enter ACME account email: ",
     "short": "Enter shortId (comma separated, default auto-generated): ",
     "short_id_tip": "Supports input 0 to 8 to automatically generate shortId of corresponding length",
-    "path": "Enter path (default auto-generated): ",
+    "path": "Enter path (must start and end with /, default auto-generated): ",
     "xhttp_mode": "Enter XHTTP mode (default auto): ",
     "xhttp_mode_tip": "Modes: auto, packet-up, stream-up, stream-one. Leave empty for auto.",
     "hy2_auth": "Enter HY2 auth password (default auto-generated): ",
@@ -483,7 +486,8 @@
       "length_error": "Path length cannot exceed 128 characters: ",
       "char_error": "Path contains invalid characters (only letters, digits, /, -, _, . allowed): ",
       "double_slash_error": "Path cannot contain consecutive slashes: ",
-      "root_error": "Path cannot use root /: "
+      "root_error": "Path cannot use root /: ",
+      "slash_error": "XHTTP path must start and end with /: "
     },
     "short": {
       "check": "Checking shortId validity: ",

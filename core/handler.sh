@@ -58,6 +58,7 @@ readonly TRAFFIC_PATH="${TOOL_DIR}/traffic.sh"
 readonly GEODATA_PATH="${TOOL_DIR}/geodata.sh"
 readonly LAN_PATH="${CUR_DIR}/lan.sh"
 readonly XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH_OVERRIDE:-/usr/local/etc/xray/config.json}"
+readonly XRAY_BIN_PATH="${XRAY_BIN_PATH_OVERRIDE:-/usr/local/bin/xray}"
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_PATH_OVERRIDE:-${SCRIPT_CONFIG_DIR}/config.json}"
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"
 readonly CDN_XRAY_CERT_ROOT="${CDN_XRAY_CERT_DIR_OVERRIDE:-/usr/local/etc/xray/certs/cdn}"
@@ -2520,7 +2521,12 @@ function handler_multi_xray_config() {
             local node_target="$(echo "${node}" | jq -r '.target')"
             local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
-            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
+            if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                return 1
+            fi
+            nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
             local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
             node_inbounds="$(echo "${node_inbounds}" | jq \
                 --arg uuid "${node_uuid}" \
@@ -2546,7 +2552,12 @@ function handler_multi_xray_config() {
             local node_target="$(echo "${node}" | jq -r '.target')"
             local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
-            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
+            if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                return 1
+            fi
+            nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
             local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
             node_inbounds="$(echo "${node_inbounds}" | jq \
                 --arg password "${trojan_password}" \
@@ -2573,7 +2584,12 @@ function handler_multi_xray_config() {
             local node_target="$(echo "${node}" | jq -r '.target')"
             local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
-            local xhttp_path="$(echo "${node}" | jq -r '.path')"
+            local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
+            if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                return 1
+            fi
+            nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
             local xhttp_mode="$(echo "${node}" | jq -r '.xhttpMode // "auto"')"
             local uds_name="@uds2xhttp-${suffix}.sock"
             node_inbounds="$(echo "${node_inbounds}" | jq \
@@ -2647,7 +2663,7 @@ function handler_multi_xray_config() {
     handler_apply_lan_config || return 1
 
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')" || return 1
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${nodes}" --argjson rules "${XRAY_RULES}" '.xray.nodes = $nodes | .rules = $rules')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
 
@@ -4724,18 +4740,24 @@ function handler_prepare_protocol_services() {
 # 功能描述: 处理 Xray 版本配置。
 #           1. 根据输入参数确定 Xray 版本。
 #           2. 从 GitHub API 获取最新版本或自定义版本。
-#           3. 将版本信息更新到脚本配置中。
+#           3. 将版本信息更新到脚本配置中，或仅解析并输出具体版本。
 # 参数:
 #   $1: xray_version - 版本指定 ("latest", "custom", 或具体版本号)，默认为 release
-# 返回值: 无 (直接修改 CONFIG_DATA 和 SCRIPT_CONFIG 全局变量)
+#   $2: persist - 是否写入脚本配置，默认为 y；传入 n 时只输出具体版本
+# 返回值: persist=n 时输出具体版本；否则将版本写入脚本配置
 # =============================================================================
 function handler_xray_version() {
     local xray_version="$1" # 获取版本指定参数
+    local persist="${2:-y}"
+    local release_data=''
     # 根据版本指定参数确定具体版本
     case "${xray_version,,}" in
     latest)
         # 获取最新的 Xray 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[0].tag_name')"
+        if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases)" ||
+            ! CONFIG_DATA['version']="$(jq -r '.[0].tag_name' <<<"${release_data}")"; then
+            _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+        fi
         ;;
     custom)
         # 读取用户自定义的版本
@@ -4743,11 +4765,18 @@ function handler_xray_version() {
         ;;
     *)
         # 获取最新的 release 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')"
+        if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)" ||
+            ! CONFIG_DATA['version']="$(jq -r '.tag_name' <<<"${release_data}")"; then
+            _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+        fi
         ;;
     esac
     if [[ -z "${CONFIG_DATA['version']:-}" || "${CONFIG_DATA['version']}" == 'null' ]]; then
         _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+    fi
+    if [[ "${persist,,}" == 'n' ]]; then
+        printf '%s\n' "${CONFIG_DATA['version']}"
+        return 0
     fi
     # 更新脚本配置中的 Xray 版本
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg xray "${CONFIG_DATA['version']}" '.xray.version = $xray')"
@@ -4794,6 +4823,42 @@ function handler_change_xray_port() {
     apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"
 }
 
+function xray_binary_version_matches() {
+    local expected_version="${1:-}"
+    local output actual_version
+
+    [[ -n "${expected_version}" && -x "${XRAY_BIN_PATH}" ]] || return 1
+    output="$("${XRAY_BIN_PATH}" -version 2>&1)" || return 1
+    actual_version="$(sed -nE '1{s/^Xray[[:space:]]+v?([^[:space:]]+).*/\1/p;}' <<<"${output}")"
+    [[ -n "${actual_version}" ]] || return 1
+    expected_version="${expected_version#v}"
+    expected_version="${expected_version#V}"
+    actual_version="${actual_version#v}"
+    actual_version="${actual_version#V}"
+    [[ "${actual_version}" == "${expected_version}" ]]
+}
+
+function restore_xray_binary_snapshot() {
+    local snapshot_dir="$1"
+    local binary_existed="$2"
+
+    if [[ "${binary_existed}" -eq 1 ]]; then
+        [[ -e "${snapshot_dir}/xray" || -L "${snapshot_dir}/xray" ]] || return 1
+        mv -fT -- "${snapshot_dir}/xray" "${XRAY_BIN_PATH}" || return 1
+    else
+        rm -f -- "${XRAY_BIN_PATH}" || return 1
+    fi
+    rmdir -- "${snapshot_dir}" 2>/dev/null || true
+}
+
+function discard_xray_binary_snapshot() {
+    local snapshot_dir="$1"
+
+    [[ -n "${snapshot_dir}" ]] || return 0
+    rm -f -- "${snapshot_dir}/xray" || return 1
+    rmdir -- "${snapshot_dir}"
+}
+
 # =============================================================================
 # 函数名称: handler_install
 # 功能描述: 安装 Xray 核心。
@@ -4803,6 +4868,7 @@ function handler_change_xray_port() {
 # 参数:
 #   $1: xray_version - (可选) 要安装的 Xray 版本
 #   $2: force_install - (可选) 是否强制安装 ('y' 表示强制)，默认为 'n'
+#   $3: resolved_version - (可选) $1 已是具体版本，安装成功后再写入配置 ('y')
 # 返回值: 无 (通过调用外部脚本执行安装)
 # =============================================================================
 function handler_install() {
@@ -4810,8 +4876,21 @@ function handler_install() {
     ensure_service_users || return 1
     local xray_version="${1:-}"   # 获取版本参数
     local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
+    local resolved_version="${3:-n}"
+    local install_required=0 staged_config='' staged_script_config=''
+    local binary_snapshot_dir='' binary_parent='' binary_existed=0
+
+    force_install="${force_install,,}"
+    resolved_version="${resolved_version,,}"
+    if [[ "${resolved_version}" == 'y' && "${force_install}" != 'y' ]]; then
+        return 1
+    fi
+
     # 如果提供了版本参数，则处理版本配置
-    if [[ -n "${xray_version}" ]]; then
+    if [[ "${resolved_version}" == 'y' ]]; then
+        [[ -n "${xray_version}" && "${xray_version}" != 'null' ]] || return 1
+        CONFIG_DATA['version']="${xray_version}"
+    elif [[ -n "${xray_version}" ]]; then
         handler_xray_version "${xray_version}" || return 1
     else
         # 否则从脚本配置中读取版本
@@ -4822,6 +4901,7 @@ function handler_install() {
     fi
     # 检查 Xray 命令是否存在，或是否强制安装
     if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
+        install_required=1
         local use_gh_proxy_reply
         use_gh_proxy_reply="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.githubProxy // ""')"
         case "${use_gh_proxy_reply,,}" in
@@ -4833,7 +4913,9 @@ function handler_install() {
             run_github_proxy_choice 'n' || return 1
             use_gh_proxy_reply="${CONFIG_DATA['github_proxy']}"
             SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg githubProxy "${use_gh_proxy_reply}" '.xray.githubProxy = $githubProxy')"
-            write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+            if [[ "${resolved_version}" != 'y' ]]; then
+                write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
+            fi
             ;;
         esac
         local install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -4856,13 +4938,71 @@ function handler_install() {
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.invalid_script")" >&2
             return 1
         fi
+
+        if [[ "${resolved_version}" == 'y' ]]; then
+            staged_script_config="$(echo "${SCRIPT_CONFIG}" | jq \
+                --arg xray "${CONFIG_DATA['version']}" \
+                --arg githubProxy "${use_gh_proxy_reply}" \
+                '.xray.version = $xray | .xray.githubProxy = $githubProxy')" || return 1
+            staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.version.XXXXXX")" || return 1
+            if ! write_config "${staged_script_config}" "${staged_config}"; then
+                rm -f -- "${staged_config}"
+                staged_config=''
+                return 1
+            fi
+
+            binary_parent="$(dirname -- "${XRAY_BIN_PATH}")"
+            binary_snapshot_dir="$(mktemp -d "${binary_parent}/.xray-install.XXXXXX")" || {
+                rm -f -- "${staged_config}"
+                staged_config=''
+                return 1
+            }
+            if [[ -e "${XRAY_BIN_PATH}" || -L "${XRAY_BIN_PATH}" ]]; then
+                if [[ -d "${XRAY_BIN_PATH}" ]] ||
+                    ! cp -a -- "${XRAY_BIN_PATH}" "${binary_snapshot_dir}/xray"; then
+                    rm -f -- "${staged_config}"
+                    rmdir -- "${binary_snapshot_dir}" 2>/dev/null || true
+                    staged_config=''
+                    binary_snapshot_dir=''
+                    return 1
+                fi
+                binary_existed=1
+            fi
+        fi
         if ! printf '%s\n' "${script_content}" | bash -s -- install -u xray --version "${CONFIG_DATA['version']}"; then
+            [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
             echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.install_fail")" >&2
+            if [[ -n "${binary_snapshot_dir}" ]] &&
+                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+            fi
             return 1
         fi
-        if ! cmd_exists 'xray'; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.xray_missing")" >&2
+        if ! xray_binary_version_matches "${CONFIG_DATA['version']}"; then
+            [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.version_mismatch // .${CUR_FILE}.gh_proxy.xray_missing")" >&2
+            if [[ -n "${binary_snapshot_dir}" ]] &&
+                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+            fi
             return 1
+        fi
+    fi
+    if [[ "${resolved_version}" == 'y' && "${install_required}" -eq 1 ]]; then
+        if ! mv -fT -- "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
+            rm -f -- "${staged_config}"
+            staged_config=''
+            if [[ -n "${binary_snapshot_dir}" ]] &&
+                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
+                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+            fi
+            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.config_commit_fail")" >&2
+            return 1
+        fi
+        staged_config=''
+        SCRIPT_CONFIG="${staged_script_config}"
+        if ! discard_xray_binary_snapshot "${binary_snapshot_dir}"; then
+            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} Xray binary recovery data was left at: ${binary_snapshot_dir}" >&2
         fi
     fi
 }
@@ -7014,7 +7154,7 @@ function handler_reverse_share() {
     local server_name=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.serverNames[0] // ""')
     local public_key=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')
     local short_id=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.shortIds[0] // ""')
-    local xhttp_path=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')
+    local xhttp_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
     local xhttp_mode=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')
 
     if ! protocol_supports_reverse "${current_tag}"; then
@@ -7025,7 +7165,8 @@ function handler_reverse_share() {
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy state is incomplete." >&2
         return 1
     fi
-    if [[ "${current_tag,,}" == 'xhttp' && -z "${xhttp_path}" ]]; then
+    if protocol_uses_xhttp "${current_tag}" &&
+        { [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; }; then
         echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy XHTTP path is missing." >&2
         return 1
     fi
@@ -7255,6 +7396,7 @@ function main() {
     --quick) handler_quick_install "$1" ;;    # 一键快速安装
     --install) handler_install "$@" ;;        # 安装 Xray
     --version) handler_xray_version "$1" ;;   # 设置 Xray 版本
+    --resolve-version) handler_xray_version "$1" 'n' ;; # 仅解析 Xray 版本
     --purge) handler_purge ;;                 # 卸载 Xray
     --nginx-install)
         reject_nginx_action_in_cdn_direct_mode || return 1

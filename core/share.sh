@@ -31,6 +31,7 @@ readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
 
 # 引入公共库
 source "${PROJECT_ROOT}/lib/common.sh"
+source "${PROJECT_ROOT}/lib/protocols.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -286,7 +287,7 @@ function get_common_config() {
     # 从 Xray 配置中获取安全传输类型 (如 none, tls, reality)
     CLIENT_CONFIG[security]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.security? | if . == null then empty else . end')"
     # 从 Xray 配置中获取 XHTTP 的路径 (path) 和模式 (mode)
-    CLIENT_CONFIG[path]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.path? | if . == null then empty else . end')"
+    CLIENT_CONFIG[path]="$(normalize_xhttp_path "$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.path? | if . == null then empty else . end')")"
     CLIENT_CONFIG[mode]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '.inbounds[$i].streamSettings.xhttpSettings.mode? | if . == null then empty else . end')"
     # 从 Xray 配置中随机获取一个 Reality 的服务器名称 (serverNames)
     CLIENT_CONFIG[server_name]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
@@ -391,7 +392,7 @@ function get_tls_down_json() {
     # 从脚本配置中获取 CDN 域名作为服务器名称
     local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
     # 从脚本配置中获取 Xray 的路径
-    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"
+    local sni_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
 
     [[ -n "${server_name}" && -n "${sni_path}" ]] || return 1
 
@@ -442,7 +443,7 @@ function get_reality_down_json() {
     # 从脚本配置中获取 Reality 公钥
     local public_key="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')"
     # 从脚本配置中获取 Xray 路径
-    local sni_path="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')"
+    local sni_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
     # 从 Xray 配置中随机获取一个 Reality 的 Short ID
     local short_id="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
         (.inbounds[$i].streamSettings.realitySettings.shortIds // []) as $ids |

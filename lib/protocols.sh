@@ -116,23 +116,28 @@ function protocol_supports_reverse() {
 function normalize_xhttp_path() {
     local path="${1:-}"
 
-    if [[ -z "${path}" || "${path}" == /* ]]; then
-        printf '%s\n' "${path}"
-    else
-        printf '/%s\n' "${path}"
-    fi
+    [[ -z "${path}" ]] && {
+        printf '\n'
+        return 0
+    }
+
+    [[ "${path}" == /* ]] || path="/${path}"
+    [[ "${path}" == */ ]] || path="${path}/"
+    printf '%s\n' "${path}"
 }
 
 # Validate an XHTTP path against the same rules used by handler_sync_nginx_xhttp_path
-# (mirroring check_path in core/check.sh). An empty path is treated as valid:
+# (mirroring check_path_required in core/check.sh). An empty path is treated as valid:
 # non-xhttp protocols legitimately carry an empty .xray.path, and callers that
 # require a non-empty path enforce that separately. Returns 0 for a usable path,
-# 1 for a root path ("/"), disallowed characters, or consecutive slashes ("//").
+# 1 for a root path ("/"), a path missing either boundary slash, disallowed
+# characters, or consecutive slashes ("//").
 function validate_xhttp_path() {
     local path="${1:-}"
 
     [[ -z "${path}" ]] && return 0
     [[ "${path}" == '/' ]] && return 1
+    [[ "${path}" == /* && "${path}" == */ ]] || return 1
     [[ "${path}" =~ [^a-zA-Z0-9_/.\-] ]] && return 1
     [[ "${path}" =~ // ]] && return 1
     return 0
