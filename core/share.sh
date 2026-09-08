@@ -44,7 +44,6 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_PATH_OVERRIDE:-${SCRIPT_CONFIG_DIR}
 # --- 全局变量声明 ---
 # 声明用于存储语言参数、国际化数据和配置信息的全局变量
 declare LANG_PARAM=''       # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''        # 存储从 i18n JSON 文件中读取的全部数据
 declare -A CLIENT_CONFIG    # 关联数组，存储当前处理的客户端配置片段
 declare XRAY_CONFIG         # 存储 Xray 配置文件的全部 JSON 内容
 declare SCRIPT_CONFIG       # 存储脚本配置文件的全部 JSON 内容
@@ -65,52 +64,6 @@ declare SHARE_LINK_COMPONENT_HOST    # XHTTP Host 参数部分
 declare SHARE_LINK_COMPONENT_EXTRA   # 额外参数 (如 downloadSettings) 部分
 declare SHARE_LINK_COMPONENT_VLESS_ENC # VLESS enc 的 encryption 参数部分
 
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从脚本配置文件中读取语言设置
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
-
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
-    fi
-
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
 
 # =============================================================================
 # 函数名称: urlencode
@@ -167,21 +120,7 @@ function format_uri_host() {
     fi
 }
 
-function is_valid_ipv4_literal() {
-    valid_ipv4_literal "$1"
-}
-
-function is_valid_ipv6_literal() {
-    valid_ipv6_literal "$1"
-}
-
-function is_valid_ip_literal() {
-    valid_ip_literal "$1"
-}
-
 function resolve_public_host() {
-    local candidate=''
-
     case "${PUBLIC_HOST_LOOKUP_STATE}" in
     resolved) return 0 ;;
     failed) return 1 ;;
@@ -192,16 +131,9 @@ function resolve_public_host() {
     PUBLIC_HOST_LOOKUP_STATE='failed'
     PUBLIC_HOST_CACHE=''
 
-    if candidate="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null)" &&
-        is_valid_ip_literal "${candidate}"; then
-        PUBLIC_HOST_CACHE="${candidate}"
-        PUBLIC_HOST_LOOKUP_STATE='resolved'
-        return 0
-    fi
-
-    if candidate="$(curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)" &&
-        is_valid_ip_literal "${candidate}"; then
-        PUBLIC_HOST_CACHE="${candidate}"
+    # 公网地址探测统一走 lib/common.sh，与 DNS 校验共用同一份实现。
+    if probe_public_ip; then
+        PUBLIC_HOST_CACHE="${PUBLIC_IPV4:-${PUBLIC_IPV6}}"
         PUBLIC_HOST_LOOKUP_STATE='resolved'
         return 0
     fi
@@ -494,11 +426,11 @@ function show_client_config() {
     local tag="${CLIENT_CONFIG[tag]}"
     local protocol_tag="${CLIENT_CONFIG[protocol_tag]:-${tag}}"
     # 使用 Here Document 打印客户端配置的标题和各项参数
-    echo "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.client")(${tag}) ------------------"
+    echo "------------------ $(t ".${CUR_FILE}.client")(${tag}) ------------------"
     if [[ "${protocol_tag,,}" == 'cdn' ]]; then
-        echo "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uplink_address") : ${CLIENT_CONFIG[remote_host]}"
+        echo "$(t ".${CUR_FILE}.uplink_address") : ${CLIENT_CONFIG[remote_host]}"
         if [[ -n "${CLIENT_CONFIG[cdn_down]:-}" ]]; then
-            echo "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.downlink_address") : ${CLIENT_CONFIG[cdn_down]}"
+            echo "$(t ".${CUR_FILE}.downlink_address") : ${CLIENT_CONFIG[cdn_down]}"
         fi
     else
         echo "address          : ${CLIENT_CONFIG[remote_host]}"
@@ -832,7 +764,7 @@ function show_multi_config() {
     local i
 
     if [[ "${node_count}" -eq 0 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r '.handler.multi.no_nodes')"
+        log_error "$(t '.handler.multi.no_nodes')"
         return 1
     fi
 
@@ -911,43 +843,45 @@ function get_sni_tls_down_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_sni_reality_down_share_link() {
-    # 首先获取 SNI + TLS 的链接 (基础部分，已包含 obfs extra)
-    get_sni_tls_share_link || return 1
+    # Reality remains the uplink security; XHTTP_EXTRA already contains the
+    # Reality download settings prepared by get_reality_down_json.
+    get_fallback_xhttp_share_link || return 1
 }
 
 # =============================================================================
 # 函数名称: show_config
 # 功能描述: 打印完整的客户端配置信息、额外配置 (如果有的话)、
 #           最终的分享链接以及对应的二维码。
-# 参数: 无 (直接使用全局变量 CLIENT_CONFIG, XHTTP_EXTRA, SHARE_LINK, I18N_DATA)
+# 参数: 无 (直接使用全局变量 CLIENT_CONFIG, XHTTP_EXTRA, SHARE_LINK, I18N)
 # 返回值: 无 (直接打印到标准输出)
 # =============================================================================
 function show_config() {
-    # 在分享链接末尾追加标签作为锚点 (例如 #my_tag)
-    SHARE_LINK="${SHARE_LINK}#$(urlencode "${CLIENT_CONFIG[tag]}")"
+    # 在分享链接末尾追加标签作为锚点 (例如 #my_tag)。只用于本次输出，不回写全局
+    # SHARE_LINK——复合协议会多次调用本函数，回写会让标签被反复追加。
+    local share_link="${SHARE_LINK}#$(urlencode "${CLIENT_CONFIG[tag]}")"
 
     # 显示客户端配置信息
     show_client_config
 
     # 如果存在额外配置 (XHTTP_EXTRA)，则显示它
     if [[ "${XHTTP_EXTRA}" ]]; then
-        echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.extra") ------------------"
+        echo -e "------------------ $(t ".${CUR_FILE}.extra") ------------------"
         # 使用 jq 格式化输出额外配置的 JSON
         echo "${XHTTP_EXTRA}" | jq -r '.'
         if [[ "${CLIENT_CONFIG[protocol_tag]:-${CLIENT_CONFIG[tag]}}" =~ ^[Cc][Dd][Nn]$ &&
             "${CLIENT_CONFIG[mode]:-auto}" =~ ^(auto|stream-one)$ &&
             -n "${CLIENT_CONFIG[cdn_down]:-}" ]]; then
-            echo -e "${YELLOW}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split_mode_tip")${NC}"
+            echo -e "${YELLOW}$(t ".${CUR_FILE}.cdn_split_mode_tip")${NC}"
         fi
     fi
 
     # 显示分享链接
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.link") ------------------"
-    echo -e "${SHARE_LINK}"
+    echo -e "------------------ $(t ".${CUR_FILE}.link") ------------------"
+    echo -e "${share_link}"
 
     # 显示分享链接的二维码 (需要 qrencode 命令)
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.qr") ------------------"
-    echo -e "${SHARE_LINK}" | qrencode -t ansiutf8
+    echo -e "------------------ $(t ".${CUR_FILE}.qr") ------------------"
+    echo -e "${share_link}" | qrencode -t ansiutf8
 
     # 打印分隔线结束
     echo -e "------------------------------------------------------"
@@ -974,6 +908,8 @@ function show_fallback_config() {
     CLIENT_CONFIG[tag]='fallbak_xhttp_reality'
     # 生成 fallback 的 XHTTP 分享链接
     get_fallback_xhttp_share_link || return 1
+    # 输出第二个 inbound 的配置；否则 fallback 模式只显示 Vision 链接。
+    show_config
 }
 
 # =============================================================================
@@ -1034,6 +970,8 @@ function show_sni_config() {
     get_reality_down_json || return 1
     # 生成 SNI Reality Down 分享链接
     get_sni_reality_down_share_link || return 1
+    # 输出第五个客户端配置。
+    show_config
 }
 
 # =============================================================================
@@ -1086,8 +1024,8 @@ function main() {
     mkcp) get_mkcp_share_link ;;      # mKCP 模式
     xhttp) setup_xhttp_obfs_extra 1 && get_xhttp_share_link ;;  # XHTTP 模式
     trojan) get_trojan_share_link ;;  # Trojan 模式
-    fallback) show_fallback_config || return 1 ;; # Fallback 模式
-    sni) show_sni_config || return 1 ;;           # SNI 模式
+    fallback) show_fallback_config || return 1; return 0 ;; # Fallback 模式（已自行输出，勿再追加）
+    sni) show_sni_config || return 1; return 0 ;;           # SNI 模式（同上）
     cdn) get_cdn_share_link ;;        # CDN 模式
     hy2) get_hy2_share_link ;;        # Hysteria2 模式
     ss2022) get_ss2022_share_link ;;  # Shadowsocks-2022 模式

@@ -43,6 +43,12 @@ readonly GREEN='\033[32m'  # 绿色
 readonly YELLOW='\033[33m' # 黄色
 readonly NC='\033[0m'      # 无颜色（重置）
 
+# 支持的最低系统版本。本脚本不 source lib/common.sh（保持可独立执行），
+# 因此这里用同一组默认值兜底；若外部已定义常量则沿用外部值。
+readonly MIN_UBUNTU="${MIN_UBUNTU:-20}"
+readonly MIN_DEBIAN="${MIN_DEBIAN:-10}"
+readonly MIN_CENTOS="${MIN_CENTOS:-7}"
+
 # 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
@@ -52,6 +58,15 @@ readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
 readonly I18N_DIR="${PROJECT_ROOT}/i18n"                       # 国际化文件目录
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
+
+# 复用统一的子库（i18n 取值 / 日志 / 系统探测）。它们只定义函数，不定义颜色、
+# PATH 等常量，因此不与本脚本自己的 readonly 定义冲突。
+source "${PROJECT_ROOT}/lib/i18n.sh"
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/system.sh"
+# 事务调度骨架（trap 注册 / 信号码 / 提交与回滚标记）与 core/main.sh、
+# service/ssl.sh 共用，见 lib/transaction.sh。
+source "${PROJECT_ROOT}/lib/transaction.sh"
 
 # 创建一个唯一的临时目录用于编译工作，并在脚本退出时清理
 # 如果创建失败则退出脚本
@@ -66,7 +81,6 @@ readonly NGINX_LOG_PATH="/var/log/nginx" # Nginx 日志目录
 declare IS_ENABLE_BROTLI="Y" # 存储用户是否选择启用 Brotli ('Y' 或 '')，默认启用
 declare IS_PREBUILT=""      # 存储用户是否选择使用预编译版本 ('Y' 或 '')
 declare LANG_PARAM=''       # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''        # 存储从 i18n JSON 文件中读取的全部数据
 # 声明用于存储编译器优化标志的全局数组
 declare -a cflags=() # 存储 GCC 编译优化选项
 
@@ -84,165 +98,9 @@ function egress() {
     rm -rf "${TMPFILE_DIR}"
 }
 
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
-    fi
-
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
-
-# =============================================================================
-# 函数名称: print_info
-# 功能描述: 以绿色打印信息级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_info() {
-    # 从 i18n 数据中读取 "信息" 标题，然后用绿色打印消息
-    printf "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_warn
-# 功能描述: 以黄色打印警告级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_warn() {
-    # 从 i18n 数据中读取 "警告" 标题，然后用黄色打印消息
-    printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_error
-# 功能描述: 以红色打印错误级别的提示消息，并退出脚本。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2，然后 exit 1)
-# =============================================================================
-function print_error() {
-    # 从 i18n 数据中读取 "错误" 标题，然后用红色打印消息
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
-    # 打印错误信息后退出脚本，错误码为 1
-    exit 1
-}
-
-# =============================================================================
-# 函数名称: cmd_exists
-# 功能描述: 检查指定的命令是否存在于系统中。
-# 参数:
-#   $1: 要检查的命令名称
-# 返回值: 0-命令存在 1-命令不存在 (由命令检查工具的退出码决定)
-# =============================================================================
-function cmd_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-# =============================================================================
-# 函数名称: _os
-# 功能描述: 检测当前操作系统的发行版名称。
-# 参数: 无
-# 返回值: 操作系统名称 (echo 输出: debian/ubuntu/centos/amazon/...)
-# =============================================================================
-function _os() {
-    local os="" # 声明局部变量存储操作系统名称
-
-    # 检查 Debian/Ubuntu 系列
-    if [[ -f "/etc/debian_version" ]]; then
-        # 读取 /etc/os-release 文件并提取 ID 字段
-        source /etc/os-release && os="${ID}"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
-
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f "/etc/redhat-release" ]]; then
-        os="centos"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_full
-# 功能描述: 获取当前操作系统的完整发行版信息。
-# 参数: 无
-# 返回值: 完整的操作系统版本信息 (echo 输出)
-# =============================================================================
-function _os_full() {
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f /etc/redhat-release ]]; then
-        # 从 /etc/redhat-release 文件中提取发行版名称和版本号
-        awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
-    fi
-
-    # 检查通用的 os-release 文件
-    if [[ -f /etc/os-release ]]; then
-        # 从 /etc/os-release 文件中提取 PRETTY_NAME 字段
-        awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
-    fi
-
-    # 检查 LSB (Linux Standard Base) 发布文件
-    if [[ -f /etc/lsb-release ]]; then
-        # 从 /etc/lsb-release 文件中提取 DESCRIPTION 字段
-        awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_ver
-# 功能描述: 获取当前操作系统的主版本号。
-# 参数: 无
-# 返回值: 操作系统的主版本号 (echo 输出)
-# =============================================================================
-function _os_ver() {
-    # 调用 _os_full 函数获取完整版本信息，然后提取其中的数字和点
-    local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
-    # 输出主版本号 (第一个点号前的部分)
-    printf -- "%s" "${main_ver%%.*}"
-}
+# print_info / print_warn / print_error 由 lib/log.sh 统一提供。
+# cmd_exists / _os / _os_full / _os_ver 由 lib/system.sh 统一提供。
 
 # =============================================================================
 # 函数名称: _error_detect
@@ -253,11 +111,11 @@ function _os_ver() {
 # =============================================================================
 function _error_detect() {
     local cmd="$1"                                                                                 # 获取要执行的命令
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.executing' | sed "s|\${cmd}|${cmd}|")" # 打印将要执行的命令
+    print_info "$(t '.nginx.compile.executing' | sed "s|\${cmd}|${cmd}|")" # 打印将要执行的命令
     eval "${cmd}"                                                                                  # 执行命令
     # 检查命令执行的退出状态
     if [[ $? -ne 0 ]]; then
-        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fail_exec_cmd' | sed "s|\${cmd}|${cmd}|")" # 如果失败则打印错误并退出
+        print_error "$(t '.nginx.compile.fail_exec_cmd' | sed "s|\${cmd}|${cmd}|")" # 如果失败则打印错误并退出
     fi
 }
 
@@ -370,27 +228,36 @@ function _install() {
 # 参数: 无
 # 返回值: 无 (受支持则继续，不受支持则 print_error 退出)
 # =============================================================================
-function check_os() {
-    # 检查是否能识别操作系统
-    [[ -z "$(_os)" ]] && print_error "$(echo "$I18N_DATA" | jq -r '.nginx.os.unsupported_os')"
+# 读取 .nginx.os.* 提示，并把 ${MIN_*} 占位符替换为实际下限，避免文案与判断条件写歪
+function nginx_os_message() {
+    t ".nginx.os.$1" |
+        sed -e "s/\${MIN_UBUNTU}/${MIN_UBUNTU}/g" \
+            -e "s/\${MIN_DEBIAN}/${MIN_DEBIAN}/g" \
+            -e "s/\${MIN_CENTOS}/${MIN_CENTOS}/g"
+}
 
-    # 根据识别到的操作系统进行版本检查
-    case "$(_os)" in
+function check_os() {
+    local os_name os_ver
+    os_name="$(_os)"
+    os_ver="$(_os_ver)"
+
+    # 检查是否能识别操作系统
+    [[ -z "${os_name}" ]] && print_error "$(nginx_os_message 'unsupported_os')"
+
+    # 根据识别到的操作系统进行版本检查（下限见文件头的 MIN_* 常量）
+    case "${os_name}" in
     ubuntu)
-        # Ubuntu 需要 20.04 或更高版本
-        [[ -n "$(_os_ver)" && "$(_os_ver)" -lt 20 ]] && print_error "$(echo "$I18N_DATA" | jq -r '.nginx.os.unsupported_ubuntu')"
+        [[ -n "${os_ver}" && "${os_ver}" -lt "${MIN_UBUNTU}" ]] && print_error "$(nginx_os_message 'unsupported_ubuntu')"
         ;;
     debian)
-        # Debian 需要 10 或更高版本
-        [[ -n "$(_os_ver)" && "$(_os_ver)" -lt 10 ]] && print_error "$(echo "$I18N_DATA" | jq -r '.nginx.os.unsupported_debian')"
+        [[ -n "${os_ver}" && "${os_ver}" -lt "${MIN_DEBIAN}" ]] && print_error "$(nginx_os_message 'unsupported_debian')"
         ;;
     centos)
-        # CentOS/RHEL 需要 7 或更高版本
-        [[ -n "$(_os_ver)" && "$(_os_ver)" -lt 7 ]] && print_error "$(echo "$I18N_DATA" | jq -r '.nginx.os.unsupported_centos')"
+        [[ -n "${os_ver}" && "${os_ver}" -lt "${MIN_CENTOS}" ]] && print_error "$(nginx_os_message 'unsupported_centos')"
         ;;
     *)
         # 其他识别到但不支持的系统
-        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.os.unsupported_os')"
+        print_error "$(nginx_os_message 'unsupported_os')"
         ;;
     esac
 }
@@ -422,7 +289,7 @@ function swap_on() {
 # =============================================================================
 function compile_dependencies() {
     # 打印安装依赖信息
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.install_deps')"
+    print_info "$(t '.nginx.compile.install_deps')"
     # 安装基础工具和库
     _install ca-certificates curl wget gcc make git openssl tzdata socat cmake pkg-config
     case "$(_os)" in
@@ -555,7 +422,6 @@ function install_nginx_update_transaction() (
     local backup_dir='' staged_modules='' module=''
     local old_modules_exist=0 command_link_existed=0
     local nginx_was_active=0 cleanup_backup=1
-    local mutation_started=0 transaction_committed=0 rollback_attempted=0
 
     function cleanup_nginx_update_transaction() {
         if [[ -n "${staged_modules}" && -e "${staged_modules}" ]]; then
@@ -571,7 +437,7 @@ function install_nginx_update_transaction() (
         local restore_status=0
         local failed_modules="${backup_dir}/failed-modules"
 
-        rollback_attempted=1
+        txn_begin_rollback || true
         # A second signal during rollback must leave the backup available for
         # manual recovery instead of letting the EXIT cleanup remove it.
         cleanup_backup=0
@@ -624,20 +490,18 @@ function install_nginx_update_transaction() (
     function finish_nginx_update_transaction() {
         local status="$1"
 
-        trap - EXIT HUP INT TERM
-        if [[ "${mutation_started}" -eq 1 &&
-            "${transaction_committed}" -eq 0 &&
-            "${rollback_attempted}" -eq 0 ]]; then
+        txn_finish_enter
+        if txn_should_rollback && ! txn_rollback_attempted; then
             restore_previous_nginx_update || status=1
         fi
         cleanup_nginx_update_transaction
         exit "${status}"
     }
 
-    trap 'finish_nginx_update_transaction "$?"' EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    # 事务调度骨架（trap / 信号码 / 提交与回滚标记）在 lib/transaction.sh；
+    # 快照集合与回滚体仍留在本函数。
+    txn_begin finish_nginx_update_transaction
+
     [[ -x "${new_binary}" && -x "${NGINX_PATH}/sbin/nginx" &&
         -f "${NGINX_PATH}/conf/nginx.conf" ]] || return 1
     if systemctl is-active --quiet nginx; then
@@ -661,7 +525,7 @@ function install_nginx_update_transaction() (
     if [[ -d "${NGINX_PATH}/modules" ]]; then
         old_modules_exist=1
     fi
-    mutation_started=1
+    txn_mark_mutation
     if [[ "${old_modules_exist}" -eq 1 ]]; then
         if ! mv -- "${NGINX_PATH}/modules" "${backup_dir}/modules"; then
             restore_previous_nginx_update || true
@@ -689,13 +553,13 @@ function install_nginx_update_transaction() (
         return 1
     fi
 
-    transaction_committed=1
+    txn_commit
     cleanup_backup=0
     print_info "Nginx update backup: ${backup_dir}"
 )
 
 function prebuilt_install() {
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading')"
+    print_info "$(t '.nginx.prebuilt.downloading')"
     # 获取当前仓库的 GitHub Releases，并按当前 CPU 架构选择最新的可用产物。
     local repo_owner="haiyan1301"
     local repo_name="Xray-script"
@@ -716,7 +580,7 @@ function prebuilt_install() {
 
     local api_url="https://api.github.com/repos/${repo_owner}/${repo_name}/releases?per_page=100"
     local release_info
-    release_info="$(curl -fsSL "${api_url}" 2>/dev/null)" || print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.fetch_fail')"
+    release_info="$(curl -fsSL "${api_url}" 2>/dev/null)" || print_error "$(t '.nginx.prebuilt.fetch_fail')"
 
     # 新产物带架构后缀；AMD64 同时兼容已有的无架构后缀历史产物。
     local download_url
@@ -738,7 +602,7 @@ function prebuilt_install() {
         ][0] // empty
     ')"
     if [[ -z "${download_url}" ]]; then
-        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.no_release')"
+        print_error "$(t '.nginx.prebuilt.no_release')"
     fi
 
     local archive_name
@@ -746,7 +610,7 @@ function prebuilt_install() {
     local release_dir="${archive_name%.tar.gz}"
 
     cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.downloading') ${archive_name}"
+    print_info "$(t '.nginx.prebuilt.downloading') ${archive_name}"
     _error_detect "curl -fsSL -o ${archive_name} ${download_url}"
     _error_detect "tar -zxf ${archive_name}"
 
@@ -756,7 +620,7 @@ function prebuilt_install() {
     fi
 
     # 安装二进制文件到标准路径
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
+    print_info "$(t '.nginx.install.start_install')"
     mkdir -p "${NGINX_PATH}/sbin" "${NGINX_PATH}/modules" "${NGINX_PATH}/conf" "${NGINX_PATH}/logs" "${NGINX_PATH}/html"
     if [[ -x "${NGINX_PATH}/sbin/nginx" ]]; then
         [[ -f "${NGINX_PATH}/conf/nginx.conf" ]] ||
@@ -809,7 +673,7 @@ CONFEOF
         ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx ||
             print_error "Failed to create the Nginx command link"
     fi
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.prebuilt.install_ok')"
+    print_info "$(t '.nginx.prebuilt.install_ok')"
 }
 
 function reload_nginx_after_binary_update() {
@@ -829,7 +693,7 @@ function reload_nginx_after_binary_update() {
 # =============================================================================
 function source_compile() {
     cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}" # 切换到临时目录
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions')"
+    print_info "$(t '.nginx.compile.fetch_versions')"
     # 从官方下载页获取最新的 Nginx 源码版本，BoringSSL 使用 main 分支源码。
     local nginx_version="$(fetch_latest_nginx_version)"
     [[ -z "${nginx_version}" ]] && print_error "Failed to fetch latest Nginx version"
@@ -837,13 +701,13 @@ function source_compile() {
     # 生成编译器优化标志
     gen_cflags
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_nginx')"
+    print_info "$(t '.nginx.compile.download_nginx')"
     # 下载 Nginx 源码包
     _error_detect "curl -fsSL -o ${nginx_version}.tar.gz https://nginx.org/download/${nginx_version}.tar.gz"
     # 解压 Nginx 源码
     _error_detect "tar -zxf ${nginx_version}.tar.gz"
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_boringssl')"
+    print_info "$(t '.nginx.compile.download_boringssl')"
     # 下载并编译 BoringSSL。Nginx 直接通过 include/lib 链接到已构建的 BoringSSL，
     # 不使用 --with-openssl，因为该参数要求 OpenSSL 源码树并会尝试执行 Configure/make。
     _error_detect "git clone --depth=1 https://github.com/google/boringssl"
@@ -875,7 +739,7 @@ function source_compile() {
 
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
-        print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_brotli')"
+        print_info "$(t '.nginx.compile.fetch_brotli')"
         _error_detect "git clone --recursive https://github.com/google/ngx_brotli"
         cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}" # 返回临时目录
     fi
@@ -889,7 +753,7 @@ function source_compile() {
     sed -i 's/NGX_PM_CFLAGS=`$NGX_PERL -MExtUtils::Embed -e ccopts`/NGX_PM_CFLAGS="`$NGX_PERL -MExtUtils::Embed -e ccopts` $CFLAGS"/g' auto/lib/perl/conf
 
     # 执行 Nginx 的 configure 脚本，使用 BoringSSL 头文件和静态库。
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.configure')"
+    print_info "$(t '.nginx.compile.configure')"
     local cc_opts="${cflags[*]} -I${TMPFILE_DIR}/boringssl/include"
     local ssl_lib_dir="$(dirname "${libssl_path}")"
     local crypto_lib_dir="$(dirname "${libcrypto_path}")"
@@ -945,7 +809,7 @@ function source_compile() {
         configure_args+=(--add-module="../ngx_brotli")
     fi
     if ! ./configure "${configure_args[@]}"; then
-        print_error "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fail_exec_cmd' | sed 's|${cmd}|./configure|')"
+        print_error "$(t '.nginx.compile.fail_exec_cmd' | sed 's|${cmd}|./configure|')"
     fi
 
     # 修复链接顺序：-lstdc++ 必须在 libcrypto.a 之后。
@@ -956,11 +820,11 @@ function source_compile() {
     # 防止 make 重新触发 OpenSSL 构建规则。
     touch "${TMPFILE_DIR}/boringssl/.openssl/include/openssl/ssl.h"
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
+    print_info "$(t '.nginx.compile.swap')"
     # 创建并启用 512MB swap 空间以辅助编译
     swap_on 512
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.start_compile')"
+    print_info "$(t '.nginx.compile.start_compile')"
     # 使用所有 CPU 核心并行编译
     _error_detect "make -j$(nproc)"
 }
@@ -973,7 +837,7 @@ function source_compile() {
 # =============================================================================
 function source_install() {
     source_compile # 先执行编译
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
+    print_info "$(t '.nginx.install.start_install')"
     # 确保 nginx 用户和组存在
     if ! id -u nginx &>/dev/null; then
         useradd --system --no-create-home --shell /usr/sbin/nologin nginx
@@ -991,20 +855,20 @@ function source_install() {
 # 返回值: 0-执行了更新 1-无需更新 (由 return 语句决定)
 # =============================================================================
 function source_update() {
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.fetch_versions')"
+    print_info "$(t '.nginx.update.fetch_versions')"
     # 获取最新的 Nginx 版本号
     local latest_nginx_version="$(fetch_latest_nginx_version)"
     [[ -z "${latest_nginx_version}" ]] && print_error "Failed to fetch latest Nginx version"
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.read_current_versions')"
+    print_info "$(t '.nginx.update.read_current_versions')"
     # 获取当前安装的 Nginx 版本
     local current_version_nginx="$(nginx -V 2>&1 | grep "^nginx version:.*" | cut -d / -f 2)"
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.check_update')"
+    print_info "$(t '.nginx.update.check_update')"
     # 比较 Nginx 版本；版本相同也会重编译，以刷新 BoringSSL main 分支。
     if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}"; then
         source_compile # 重新编译新版本
-        print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.start_update')"
+        print_info "$(t '.nginx.update.start_update')"
         install_nginx_update_transaction objs/nginx objs ||
             print_error "Failed to validate, install, or reload the compiled Nginx update"
         return 0 # 表示执行了更新
@@ -1019,14 +883,14 @@ function source_update() {
 # 返回值: 无 (执行卸载操作)
 # =============================================================================
 function purge_nginx() {
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.purge.start_purge')"
+    print_info "$(t '.nginx.purge.start_purge')"
     systemctl stop nginx                     # 停止 Nginx 服务
     rm -rf "${NGINX_PATH}"                   # 删除安装目录
     rm -rf /usr/sbin/nginx                   # 删除软链接
     rm -rf /etc/systemd/system/nginx.service # 删除 systemd 服务文件
     rm -rf "${NGINX_LOG_PATH}"               # 删除日志目录
     systemctl daemon-reload                  # 重新加载 systemd 配置
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.purge.purged')"
+    print_info "$(t '.nginx.purge.purged')"
 }
 
 # =============================================================================
@@ -1053,7 +917,7 @@ function migrate_nginx_runtime_config() {
 # 返回值: 无 (创建服务文件并重新加载 systemd)
 # =============================================================================
 function systemctl_config_nginx() {
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.service.configure')"
+    print_info "$(t '.nginx.service.configure')"
     migrate_nginx_runtime_config
 
     local migrate_existing_unit=0
@@ -1143,7 +1007,7 @@ EOF
             systemctl start xray
         fi
     fi
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.service.complete')"
+    print_info "$(t '.nginx.service.complete')"
 }
 
 # =============================================================================
@@ -1154,15 +1018,15 @@ EOF
 # =============================================================================
 function show_help() {
     # 从 i18n 数据中读取帮助信息的各个部分
-    local usage="$(echo "$I18N_DATA" | jq -r '.nginx.help.usage' | sed "s|\${script_name}|$0|")"
-    local options_title="$(echo "$I18N_DATA" | jq -r '.nginx.help.options_title')"
-    local opt_install="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_install')"
-    local opt_update="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_update')"
-    local opt_service_config="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_service_config')"
-    local opt_prebuilt="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_prebuilt')"
-    local opt_brotli="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_brotli')"
-    local opt_purge="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_purge')"
-    local opt_help="$(echo "$I18N_DATA" | jq -r '.nginx.help.opt_help')"
+    local usage="$(t '.nginx.help.usage' | sed "s|\${script_name}|$0|")"
+    local options_title="$(t '.nginx.help.options_title')"
+    local opt_install="$(t '.nginx.help.opt_install')"
+    local opt_update="$(t '.nginx.help.opt_update')"
+    local opt_service_config="$(t '.nginx.help.opt_service_config')"
+    local opt_prebuilt="$(t '.nginx.help.opt_prebuilt')"
+    local opt_brotli="$(t '.nginx.help.opt_brotli')"
+    local opt_purge="$(t '.nginx.help.opt_purge')"
+    local opt_help="$(t '.nginx.help.opt_help')"
 
     # 使用 here document 打印帮助信息
     cat <<EOF
@@ -1194,9 +1058,6 @@ function main() {
     # 加载国际化数据
     load_i18n
 
-    # 首先检查操作系统兼容性
-    check_os
-
     # 初始化 action 变量
     local action=''
 
@@ -1221,15 +1082,18 @@ function main() {
             ;;
         # 处理无效选项
         *)
-            print_error "$(echo "$I18N_DATA" | jq -r '.nginx.main.invalid_option' | sed "s|\${option}|$1|")"
+            print_error "$(t '.nginx.main.invalid_option' | sed "s|\${option}|$1|")"
             ;;
         esac
         shift # 移动到下一个参数
     done
 
-    # 根据解析出的 action 执行相应的操作
+    # 根据解析出的 action 执行相应的操作。
+    # 系统版本检查只挡编译/安装：--help、--purge、--service-config 在不被支持的
+    # 系统上仍应可用，否则用户连卸载旧 Nginx 都做不到。
     case "${action}" in
     install)
+        check_os
         if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then
             prebuilt_install       # 从 GitHub Releases 下载预编译版本
         else
@@ -1239,6 +1103,7 @@ function main() {
         systemctl_config_nginx # 配置 systemd 服务
         ;;
     update)
+        check_os
         # 必须在替换 BoringSSL 二进制或 USR2 平滑升级之前迁移旧配置。
         migrate_nginx_runtime_config
         if [[ "${IS_PREBUILT}" =~ ^[Yy]$ ]]; then

@@ -38,7 +38,6 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 
 # --- 全局变量声明 ---
 declare LANG_PARAM=''
-declare I18N_DATA=''
 
 
 # =============================================================================
@@ -57,7 +56,7 @@ function menu_language() {
 # =============================================================================
 # 函数名称: menu_index
 # 功能描述: 显示主菜单。
-# 参数: 无 (直接使用全局变量 SCRIPT_CONFIG_PATH 和 I18N_DATA)
+# 参数: 无 (直接使用全局变量 SCRIPT_CONFIG_PATH 和 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_index() {
@@ -68,179 +67,179 @@ function menu_index() {
     echo -e "--------------- Xray-script ------------------"
     echo -e "Version      : ${GREEN}${version}${NC}"
     # 从 i18n 数据中读取描述信息
-    echo -e "Description  : $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.description")"
+    echo -e "Description  : $(t ".${CUR_FILE}.index.description")"
 
     # 打印安装选项部分
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.installation") ------------------"
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option1")"
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option2")"
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option3")"
+    echo -e "------------------ $(t ".${CUR_FILE}.index.installation") ------------------"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.index.option1")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.index.option2")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.index.option3")"
 
     # 打印操作选项部分
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.operation") ------------------"
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option4")"
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option5")"
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option6")"
+    echo -e "------------------ $(t ".${CUR_FILE}.index.operation") ------------------"
+    echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.index.option4")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.index.option5")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.index.option6")"
 
     # 打印配置选项部分
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.configuration") ------------------"
-    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option7")"
-    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option8")"
-    echo -e "${GREEN}9.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option9")"
+    echo -e "------------------ $(t ".${CUR_FILE}.index.configuration") ------------------"
+    echo -e "${GREEN}7.${NC} $(t ".${CUR_FILE}.index.option7")"
+    echo -e "${GREEN}8.${NC} $(t ".${CUR_FILE}.index.option8")"
+    echo -e "${GREEN}9.${NC} $(t ".${CUR_FILE}.index.option9")"
 
     # 打印退出选项
     echo -e "------------------------------------------------------"
-    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.index.option0")"
+    echo -e "${RED}0.${NC} $(t ".${CUR_FILE}.index.option0")"
 }
 
 # =============================================================================
 # 函数名称: menu_xray
 # 功能描述: 显示 Xray 版本选择菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_xray() {
     # 打印 Xray 版本菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.xray_version.title") ------------------"
     # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.option1")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.xray_version.option1")"
     # 打印选项 2 (默认)
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.option2")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.xray_version.option2")(${GREEN}$(t ".${CUR_FILE}.status.default")${NC})"
     # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.option3")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.xray_version.option3")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.info1")"
+    echo -e "1. $(t ".${CUR_FILE}.xray_version.info1")"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.info2")"
+    echo -e "2. $(t ".${CUR_FILE}.xray_version.info2")"
     # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.info3")"
+    echo -e "3. $(t ".${CUR_FILE}.xray_version.info3")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
-    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.option0")"
+    echo -e "${RED}0.${NC} $(t ".${CUR_FILE}.xray_version.option0")"
 }
 
 # =============================================================================
 # 函数名称: menu_xray_config
 # 功能描述: 显示 Xray 协议配置菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_xray_config() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.title") ------------------"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_reality")"
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option1") (${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option2")"
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option3")"
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option4")"
+    echo -e "------------------ $(t ".${CUR_FILE}.protocol_config.title") ------------------"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.group_reality")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.protocol_config.option1") (${GREEN}$(t ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.protocol_config.option2")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.protocol_config.option3")"
+    echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.protocol_config.option4")"
 
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_standalone")"
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option5")"
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option6")"
-    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option7")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.group_standalone")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.protocol_config.option5")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.protocol_config.option6")"
+    echo -e "${GREEN}7.${NC} $(t ".${CUR_FILE}.protocol_config.option7")"
 
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_web")"
-    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option8")"
-    echo -e "${GREEN}9.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option9")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.group_web")"
+    echo -e "${GREEN}8.${NC} $(t ".${CUR_FILE}.protocol_config.option8")"
+    echo -e "${GREEN}9.${NC} $(t ".${CUR_FILE}.protocol_config.option9")"
 
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.group_advanced")"
-    echo -e "${GREEN}10.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option10")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.group_advanced")"
+    echo -e "${GREEN}10.${NC} $(t ".${CUR_FILE}.protocol_config.option10")"
 
     echo -e "------------------------------------------------------"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_hy2")"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_web")"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.note_multi")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.note_hy2")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.note_web")"
+    echo -e "$(t ".${CUR_FILE}.protocol_config.note_multi")"
     echo -e "------------------------------------------------------"
-    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.protocol_config.option0")"
+    echo -e "${RED}0.${NC} $(t ".${CUR_FILE}.protocol_config.option0")"
 }
 
 # =============================================================================
 # 函数名称: menu_web_config
 # 功能描述: 显示 Web 服务器配置菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_web_config() {
     # 打印 Web 配置菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.web_config.title") ------------------"
     # 打印选项 1 (默认)
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option1")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.web_config.option1")(${GREEN}$(t ".${CUR_FILE}.status.default")${NC})"
     # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option2")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.web_config.option2")"
     # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option3")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.web_config.option3")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.info1")"
+    echo -e "2. $(t ".${CUR_FILE}.web_config.info1")"
     # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.info2")"
+    echo -e "3. $(t ".${CUR_FILE}.web_config.info2")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
-    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.web_config.option0")"
+    echo -e "${RED}0.${NC} $(t ".${CUR_FILE}.web_config.option0")"
 }
 
 function menu_cdn_backend() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.title") ------------------"
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option1")(${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.default")${NC})"
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option2")"
+    echo -e "------------------ $(t ".${CUR_FILE}.cdn_backend.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.cdn_backend.option1")(${GREEN}$(t ".${CUR_FILE}.status.default")${NC})"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.cdn_backend.option2")"
     echo -e "------------------------------------------------------"
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.info1")"
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.info2")"
-    echo -e "   $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.warning")"
+    echo -e "1. $(t ".${CUR_FILE}.cdn_backend.info1")"
+    echo -e "2. $(t ".${CUR_FILE}.cdn_backend.info2")"
+    echo -e "   $(t ".${CUR_FILE}.cdn_backend.warning")"
     echo -e "------------------------------------------------------"
-    echo -e "${RED}0.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_backend.option0")"
+    echo -e "${RED}0.${NC} $(t ".${CUR_FILE}.cdn_backend.option0")"
 }
 
 # =============================================================================
 # 函数名称: menu_config
 # 功能描述: 显示配置管理菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_config() {
     local config_tag
     config_tag="$(jq -r '.xray.tag // ""' "${SCRIPT_CONFIG_PATH}")"
     # 打印配置管理菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.config_management.title") ------------------"
     # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option1")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.config_management.option1")"
     # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option2")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.config_management.option2")"
     if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
-        echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option3")"
+        echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.config_management.option3")"
     fi
     if protocol_reads_public_port "${config_tag}"; then
-        echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option4")"
+        echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.config_management.option4")"
     fi
     # 打印选项 5
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option5")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.config_management.option5")"
     # 打印选项 6
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option6")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.config_management.option6")"
     # 打印选项 7
-    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option7")"
-    echo -e "${GREEN}8.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.option8")"
+    echo -e "${GREEN}7.${NC} $(t ".${CUR_FILE}.config_management.option7")"
+    echo -e "${GREEN}8.${NC} $(t ".${CUR_FILE}.config_management.option8")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info1")"
+    echo -e "1. $(t ".${CUR_FILE}.config_management.info1")"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info2")"
+    echo -e "2. $(t ".${CUR_FILE}.config_management.info2")"
     if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
-        echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info3")"
+        echo -e "3. $(t ".${CUR_FILE}.config_management.info3")"
     fi
     if protocol_reads_public_port "${config_tag}"; then
-        echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info4")"
+        echo -e "4. $(t ".${CUR_FILE}.config_management.info4")"
     fi
     # 打印选项 5 的说明信息
-    echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info5")"
+    echo -e "5. $(t ".${CUR_FILE}.config_management.info5")"
     # 打印选项 7 的说明信息
-    echo -e "7. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info6")"
-    echo -e "8. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config_management.info7")"
+    echo -e "7. $(t ".${CUR_FILE}.config_management.info6")"
+    echo -e "8. $(t ".${CUR_FILE}.config_management.info7")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -248,41 +247,41 @@ function menu_config() {
 # =============================================================================
 # 函数名称: menu_route
 # 功能描述: 显示路由规则管理菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_route() {
     # 打印路由管理菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.route_management.title") ------------------"
     # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option1")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.route_management.option1")"
     # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option2")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.route_management.option2")"
     # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option3")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.route_management.option3")"
     # 打印选项 4
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option4")"
+    echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.route_management.option4")"
     # 打印选项 5
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option5")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.route_management.option5")"
     # 打印选项 6
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.option6")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.route_management.option6")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
-    echo -e "1.1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info1")"
-    echo -e "1.2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info2")"
-    echo -e "1.3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info3")"
+    echo -e "1.1. $(t ".${CUR_FILE}.route_management.info1")"
+    echo -e "1.2. $(t ".${CUR_FILE}.route_management.info2")"
+    echo -e "1.3. $(t ".${CUR_FILE}.route_management.info3")"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info4")"
+    echo -e "2. $(t ".${CUR_FILE}.route_management.info4")"
     # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info5")"
+    echo -e "3. $(t ".${CUR_FILE}.route_management.info5")"
     # 打印选项 4 的说明信息
-    echo -e "4. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info6")"
+    echo -e "4. $(t ".${CUR_FILE}.route_management.info6")"
     # 打印选项 5 的说明信息
-    echo -e "5. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info7")"
+    echo -e "5. $(t ".${CUR_FILE}.route_management.info7")"
     # 打印选项 6 的说明信息
-    echo -e "6. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.route_management.info8")"
+    echo -e "6. $(t ".${CUR_FILE}.route_management.info8")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -290,92 +289,92 @@ function menu_route() {
 # =============================================================================
 # 函数名称: menu_sni_config
 # 功能描述: 显示 SNI 配置菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_sni_config() {
     # 打印 SNI 配置菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.sni_config.title") ------------------"
     # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option1")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.sni_config.option1")"
     # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option2")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.sni_config.option2")"
     # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option3")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.sni_config.option3")"
     # 打印选项 4
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option4")"
+    echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.sni_config.option4")"
     # 打印选项 5
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option5")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.sni_config.option5")"
     # 打印选项 6
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option6")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.sni_config.option6")"
     # 打印选项 7
-    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.option7")"
+    echo -e "${GREEN}7.${NC} $(t ".${CUR_FILE}.sni_config.option7")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.info1")"
+    echo -e "1. $(t ".${CUR_FILE}.sni_config.info1")"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.sni_config.info2")"
+    echo -e "2. $(t ".${CUR_FILE}.sni_config.info2")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
 
 function menu_cdn_config() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.cdn_config.title") ------------------"
     local option
     for option in 1 2 3 4 5 6 7; do
-        echo -e "${GREEN}${option}.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_config.option${option}")"
+        echo -e "${GREEN}${option}.${NC} $(t ".${CUR_FILE}.cdn_config.option${option}")"
     done
     echo -e "------------------------------------------------------"
 }
 
 function menu_cdn_direct_config() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.title") ------------------"
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option1")"
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option2")"
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct_config.option3")"
+    echo -e "------------------ $(t ".${CUR_FILE}.cdn_direct_config.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.cdn_direct_config.option1")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.cdn_direct_config.option2")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.cdn_direct_config.option3")"
     echo -e "------------------------------------------------------"
 }
 
 # =============================================================================
 # 函数名称: menu_reverse
 # 功能描述: 显示反向代理配置菜单。
-# 参数: 无 (直接使用全局变量 I18N_DATA)
+# 参数: 无 (直接使用全局变量 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function menu_reverse() {
     # 打印反向代理菜单标题
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.title") ------------------"
+    echo -e "------------------ $(t ".${CUR_FILE}.reverse.title") ------------------"
     # 打印选项 1
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option1")"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.reverse.option1")"
     # 打印选项 2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option2")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.reverse.option2")"
     # 打印选项 3
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.option3")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.reverse.option3")"
 
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
-    echo -e "1. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info1")"
+    echo -e "1. $(t ".${CUR_FILE}.reverse.info1")"
     # 打印选项 2 的说明信息
-    echo -e "2. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info2")"
+    echo -e "2. $(t ".${CUR_FILE}.reverse.info2")"
     # 打印选项 3 的说明信息
-    echo -e "3. $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.info3")"
+    echo -e "3. $(t ".${CUR_FILE}.reverse.info3")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
 
 function menu_lan() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.title") ------------------"
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option1")"
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option2")"
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option3")"
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option4")"
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option5")"
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.option6")"
+    echo -e "------------------ $(t ".${CUR_FILE}.lan.title") ------------------"
+    echo -e "${GREEN}1.${NC} $(t ".${CUR_FILE}.lan.option1")"
+    echo -e "${GREEN}2.${NC} $(t ".${CUR_FILE}.lan.option2")"
+    echo -e "${GREEN}3.${NC} $(t ".${CUR_FILE}.lan.option3")"
+    echo -e "${GREEN}4.${NC} $(t ".${CUR_FILE}.lan.option4")"
+    echo -e "${GREEN}5.${NC} $(t ".${CUR_FILE}.lan.option5")"
+    echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.lan.option6")"
     echo -e "------------------------------------------------------"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.lan.info")"
+    echo -e "$(t ".${CUR_FILE}.lan.info")"
     echo -e "------------------------------------------------------"
 }
 
@@ -402,7 +401,7 @@ function print_banner() {
 # =============================================================================
 # 函数名称: print_status
 # 功能描述: 打印当前脚本配置的状态信息，包括 Xray 版本、配置标签和 WARP 状态。
-# 参数: 无 (直接使用全局变量 SCRIPT_CONFIG_PATH 和 I18N_DATA)
+# 参数: 无 (直接使用全局变量 SCRIPT_CONFIG_PATH 和 I18N)
 # 返回值: 无 (直接打印到标准错误输出 >&2)
 # =============================================================================
 function print_status() {
@@ -417,10 +416,10 @@ function print_status() {
     local LAN_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.lan.enabled // 0) | tonumber? // 0')
 
     # 从 i18n 数据中读取状态描述文本
-    local not_installed=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.not_installed")
-    local not_configured=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.not_configured")
-    local enabled=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.enabled")
-    local disabled=$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.disabled")
+    local not_installed=$(t ".${CUR_FILE}.status.not_installed")
+    local not_configured=$(t ".${CUR_FILE}.status.not_configured")
+    local enabled=$(t ".${CUR_FILE}.status.enabled")
+    local disabled=$(t ".${CUR_FILE}.status.disabled")
 
     # 根据 Xray 版本是否存在，设置显示颜色和文本
     [[ ${XRAY_VERSION} ]] && XRAY_VERSION="${GREEN}${XRAY_VERSION}${NC}" || XRAY_VERSION="${RED}${not_installed}${NC}"
@@ -444,45 +443,100 @@ function print_status() {
 }
 
 # =============================================================================
+# 函数名称: menu_option_max
+# 功能描述: 返回各菜单允许的最大选项编号（0 = 取消，不计入）。get_choose 用它做
+#           范围校验：Bash 的退出状态只有 0～255，超范围数字直接 return 会回绕成
+#           另一个合法选项（例如主菜单输入 259 会回绕成 3 = 卸载）。
+# 参数:
+#   $1: 菜单标志（与 menu.sh 的入口参数一致）
+# 返回值: stdout 输出最大编号；未登记的菜单输出空串（调用方不做范围校验）
+# =============================================================================
+function menu_option_max() {
+    case "$1" in
+    --language) echo 2 ;;
+    --index) echo 9 ;;
+    --xray) echo 3 ;;
+    --config) echo 10 ;;
+    --web) echo 3 ;;
+    --cdn-backend) echo 2 ;;
+    --management) echo 8 ;;
+    --route) echo 6 ;;
+    --sni) echo 7 ;;
+    --cdn-config) echo 7 ;;
+    --cdn-direct-config) echo 3 ;;
+    --reverse) echo 3 ;;
+    --lan) echo 6 ;;
+    *) echo '' ;;
+    esac
+}
+
+# =============================================================================
 # 函数名称: get_choose
 # 功能描述: 提示用户输入选择，并对输入进行基本验证和处理。
 # 参数:
 #   $1: 用于区分是否是语言选择菜单的标志 (例如 '--language')
-# 返回值: 用户输入的选择数字 (通过 return 返回)
+# 返回值: 用户输入的选择数字 (通过 return 返回；255 = 未收到输入)
 # =============================================================================
 function get_choose() {
     local i18n="$1" # 获取参数
+    local choose='' # 用户输入
+    local max_option=''
 
-    # 根据参数决定提示信息
-    if [[ "$i18n" == '--language' ]]; then
-        printf "请选择你的语言(默认: 中文): " >&2
-    else
-        # 从 i18n 数据中读取通用提示信息
-        printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.choose"): " >&2
-    fi
+    max_option="$(menu_option_max "${i18n}")"
 
-    # 从标准输入读取用户输入
-    read -r choose
+    while true; do
+        # 根据参数决定提示信息
+        if [[ "$i18n" == '--language' ]]; then
+            printf "请选择你的语言(默认: 中文): " >&2
+        else
+            # 从 i18n 数据中读取通用提示信息
+            printf "${YELLOW}[$(t '.title.tip')] ${NC} $(t ".${CUR_FILE}.choose"): " >&2
+        fi
 
-    # 空输入仅采用当前菜单标注的默认项；显式输入 0 始终表示取消。
-    if [[ -z "${choose}" ]]; then
-        case "${i18n}" in
-        --config | --web | --cdn-backend) return 1 ;;
-        --xray) return 2 ;;
-        *) return 0 ;;
-        esac
-    fi
+        # 从标准输入读取用户输入。EOF 或超时都不得当作「用户选择了默认项」，
+        # 否则非交互调用会静默执行默认操作（可能是写配置、装协议这类不可逆动作）。
+        if ! read -r -t 300 choose; then
+            printf "\n" >&2
+            if [[ "$i18n" == '--language' ]]; then
+                printf "No input received; no language selected.\n" >&2
+            else
+                printf "%s\n" "$(t ".${CUR_FILE}.aborted")" >&2
+            fi
+            return 255
+        fi
 
-    # 检查输入是否为纯数字
-    if [[ ${choose} =~ ^[0-9]+$ ]]; then
-        # 移除前导零 (例如 01 -> 1)
-        choose=$(echo "${choose}" | sed 's/^0*//')
-        # 如果处理后为空 (原输入为 "0" 或 "00")，则返回 0；否则返回处理后的数字
-        return "${choose:-0}"
-    else
-        # 如果不是纯数字，则返回 0
-        return "0"
-    fi
+        # 空输入仅采用当前菜单标注的默认项；显式输入 0 始终表示取消。
+        if [[ -z "${choose}" ]]; then
+            case "${i18n}" in
+            --config | --web | --cdn-backend) return 1 ;;
+            --xray) return 2 ;;
+            *) return 0 ;;
+            esac
+        fi
+
+        # 非纯数字按取消处理（保持既有语义）
+        if [[ ! "${choose}" =~ ^[0-9]+$ ]]; then
+            return 0
+        fi
+        # 移除前导零 (例如 01 -> 1)；"0"/"00" 归一化为 0
+        choose="${choose#"${choose%%[!0]*}"}"
+        choose="${choose:-0}"
+
+        # 先比位数再比数值：位数超出时不进算术比较，避免 20 位数字在 Bash 的
+        # 64 位算术里回绕成一个「合法」的小数字（例如 ...617 变成 1）。
+        if [[ -z "${max_option}" ]] ||
+            { [[ "${#choose}" -le "${#max_option}" ]] && [[ "${choose}" -le "${max_option}" ]]; }; then
+            return "${choose}"
+        fi
+
+        # 超出该菜单的选项范围：提示后重新提问，不把无效值交给调用方。
+        printf "\n" >&2
+        if [[ "$i18n" == '--language' ]]; then
+            printf "Invalid choice. Enter 1 or 2.\n" >&2
+        else
+            printf "%s\n" "$(t ".${CUR_FILE}.invalid_choice")" >&2
+        fi
+    done
 }
 
 # =============================================================================
@@ -507,7 +561,12 @@ function main() {
 
     # 使用 case 语句根据第一个参数调用对应的菜单或信息显示函数
     case "$1" in
-    --index) menu_index >&2 ;;            # 显示主菜单
+    --index)
+        # Banner、状态和主菜单一次渲染：主界面只需要一个 menu.sh 进程。
+        print_banner >&2
+        print_status >&2
+        menu_index >&2
+        ;; # 显示主界面
     --xray) menu_xray >&2 ;;              # 显示 Xray 版本菜单
     --config) menu_xray_config >&2 ;;     # 显示协议配置菜单
     --web) menu_web_config >&2 ;;         # 显示 Web 配置菜单

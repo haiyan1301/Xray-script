@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.09.05"
+readonly SCRIPT_VERSION="v2026.09.08"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -54,6 +54,10 @@ else
     readonly YELLOW='\033[33m'
     readonly RED='\033[31m'
     readonly NC='\033[0m'
+    # 与 lib/common.sh / lib/system.sh 保持一致；此处为项目尚未下载时的后备定义
+    readonly MIN_UBUNTU=20
+    readonly MIN_DEBIAN=10
+    readonly MIN_CENTOS=7
     function cmd_exists() { command -v "$1" >/dev/null 2>&1; }
     function _os() {
         local os=""
@@ -77,7 +81,8 @@ else
         fi
     }
     function _os_ver() {
-        local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
+        local main_ver
+        main_ver="$(_os_full | grep -oE '[0-9.]+')"
         printf -- "%s" "${main_ver%%.*}"
     }
     function write_config() {
@@ -109,13 +114,16 @@ else
 fi
 
 # --- 全局变量声明 ---
+# 注意：这是 bootstrap 期的异构实现（脚本运行时项目文件可能尚未下载，
+# 不能 source lib/i18n.sh），键名与 lib/i18n.sh 的 I18N 表刻意不同，
+# 改动文案时两处需同步。
 declare -A I18N_DATA=(
     ['error']='错误'
     ['root']='请使用 root 权限运行该脚本'
-    ['supported']='不支持当前系统，请切换到 Ubuntu 16+、Debian 9+、CentOS 7+'
-    ['ubuntu']='不支持当前版本，请切换到 Ubuntu 16+ 重试'
-    ['debian']='不支持当前版本，请切换到 Debian 9+ 重试'
-    ['centos']='不支持当前版本，请切换到 CentOS 7+ 重试'
+    ['supported']="不支持当前系统，请切换到 Ubuntu ${MIN_UBUNTU}+、Debian ${MIN_DEBIAN}+、CentOS ${MIN_CENTOS}+"
+    ['ubuntu']="不支持当前版本，请切换到 Ubuntu ${MIN_UBUNTU}+ 重试"
+    ['debian']="不支持当前版本，请切换到 Debian ${MIN_DEBIAN}+ 重试"
+    ['centos']="不支持当前版本，请切换到 CentOS ${MIN_CENTOS}+ 重试"
     ['tip']='更新提示'
     ['new']='发现有新脚本, 是否更新'
     ['now']='是否更新 [Y/n] '
@@ -127,6 +135,7 @@ declare -A I18N_DATA=(
     ['path_invalid']='安装目录必须是安全的绝对路径，且不能是系统根目录'
     ['path_fallback']='保存的安装目录无效，已回退到 /usr/local/xray-script'
     ['language_invalid']='语言只允许 zh、en 或 auto'
+    ['no_input']='未收到语言选择输入，已中止安装；请用 --lang=zh 或 --lang=en 指定语言'
     ['option_invalid']='未知选项'
 )
 declare PROJECT_ROOT=''
@@ -138,6 +147,8 @@ declare TOOL_DIR=''
 declare QUICK_INSTALL=''
 declare SCRIPT_CONFIG=''
 declare LANG_PARAM=''
+# 本次调用的原始参数（数组，保留空格与特殊字符）；自更新重启时原样转交。
+declare -a ORIGINAL_ARGS=()
 
 # =============================================================================
 # 函数名称: show_help
@@ -246,10 +257,10 @@ function load_i18n() {
         I18N_DATA=(
             ['error']='Error'
             ['root']='This script must be run as root'
-            ['supported']='Not supported OS'
-            ['ubuntu']='Not supported OS, please change to Ubuntu 18+ and try again.'
-            ['debian']='Not supported OS, please change to Debian 9+ and try again.'
-            ['centos']='Not supported OS, please change to CentOS 7+ and try again.'
+            ['supported']="Not supported OS, please change to Ubuntu ${MIN_UBUNTU}+, Debian ${MIN_DEBIAN}+ or CentOS ${MIN_CENTOS}+ and try again."
+            ['ubuntu']="Not supported OS, please change to Ubuntu ${MIN_UBUNTU}+ and try again."
+            ['debian']="Not supported OS, please change to Debian ${MIN_DEBIAN}+ and try again."
+            ['centos']="Not supported OS, please change to CentOS ${MIN_CENTOS}+ and try again."
             ['tip']='Update Notice'
             ['new']='A new version of the script is available. Do you want to update?'
             ['now']='Update now? [Y/n]'
@@ -261,6 +272,7 @@ function load_i18n() {
             ['path_invalid']='The install directory must be a safe absolute path and not a system root directory'
             ['path_fallback']='The saved install directory is invalid; using /usr/local/xray-script'
             ['language_invalid']='Language must be zh, en, or auto'
+            ['no_input']='No language selection received; aborting. Pass --lang=zh or --lang=en to choose a language'
             ['option_invalid']='Unknown option'
         )
     fi
@@ -274,12 +286,12 @@ function load_i18n() {
 # 返回值: 无 (直接打印到标准错误输出 >&2，然后 exit 1)
 # =============================================================================
 function _error() {
-    # 用红色打印错误标题
-    printf "${RED}[${I18N_DATA['error']}] ${NC}"
+    # 用红色打印错误标题（全部写 stderr，与注释所述一致）
+    printf "${RED}[${I18N_DATA['error']}] ${NC}" >&2
     # 打印传入的错误消息
-    printf -- "%s" "$@"
+    printf -- "%s" "$@" >&2
     # 打印换行符
-    printf "\n"
+    printf "\n" >&2
     # 退出脚本，错误码为 1
     exit 1
 }
@@ -291,26 +303,26 @@ function _error() {
 # 返回值: 无 (如果不支持则调用 _error 退出)
 # =============================================================================
 function check_os() {
-    # 检查操作系统类型和版本
+    # 检查操作系统类型和版本（下限见 lib/common.sh 的 MIN_* 常量）
     case "$(_os)" in
     # CentOS 系列
     centos)
-        # 检查版本号是否大于等于 7
-        if [[ "$(_os_ver)" -lt 7 ]]; then
+        # 检查版本号是否大于等于 MIN_CENTOS
+        if [[ "$(_os_ver)" -lt "${MIN_CENTOS}" ]]; then
             _error "${I18N_DATA['centos']}"
         fi
         ;;
     # Ubuntu 系列
     ubuntu)
-        # 检查版本号是否大于等于 16
-        if [[ "$(_os_ver)" -lt 16 ]]; then
+        # 检查版本号是否大于等于 MIN_UBUNTU
+        if [[ "$(_os_ver)" -lt "${MIN_UBUNTU}" ]]; then
             _error "${I18N_DATA['ubuntu']}"
         fi
         ;;
     # Debian 系列
     debian)
-        # 检查版本号是否大于等于 9
-        if [[ "$(_os_ver)" -lt 9 ]]; then
+        # 检查版本号是否大于等于 MIN_DEBIAN
+        if [[ "$(_os_ver)" -lt "${MIN_DEBIAN}" ]]; then
             _error "${I18N_DATA['debian']}"
         fi
         ;;
@@ -522,47 +534,85 @@ function validate_xray_script_archive() {
     local expected_version="$2"
     local relative_path=''
     local archive_version=''
+    # 清单 = 运行依赖（脚本 + 模板 + 数据文件）。模板缺失只有在用户选中对应协议或
+    # 功能时才暴露，因此必须在这里拦住；下面的 find 只能校验「已存在的文件」语法正确。
     local -a required_files=(
         'install.sh'
         'core/main.sh'
         'core/handler.sh'
         'core/generate.sh'
         'core/share.sh'
+        'core/check.sh'
+        'core/read.sh'
+        'core/menu.sh'
+        'core/lan.sh'
         'lib/common.sh'
+        'lib/i18n.sh'
+        'lib/log.sh'
+        'lib/system.sh'
+        'lib/firewall.sh'
+        'lib/cert.sh'
+        'lib/transaction.sh'
         'lib/protocols.sh'
+        'service/docker.sh'
+        'service/nginx.sh'
         'service/ssl.sh'
+        'tool/geodata.sh'
+        'tool/traffic.sh'
         'config.json'
         'i18n/zh.json'
         'i18n/en.json'
+        # Xray 协议模板（handler 按 CONFIG_TAG 取 ${SCRIPT_XRAY_DIR}/<tag>.json）
+        'config/xray/Vision.json'
+        'config/xray/XHTTP.json'
+        'config/xray/Trojan.json'
+        'config/xray/Fallback.json'
+        'config/xray/hy2.json'
+        'config/xray/mKCP.json'
+        'config/xray/ss2022.json'
+        'config/xray/CDN.json'
+        'config/xray/SNI.json'
+        # Nginx 模板（cp -af config/nginx/conf/. 整体部署）
+        'config/nginx/conf/nginx.conf'
+        'config/nginx/conf/conf.d/redirect.conf'
+        'config/nginx/conf/conf.d/restrict.conf'
+        'config/nginx/conf/modules-enabled/stream.conf'
+        'config/nginx/conf/nginxconfig.io/general.conf'
+        'config/nginx/conf/nginxconfig.io/grpc.conf'
+        'config/nginx/conf/nginxconfig.io/limit.conf'
+        'config/nginx/conf/nginxconfig.io/limit2.conf'
+        'config/nginx/conf/nginxconfig.io/proxy.conf'
+        'config/nginx/conf/nginxconfig.io/security.conf'
+        'config/nginx/conf/nginxconfig.io/zerossl.conf'
+        'config/nginx/conf/sites-available/cdn.example.com.conf'
+        'config/nginx/conf/sites-available/domain.example.com.conf'
+        'config/nginx/conf/web/cloudreve.conf'
+        # 异地组网导出物（handler_lan_export 逐个 cp 给边缘节点）
+        'config/lan/install-edge.sh'
+        'config/lan/xray-lan-net.sh'
+        'config/lan/xray-lan.service'
+        'config/lan/README.txt'
+        # 容器构建与编排文件
+        'config/cloudflare-warp/Dockerfile'
+        'config/cloudflare-warp/startup.sh'
+        'config/cloudreve/v3/docker-compose.yaml'
+        'config/cloudreve/v4/docker-compose.yaml'
     )
-    local -a shell_files=(
-        'install.sh'
-        'core/main.sh'
-        'core/handler.sh'
-        'core/generate.sh'
-        'core/share.sh'
-        'lib/common.sh'
-        'lib/protocols.sh'
-        'service/ssl.sh'
-    )
-    local -a json_files=(
-        'config.json'
-        'i18n/zh.json'
-        'i18n/en.json'
-    )
-
     valid_script_version "${expected_version}" || return 1
     for relative_path in "${required_files[@]}"; do
         [[ -f "${archive_root}/${relative_path}" &&
             ! -L "${archive_root}/${relative_path}" &&
             -s "${archive_root}/${relative_path}" ]] || return 1
     done
-    for relative_path in "${shell_files[@]}"; do
-        bash -n "${archive_root}/${relative_path}" >/dev/null 2>&1 || return 1
-    done
-    for relative_path in "${json_files[@]}"; do
-        jq empty "${archive_root}/${relative_path}" >/dev/null 2>&1 || return 1
-    done
+    # Validate every shipped script and JSON file. The launcher invokes files
+    # outside the small entry-point set above, so checking only a subset can
+    # leave a broken partial update that passes installation validation.
+    while IFS= read -r -d '' relative_path; do
+        bash -n "${relative_path}" >/dev/null 2>&1 || return 1
+    done < <(find "${archive_root}" -type f -name '*.sh' -print0)
+    while IFS= read -r -d '' relative_path; do
+        jq empty "${relative_path}" >/dev/null 2>&1 || return 1
+    done < <(find "${archive_root}" -type f -name '*.json' -print0)
 
     archive_version="$(jq -r '.version // ""' "${archive_root}/config.json" 2>/dev/null || true)"
     [[ "${archive_version}" == "${expected_version}" ]]
@@ -791,8 +841,14 @@ function check_xray_script_version() {
     if script_version_is_newer "${remote_version}" "${local_version}"; then
         # 如果不一致，则提示用户有新版本
         echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['new']}"
-        # 询问用户是否更新
-        read -rp "${I18N_DATA['now']}" -e is_update
+        # 询问用户是否更新。非交互 stdin（`curl | bash` 时 stdin 就是脚本自身，read 会
+        # 读到脚本文本）与 EOF（Ctrl-D）都不能当成「回车取默认 = 更新」：按不更新处理。
+        if [[ ! -t 0 ]]; then
+            echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['promptly']}"
+            is_update='n'
+        elif ! read -rp "${I18N_DATA['now']}" -e is_update; then
+            is_update='n'
+        fi
 
         # 根据用户选择决定是否更新
         case "${is_update,,}" in # ${is_update,,} 转换为小写
@@ -810,10 +866,10 @@ function check_xray_script_version() {
             sleep 1
             # 打印更新完成信息
             echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['completed']}"
-            # 重启脚本
-            bash "${restart_script}"
-            # 退出脚本，避免重复执行
-            exit 0
+            # 重启脚本：用数组原样转交本次参数（保留空格与特殊字符），
+            # 并把新进程的退出状态作为本进程的退出状态返回。
+            bash "${restart_script}" "${ORIGINAL_ARGS[@]}"
+            exit $?
             ;;
         *)
             # 如果用户选择不更新，则提示及时更新
@@ -838,6 +894,8 @@ function check_xray_script_version() {
 # 返回值: 无 (协调调用其他函数完成整个安装流程)
 # =============================================================================
 function main() {
+    # 保存原始参数：更新后重启新脚本时要原样转交（快捷安装意图、--lang 等都靠它）。
+    ORIGINAL_ARGS=("$@")
     # 解析命令行参数
     parse_args "$@"
     # 加载国际化数据
@@ -917,8 +975,13 @@ function main() {
         # 如果语言未设置且未通过命令行指定，则运行菜单脚本选择语言
         bash "${CORE_DIR}/menu.sh" '--language'
         case $? in
-        2) LANG_PARAM="en" ;; # 选择英文
-        *) LANG_PARAM="zh" ;; # 默认中文
+        2) LANG_PARAM="en" ;;     # 选择英文
+        0 | 1) LANG_PARAM="zh" ;; # 选择中文（0 = 直接回车取默认项）
+        *)
+            # 255 = 菜单在 EOF / 超时下没拿到输入（见 get_choose）。不能当成「选了默认
+            # 中文」：首次安装会在用户完全没参与的情况下定下语言并继续装下去。
+            _error "${I18N_DATA['no_input']}"
+            ;;
         esac
         SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")" ||
             _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_PATH}"

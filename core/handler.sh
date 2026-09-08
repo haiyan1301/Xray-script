@@ -70,7 +70,6 @@ readonly CDN_XRAY_CERT_DIR="${CDN_XRAY_CERT_ROOT}"
 declare SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")"
 declare XRAY_CONFIG=""
 declare LANG_PARAM=''
-declare I18N_DATA=''
 declare -A CONFIG_DATA
 declare NGINX_CONFIG_CHANGED=0
 
@@ -92,11 +91,11 @@ function validate_cdn_split_domains() {
     [[ -n "${downlink}" ]] || return 0
     if ! exec_check '--domain-format' "${uplink}" >/dev/null 2>&1 ||
         ! exec_check '--domain-format' "${downlink}" >/dev/null 2>&1; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_split.domain_invalid")" >&2
         return 1
     fi
     if [[ "${uplink,,}" == "${downlink,,}" ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
         return 1
     fi
 }
@@ -241,7 +240,7 @@ function reject_nginx_action_in_cdn_direct_mode() {
     if ! is_cdn_direct_mode; then
         return 0
     fi
-    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_not_used")" >&2
+    log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_not_used")" >&2
     return 1
 }
 
@@ -413,6 +412,24 @@ function merge_user_route_rules() {
     ')" || return 1
 }
 
+# =============================================================================
+# 函数名称: xray_rules_reset_is_current
+# 功能描述: 判断 .xray.rules.reset=1 是否为「当前脚本版本刚写入」的一次性标志。
+#           旧版本（≤ v2026.09.05）把 reset 默认持久化为 1 且永不复位；升级后第一次
+#           重建会把这个遗留标志当成用户意图，连刚新增的自定义规则一起抹掉，命令却
+#           返回成功。写入方因此同时落一个版本戳 .xray.rules.resetBy：没有戳（旧版本
+#           写的）或戳与当前 .version 不一致（升级前写的）都按遗留处理，只清标志。
+# 参数: 无（读取全局 SCRIPT_CONFIG）
+# 返回值: 0-当前版本写入的标志 1-遗留标志
+# =============================================================================
+function xray_rules_reset_is_current() {
+    local stamped='' current=''
+    stamped="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.rules.resetBy // ""')" || return 1
+    [[ -n "${stamped}" ]] || return 1
+    current="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.version // ""')" || return 1
+    [[ "${stamped}" == "${current}" ]]
+}
+
 function normalize_and_validate_xray_state() {
     SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '
         def state_bit($value):
@@ -422,6 +439,7 @@ function normalize_and_validate_xray_state() {
         .xray.warp = state_bit(.xray.warp) |
         .xray.reverse = state_bit(.xray.reverse) |
         .xray.rules.reset = state_bit(.xray.rules.reset) |
+        .xray.rules.resetBy = ((.xray.rules.resetBy // "") | tostring) |
         .xray.rules.bt = state_bit(.xray.rules.bt) |
         .xray.rules.cn = state_bit(.xray.rules.cn) |
         .xray.rules.ad = state_bit(.xray.rules.ad) |
@@ -514,19 +532,11 @@ function apply_xray_state_transaction() {
     fi
 
     candidate_script_config="${SCRIPT_CONFIG}"
-    new_firewall_rules="$(jq -n \
-        --argjson previous "${previous_script_config}" \
-        --argjson candidate "${candidate_script_config}" '
-        [($candidate.xray.firewallRules // [])[] as $rule |
-            select(any(($previous.xray.firewallRules // [])[]?;
-                .feature == $rule.feature and .backend == $rule.backend and
-                .port == $rule.port and .protocol == $rule.protocol
-            ) | not) | $rule]
-    ' 2>/dev/null || echo '[]')"
+    new_firewall_rules="$(firewall_ledger_delta "${previous_script_config}" "${candidate_script_config}")"
     while IFS= read -r rule; do
         [[ -n "${rule}" ]] || continue
-        if ! remove_owned_firewall_rule "${rule}"; then
-            restore_owned_firewall_rule "${rule}" || true
+        if ! firewall_rule_remove "${rule}"; then
+            firewall_rule_restore "${rule}" || true
             failed_firewall_rules="$(echo "${failed_firewall_rules}" | jq --argjson rule "${rule}" '. + [$rule]')" ||
                 failed_firewall_rules='[]'
         fi
@@ -554,12 +564,7 @@ function apply_xray_state_transaction() {
 # =============================================================================
 # handler.sh 专用函数
 # =============================================================================
-function _error() {
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}" >&2
-    printf -- "%s" "$@" >&2
-    printf "\n" >&2
-    exit 1
-}
+# _error（打印红色错误标题后 exit 1）由 lib/log.sh 统一提供。
 
 function exec_generate() {
     bash "${GENERATE_PATH}" "$@"
@@ -575,6 +580,36 @@ function exec_ssl() {
 
 function exec_check() {
     bash "${CHECK_PATH}" "$@"
+}
+
+# =============================================================================
+# 函数名称: exec_check_dns
+# 功能描述: 调用 core/check.sh 的 DNS 校验，并把本进程探测到的公网地址传下去。
+#           公网地址在一次 handler 调用内只探测一次，避免每个域名都重新请求。
+# 参数:
+#   $1: 待校验的域名
+# 返回值: 与 check.sh --dns 一致
+# =============================================================================
+declare _DNS_PROBE_DONE=0
+declare _DNS_PROBE_IPV4=''
+declare _DNS_PROBE_IPV6=''
+
+function exec_check_dns() {
+    local domain="$1"
+    local status=0
+
+    if [[ "${_DNS_PROBE_DONE}" -eq 0 ]]; then
+        _DNS_PROBE_DONE=1
+        probe_public_ip || true
+        _DNS_PROBE_IPV4="${PUBLIC_IPV4}"
+        _DNS_PROBE_IPV6="${PUBLIC_IPV6}"
+    fi
+    export CHECK_DNS_IP_PROBED=1
+    export CHECK_DNS_EXPECTED_IPV4="${_DNS_PROBE_IPV4}"
+    export CHECK_DNS_EXPECTED_IPV6="${_DNS_PROBE_IPV6}"
+    exec_check '--dns' "${domain}" || status=$?
+    unset CHECK_DNS_IP_PROBED CHECK_DNS_EXPECTED_IPV4 CHECK_DNS_EXPECTED_IPV6
+    return "${status}"
 }
 
 # =============================================================================
@@ -690,8 +725,8 @@ function prompt_cert_reuse() {
     fi
 
     # 显示选择提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.prompt")" >&2
-    echo -e "  ${GREEN}1)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.option_new")" >&2
+    log_config "$(t ".${CUR_FILE}.cert_reuse.prompt")" >&2
+    echo -e "  ${GREEN}1)${NC} $(t ".${CUR_FILE}.cert_reuse.option_new")" >&2
 
     local idx=2
     for cert_domain in "${cert_list[@]}"; do
@@ -709,14 +744,14 @@ function prompt_cert_reuse() {
         fi
         if [[ -n "${cert_file}" && -f "${cert_file}" ]]; then
             expiry_info=$(openssl x509 -enddate -noout -in "${cert_file}" 2>/dev/null | cut -d= -f2)
-            [[ -n "${expiry_info}" ]] && expiry_info=" ($(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.expires"): ${expiry_info})"
+            [[ -n "${expiry_info}" ]] && expiry_info=" ($(t ".${CUR_FILE}.cert_reuse.expires"): ${expiry_info})"
         fi
-        echo -e "  ${GREEN}${idx})${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.option_existing") ${cert_domain}${expiry_info}" >&2
+        echo -e "  ${GREEN}${idx})${NC} $(t ".${CUR_FILE}.cert_reuse.option_existing") ${cert_domain}${expiry_info}" >&2
         ((idx++))
     done
 
     local cert_choice
-    read -r cert_choice
+    cert_choice="$(read_line_or_abort)" || return 1
     cert_choice="${cert_choice:-1}"
 
     if [[ "${cert_choice}" == "1" ]]; then
@@ -770,145 +805,148 @@ function ensure_service_users() {
 #   $1: 配置项名称 (对应 read.sh 的参数，如 port, uuid, domain 等)
 # 返回值: 无 (直接修改全局变量 CONFIG_DATA)
 # =============================================================================
+# =============================================================================
+# exec_read 的字段钩子
+# 字段身份与钩子名由 lib/protocols.sh 的 FIELD_HOOK 统一给出，这里只实现
+# 「校验 / 默认值 / 副作用」。钩子读写全局 FIELD_VALUE，返回非 0 表示输入无效，
+# exec_read 会重新提问（与旧 case 里 continue 的语义一致）。
+# =============================================================================
+declare FIELD_VALUE=''
+
+function field_hook_version() { exec_check '--xray' "${FIELD_VALUE}"; }
+function field_hook_email() { exec_check '--email' "${FIELD_VALUE}"; }
+function field_hook_uuid() { exec_check '--uuid' "${FIELD_VALUE}"; }
+function field_hook_password() { exec_check '--password' "${FIELD_VALUE}"; }
+function field_hook_ss2022_key() { exec_check '--ss2022-key' "${FIELD_VALUE}"; }
+function field_hook_target() { exec_check '--domain' "${FIELD_VALUE}"; }
+function field_hook_reverse_target() { exec_check '--reverse-target' "${FIELD_VALUE}"; }
+function field_hook_dns() { exec_check_dns "${FIELD_VALUE}"; }
+
+function field_hook_default_Y() { FIELD_VALUE="${FIELD_VALUE:-Y}"; }
+function field_hook_default_N() { FIELD_VALUE="${FIELD_VALUE:-N}"; }
+
+function field_hook_port() {
+    exec_check '--port' "${FIELD_VALUE}" || return 1
+    [[ -n "${FIELD_VALUE}" ]] && FIELD_VALUE="$((10#${FIELD_VALUE}))"
+}
+
+function field_hook_reverse_port() {
+    FIELD_VALUE="${FIELD_VALUE:-8443}"
+    exec_check '--port' "${FIELD_VALUE}" || return 1
+    FIELD_VALUE="$((10#${FIELD_VALUE}))"
+}
+
+function field_hook_xhttp_mode() {
+    FIELD_VALUE="${FIELD_VALUE:-auto}"
+    exec_check '--xhttp-mode' "${FIELD_VALUE}" || return 1
+    FIELD_VALUE="${FIELD_VALUE,,}"
+}
+
+function field_hook_domain() {
+    # Reality/SNI 域名仍需解析到当前服务器
+    exec_check_dns "${FIELD_VALUE}" || return 1
+    CONFIG_DATA['target']="${FIELD_VALUE}"
+}
+
+function field_hook_cdn() {
+    local config_tag="${CONFIG_DATA['tag']:-}"
+    local configured_down=''
+
+    [[ -z "${config_tag}" ]] && config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
+    if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
+        # CDN 域名应解析到 CDN 节点，仅校验格式以避免暴露源站 IP
+        exec_check '--domain-format' "${FIELD_VALUE}" || return 1
+        if [[ -z "${CONFIG_DATA['tag']+set}" ]]; then
+            configured_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+            if [[ -n "${configured_down}" && "${FIELD_VALUE,,}" == "${configured_down,,}" ]]; then
+                log_tip "$(t ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+                return 1
+            fi
+        fi
+    else
+        exec_check_dns "${FIELD_VALUE}" || return 1
+    fi
+}
+
+function field_hook_cdn_down() {
+    local uplink_domain=''
+
+    # 下行 CDN 可留空；非空时仅校验格式，避免要求 CDN 域名直解析到源站。
+    [[ -n "${FIELD_VALUE}" ]] || return 0
+    exec_check '--domain-format' "${FIELD_VALUE}" || return 1
+    uplink_domain="${CONFIG_DATA['cdn']:-}"
+    [[ -n "${uplink_domain}" ]] || uplink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    if [[ "${FIELD_VALUE,,}" == "${uplink_domain,,}" ]]; then
+        log_tip "$(t ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+        return 1
+    fi
+}
+
+function field_hook_short() {
+    local value parsed_short_ids='' short_ids_valid=true
+    local -a values=()
+
+    # 空输入只做一次校验后直接放行（与原实现一致）
+    if [[ -z "${FIELD_VALUE}" ]] && exec_check '--short' "${FIELD_VALUE}"; then
+        return 0
+    fi
+    IFS=',' read -r -a values <<<"${FIELD_VALUE}"
+    for value in "${values[@]}"; do
+        if exec_check '--short' "${value}"; then
+            parsed_short_ids+=" ${value}"
+        else
+            short_ids_valid=false
+            break
+        fi
+    done
+    ${short_ids_valid} || return 1
+    CONFIG_DATA['short_ids']="${parsed_short_ids# }"
+}
+
+function field_hook_path() {
+    local config_tag="${CONFIG_DATA['tag']:-}"
+
+    if protocol_uses_xhttp "${config_tag}"; then
+        exec_check '--path-required' "${FIELD_VALUE}" || return 1
+    else
+        exec_check '--path' "${FIELD_VALUE}" || return 1
+    fi
+    FIELD_VALUE="$(normalize_xhttp_path "${FIELD_VALUE}")"
+}
+
+# =============================================================================
+# 函数名称: exec_read
+# 功能描述: 调用 core/read.sh 读取一个字段，并按 lib/protocols.sh 的字段表执行
+#           该字段的校验钩子；钩子返回非 0 时重新提问。
+# 参数:
+#   $1: 字段名（= CONFIG_DATA 的键，见 lib/protocols.sh 的 FIELD_ORDER）
+# 返回值: 0-成功（结果写入 CONFIG_DATA） 1-read.sh 失败或字段未登记
+# =============================================================================
 function exec_read() {
-    local opt="$1"  # 获取配置项名称
-    local flag=true # 初始化循环标志为 true
-    local result    # 声明用于存储 read.sh 输出的局部变量
+    local opt="${1:-}"
+    local flag=true result hook
+
+    if ! field_known "${opt}"; then
+        # 字段表是唯一来源：未登记的名字说明调用方与表已经漂移，直接报错而不是
+        # 静默写入空值（旧实现会继续执行并留下一个空配置项）。
+        log_error "$(t ".${CUR_FILE}.read.unknown_field")${opt}" >&2
+        return 1
+    fi
+
     # 循环直到输入有效 (flag 为 false)
     while ${flag}; do
         # 调用 read.sh 脚本获取用户输入
         result="$(bash "${READ_PATH}" "--${opt}")" || return 1
-        # 根据配置项名称进行特定验证
-        case "${opt}" in
-        version)
-            # 验证 Xray 版本
-            exec_check '--xray' "${result}" || continue
-            ;;
-        email)
-            # 验证邮箱地址
-            exec_check '--email' "${result}" || continue
-            ;;
-        block-bt | block-cn | block-ad)
-            # 为阻止选项设置默认值 'Y'
-            result="${result:-Y}"
-            ;;
-        rules)
-            # 为规则选项设置默认值 'N'
-            result="${result:-N}"
-            ;;
-        port)
-            # 验证端口号
-            exec_check '--port' "${result}" || continue
-            [[ -n "${result}" ]] && result="$((10#${result}))"
-            ;;
-        reverse-port)
-            result="${result:-8443}"
-            exec_check '--port' "${result}" || continue
-            result="$((10#${result}))"
-            ;;
-        reverse-target)
-            exec_check '--reverse-target' "${result}" || continue
-            ;;
-        reverse-uuid)
-            exec_check '--uuid' "${result}" || continue
-            ;;
-        uuid | fallback)
-            # 验证 UUID (fallback 也使用 uuid 验证)
-            exec_check '--uuid' "${result}" || continue
-            ;;
-        seed | password | hy2-auth)
-            # 验证密码、种子或 HY2 auth
-            exec_check '--password' "${result}" || continue
-            ;;
-        ss2022-password)
-            exec_check '--ss2022-key' "${result}" || continue
-            ;;
-        target)
-            # 验证目标域名
-            exec_check '--domain' "${result}" || continue
-            ;;
-        hy2-cert-domain)
-            exec_check '--dns' "${result}" || continue
-            ;;
-        only-change-domain)
-            # 为仅更新域名选项设置默认值 'Y'
-            result="${result:-Y}"
-            ;;
-        domain)
-            # Reality/SNI 域名仍需解析到当前服务器
-            exec_check '--dns' "${result}" || continue
-            CONFIG_DATA['target']="${result}"
-            ;;
-        cdn)
-            local config_tag="${CONFIG_DATA['tag']:-}"
-            [[ -z "${config_tag}" ]] && config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
-            if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
-                # CDN 域名应解析到 CDN 节点，仅校验格式以避免暴露源站 IP
-                exec_check '--domain-format' "${result}" || continue
-                if [[ -z "${CONFIG_DATA['tag']+set}" ]]; then
-                    local configured_down="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
-                    if [[ -n "${configured_down}" && "${result,,}" == "${configured_down,,}" ]]; then
-                        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
-                        continue
-                    fi
-                fi
-            else
-                exec_check '--dns' "${result}" || continue
-            fi
-            ;;
-        cdn-down)
-            # 下行 CDN 可留空；非空时仅校验格式，避免要求 CDN 域名直解析到源站。
-            if [[ -n "${result}" ]]; then
-                exec_check '--domain-format' "${result}" || continue
-                local uplink_domain="${CONFIG_DATA['cdn']:-}"
-                [[ -n "${uplink_domain}" ]] || uplink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-                if [[ "${result,,}" == "${uplink_domain,,}" ]]; then
-                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
-                    continue
-                fi
-            fi
-            ;;
-        short)
-            # 特殊处理 Short IDs
-            # 如果输入为空，进行验证 (可能是检查默认值)
-            [[ -z "${result}" ]] && exec_check '--short' "${result}" && break
-            # 将逗号分隔的输入分割成数组
-            IFS=',' read -r -a values <<<"${result}"
-            local parsed_short_ids=''
-            local short_ids_valid=true
-            # 遍历每个 Short ID 进行验证
-            for value in "${values[@]}"; do
-                if exec_check '--short' "${value}"; then
-                    parsed_short_ids+=" ${value}"
-                else
-                    short_ids_valid=false
-                    break
-                fi
-            done
-            ${short_ids_valid} || continue
-            CONFIG_DATA['short_ids']="${parsed_short_ids# }"
-            ;;
-        path)
-            # 验证路径
-            local config_tag="${CONFIG_DATA['tag']}"
-            if protocol_uses_xhttp "${config_tag}"; then
-                exec_check '--path-required' "${result}" || continue
-            else
-                exec_check '--path' "${result}" || continue
-            fi
-            result="$(normalize_xhttp_path "${result}")"
-            ;;
-        xhttp-mode)
-            result="${result:-auto}"
-            exec_check '--xhttp-mode' "${result}" || continue
-            result="${result,,}"
-            ;;
-        esac
-        # 输入验证通过，设置 flag 为 false 退出循环
-        flag=false
+        FIELD_VALUE="${result}"
+        hook="$(field_hook_name "${opt}")"
+        # 没有钩子的字段原样使用 read.sh 的输出
+        if [[ -z "${hook}" ]] || "${hook}"; then
+            result="${FIELD_VALUE}"
+            flag=false
+        fi
     done
     # 将最终的用户输入结果存储到 CONFIG_DATA 关联数组中
-    CONFIG_DATA["$1"]="${result}"
+    CONFIG_DATA["${opt}"]="${result}"
 }
 
 # =============================================================================
@@ -923,27 +961,31 @@ function map_protocol_choice_to_tag() {
 }
 
 function print_multi_protocol_menu() {
-    echo -e "------------------ $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.protocol_title") ------------------" >&2
-    echo -e "${GREEN}1.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option1') (${GREEN}$(echo "$I18N_DATA" | jq -r '.menu.status.default')${NC})" >&2
-    echo -e "${GREEN}2.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option2')" >&2
-    echo -e "${GREEN}3.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option3')" >&2
-    echo -e "${GREEN}4.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option4')" >&2
-    echo -e "${GREEN}5.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option5')" >&2
-    echo -e "${GREEN}6.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option6')" >&2
-    echo -e "${GREEN}7.${NC} $(echo "$I18N_DATA" | jq -r '.menu.protocol_config.option7')" >&2
+    echo -e "------------------ $(t ".${CUR_FILE}.multi.protocol_title") ------------------" >&2
+    echo -e "${GREEN}1.${NC} $(t '.menu.protocol_config.option1') (${GREEN}$(t '.menu.status.default')${NC})" >&2
+    echo -e "${GREEN}2.${NC} $(t '.menu.protocol_config.option2')" >&2
+    echo -e "${GREEN}3.${NC} $(t '.menu.protocol_config.option3')" >&2
+    echo -e "${GREEN}4.${NC} $(t '.menu.protocol_config.option4')" >&2
+    echo -e "${GREEN}5.${NC} $(t '.menu.protocol_config.option5')" >&2
+    echo -e "${GREEN}6.${NC} $(t '.menu.protocol_config.option6')" >&2
+    echo -e "${GREEN}7.${NC} $(t '.menu.protocol_config.option7')" >&2
     echo -e "----------------------------------------------------------" >&2
 }
 
 function read_multi_protocol_tag() {
     local node_index="$1"
     local choose config_tag
-    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
+    local multi_label="$(t ".${CUR_FILE}.multi.label")"
 
     while true; do
-        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.select_protocol") ${node_index}" >&2
+        echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.select_protocol") ${node_index}" >&2
         print_multi_protocol_menu
-        printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC} $(echo "$I18N_DATA" | jq -r ".menu.choose"): " >&2
-        read -r choose
+        printf "${YELLOW}[$(t '.title.tip')] ${NC} $(t ".menu.choose"): " >&2
+        # EOF / stdin 关闭不能当作「回车选了默认协议」：返回非 0 让调用方中止。
+        if ! IFS= read -r choose; then
+            printf "\n" >&2
+            return 1
+        fi
         choose="${choose:-1}"
 
         if [[ "${choose}" =~ ^[0-9]+$ ]]; then
@@ -958,7 +1000,7 @@ function read_multi_protocol_tag() {
             return 0
         fi
 
-        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.unsupported")" >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.unsupported")" >&2
     done
 }
 
@@ -978,7 +1020,7 @@ function generate_unique_multi_port() {
     shift 2
     local used_ports=("$@")
     local port="${requested}"
-    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
+    local multi_label="$(t ".${CUR_FILE}.multi.label")"
 
     if [[ -z "${port}" ]]; then
         if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
@@ -988,8 +1030,8 @@ function generate_unique_multi_port() {
         fi
     fi
 
-    while [[ "${port}" == '32768' ]] || port_in_list "${port}" "${used_ports[@]}"; do
-        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_conflict" | sed "s/{port}/${port}/g")" >&2
+    while [[ "${port}" == "${XRAY_API_PORT}" ]] || port_in_list "${port}" "${used_ports[@]}"; do
+        echo -e "${YELLOW}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_conflict" | sed "s/{port}/${port}/g")" >&2
         port="$(exec_generate '--port')"
     done
 
@@ -1022,14 +1064,16 @@ function build_multi_node_json() {
         node="$(echo "${node}" | jq --arg key "${ss2022_key}" '.ss2022Key = $key')"
         ;;
     mkcp | vision | xhttp | fallback)
-        local xray_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")"
+        local xray_uuid=''
+        xray_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")" || return 1
         node="$(echo "${node}" | jq --arg uuid "${xray_uuid}" '.uuid = $uuid')"
         ;;
     esac
 
     case "${config_tag,,}" in
     fallback)
-        local fallback_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")"
+        local fallback_uuid=''
+        fallback_uuid="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")" || return 1
         node="$(echo "${node}" | jq --arg uuid "${fallback_uuid}" '.fallback = $uuid')"
         ;;
     mkcp)
@@ -1064,61 +1108,27 @@ function build_multi_node_json() {
 
 function read_multi_node_protocol_fields() {
     local config_tag="$1"
+    local fields field
 
-    case "${config_tag,,}" in
-    trojan)
-        exec_read 'password' || return 1
-        exec_read 'target' || return 1
-        exec_read 'short' || return 1
-        exec_read 'path' || return 1
-        exec_read 'xhttp-mode' || return 1
-        ;;
-    hy2)
-        exec_read 'hy2-auth' || return 1
-        ;;
-    ss2022)
-        exec_read 'ss2022-password' || return 1
-        ;;
-    mkcp)
-        exec_read 'uuid' || return 1
-        exec_read 'seed' || return 1
-        ;;
-    vision)
-        exec_read 'uuid' || return 1
-        exec_read 'target' || return 1
-        exec_read 'short' || return 1
-        ;;
-    xhttp)
-        exec_read 'uuid' || return 1
-        exec_read 'target' || return 1
-        exec_read 'short' || return 1
-        exec_read 'path' || return 1
-        exec_read 'xhttp-mode' || return 1
-        ;;
-    fallback)
-        exec_read 'uuid' || return 1
-        exec_read 'fallback' || return 1
-        exec_read 'target' || return 1
-        exec_read 'short' || return 1
-        exec_read 'path' || return 1
-        exec_read 'xhttp-mode' || return 1
-        ;;
-    *)
-        return 1
-        ;;
-    esac
+    # 字段清单与顺序来自 lib/protocols.sh 的 PROTOCOL_FIELDS；未定义的协议直接失败，
+    # 不再像旧实现那样静默跳过（新增协议忘记补字段时会被立刻发现）。
+    fields="$(protocol_fields "${config_tag}")" || return 1
+    while IFS= read -r field; do
+        [[ -n "${field}" ]] || continue
+        exec_read "${field}" || return 1
+    done <<<"${fields}"
 }
 
 function read_hy2_certificate_config() {
     local cert_source server_ip fullchain privkey cert_server_name suggested_name
 
     while true; do
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.prompt")" >&2
-        read -r cert_source
+        log_config "$(t ".${CUR_FILE}.hy2_cert.prompt")" >&2
+        cert_source="$(read_line_or_abort)" || return 1
         cert_source="${cert_source:-1}"
         case "${cert_source}" in
         1 | 2 | 3) break ;;
-        *) echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.source_invalid")" >&2 ;;
+        *) log_tip "$(t ".${CUR_FILE}.hy2_cert.source_invalid")" >&2 ;;
         esac
     done
 
@@ -1131,49 +1141,49 @@ function read_hy2_certificate_config() {
         CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
         ;;
     2)
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
+        log_config "$(t ".${CUR_FILE}.hy2_cert.ip_prompt")" >&2
         server_ip="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
         if [[ -z "${server_ip}" ]] || ! exec_check '--ip' "${server_ip}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.ip_fetch_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.hy2_cert.ip_fetch_fail")" >&2
             return 1
         fi
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.detected_ip") ${server_ip}" >&2
+        log_info "$(t ".${CUR_FILE}.hy2_cert.detected_ip") ${server_ip}" >&2
         CONFIG_DATA['hy2_cert_domain']="${server_ip}"
         exec_read 'email' || return 1
         CONFIG_DATA['hy2_cert_email']="${CONFIG_DATA['email']}"
         ;;
     3)
         while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.fullchain")" >&2
-            read -r fullchain
+            log_config "$(t ".${CUR_FILE}.hy2_cert.fullchain")" >&2
+            fullchain="$(read_line_or_abort)" || return 1
             fullchain="$(echo "${fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -f "${fullchain}" && -r "${fullchain}" ]] && break
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+            log_tip "$(t ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
         done
         while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.privkey")" >&2
-            read -r privkey
+            log_config "$(t ".${CUR_FILE}.hy2_cert.privkey")" >&2
+            privkey="$(read_line_or_abort)" || return 1
             privkey="$(echo "${privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -f "${privkey}" && -r "${privkey}" ]] && break
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+            log_tip "$(t ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
         done
         if ! validate_tls_certificate_pair "${fullchain}" "${privkey}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.pair_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.hy2_cert.pair_invalid")" >&2
             return 1
         fi
 
         suggested_name="$(extract_certificate_server_name "${fullchain}")"
         while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.server_name")${suggested_name:+ [${suggested_name}]}: " >&2
-            read -r cert_server_name
+            log_config "$(t ".${CUR_FILE}.hy2_cert.server_name")${suggested_name:+ [${suggested_name}]}: " >&2
+            cert_server_name="$(read_line_or_abort)" || return 1
             cert_server_name="${cert_server_name:-${suggested_name}}"
             if [[ -z "${cert_server_name}" ]] ||
                 { ! exec_check '--ip' "${cert_server_name}" >/dev/null 2>&1 && ! exec_check '--domain-format' "${cert_server_name}" >/dev/null 2>&1; }; then
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.name_invalid")" >&2
+                log_tip "$(t ".${CUR_FILE}.hy2_cert.name_invalid")" >&2
                 continue
             fi
             if ! certificate_matches_server_name "${fullchain}" "${cert_server_name}"; then
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.name_mismatch")" >&2
+                log_tip "$(t ".${CUR_FILE}.hy2_cert.name_mismatch")" >&2
                 continue
             fi
             break
@@ -1186,13 +1196,11 @@ function read_hy2_certificate_config() {
 }
 
 function validate_tls_certificate_pair() {
-    local fullchain="$1"
-    local privkey="$2"
-    local cert_public_key key_public_key
-
-    cert_public_key="$(openssl x509 -in "${fullchain}" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform PEM 2>/dev/null)" || return 1
-    key_public_key="$(openssl pkey -in "${privkey}" -pubout -outform PEM 2>/dev/null)" || return 1
-    [[ -n "${cert_public_key}" && "${cert_public_key}" == "${key_public_key}" ]]
+    # 公钥匹配 + 未过期，实现与 service/ssl.sh 共用（lib/cert.sh）。
+    # 与收敛前的本函数相比多了「可读」与「未过期」两条判定（迁移前只比对公钥），
+    # 属于刻意收紧：过期证书在后续 validate_cdn_direct_certificate 处也会被拒，
+    # 这里只是把拒绝时机提前到输入/复用阶段，避免带着废证书走完整个流程。
+    cert_validate_pair "$1" "$2"
 }
 
 function extract_certificate_server_name() {
@@ -1307,7 +1315,7 @@ function handler_read_multi_xray_config() {
     local multi_vless_enc_enable=''
     local multi_mldsa65_enable=''
     local multi_github_proxy=''
-    local multi_label="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.label")"
+    local multi_label="$(t ".${CUR_FILE}.multi.label")"
 
     reset_config_data
     CONFIG_DATA['tag']='multi'
@@ -1324,30 +1332,31 @@ function handler_read_multi_xray_config() {
     local multi_block_ad="${CONFIG_DATA['block-ad']:-N}"
 
     while true; do
-        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.node_count_prompt")" >&2
+        echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.node_count_prompt")" >&2
         read -r node_count || return 1
         node_count="${node_count:-2}"
         if [[ "${node_count}" =~ ^[0-9]{1,3}$ ]]; then
             node_count="$((10#${node_count}))"
             [[ "${node_count}" -ge 2 && "${node_count}" -le 100 ]] && break
         fi
-        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.node_count_invalid")" >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.node_count_invalid")" >&2
     done
 
     local i
     for ((i = 1; i <= node_count; i++)); do
         local config_tag
-        config_tag="$(read_multi_protocol_tag "${i}")"
+        # read_multi_protocol_tag 在 stdin 关闭时返回 1：中止整个多节点流程。
+        config_tag="$(read_multi_protocol_tag "${i}")" || return 1
 
         reset_config_data
         CONFIG_DATA['tag']="${config_tag}"
 
-        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_prompt")" >&2
+        echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_prompt")" >&2
         exec_read 'port' || return 1
         local xray_port
         xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")"
         used_ports+=("${xray_port}")
-        echo -e "${GREEN}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.port_assigned" | sed "s/{port}/${xray_port}/g")" >&2
+        echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_assigned" | sed "s/{port}/${xray_port}/g")" >&2
 
         read_multi_node_protocol_fields "${config_tag}" || return 1
 
@@ -1377,7 +1386,7 @@ function handler_read_multi_xray_config() {
     fi
 
     if [[ "${has_hy2}" == 'y' ]]; then
-        echo -e "${YELLOW}[${multi_label}]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.hy2_shared_cert")" >&2
+        echo -e "${YELLOW}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.hy2_shared_cert")" >&2
         read_hy2_certificate_config || return 1
     fi
 
@@ -1534,7 +1543,7 @@ function handler_routing() {
     # 检查 WARP 状态是否满足配置要求
     # 如果是 warp 规则但 WARP 未启用，则报错
     if [[ "${rule_type}" == 'warp' && ${WARP_STATUS} -ne 1 ]]; then
-        _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.warp.status")"
+        _error "$(t ".${CUR_FILE}.warp.status")"
     fi
     # 调用 exec_read 读取用户输入的规则值
     exec_read "${rule_tag}" || return 1
@@ -1589,7 +1598,7 @@ function handler_set_cdn_backend() {
     case "${requested_backend}" in
     nginx | xray) ;;
     *)
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.backend_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_direct.backend_invalid")" >&2
         return 1
         ;;
     esac
@@ -1616,7 +1625,7 @@ function handler_set_cdn_backend() {
 # =============================================================================
 function handler_script_config() {
     # 打印绿色的配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.script.config_update")" >&2
+    log_config "$(t ".${CUR_FILE}.script.config_update")" >&2
     # 重置脚本配置 (默认重置 xray 部分)
     handler_reset_script_config
     # 从 CONFIG_DATA 或生成器获取配置值
@@ -1630,12 +1639,14 @@ function handler_script_config() {
     local XRAY_RULES_CN="${CONFIG_DATA['block-cn']}"
     # 获取 block ad 状态
     local XRAY_RULES_AD="${CONFIG_DATA['block-ad']}"
-    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
+    if protocol_is_multi_config "${CONFIG_TAG}"; then
         local MULTI_NODES="${CONFIG_DATA['nodes_json']:-[]}"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset != "n" then .xray.rules.reset = 1 else .xray.rules.reset = 0 end ')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg bt "${XRAY_RULES_BT,,}" ' if $bt != "n" then .xray.rules.bt = 1 else .xray.rules.bt = 0 end ')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn != "n" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad != "n" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
+        # 只有用户显式回答 y 才算「重置规则」：字段未提问（例如 rules=n 时不再追问
+        # block-*）留下的空值不能当成 y，否则会静默清空已保存的自定义规则。
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset == "y" then (.xray.rules.reset = 1 | .xray.rules.resetBy = (.version // "")) else (.xray.rules.reset = 0 | .xray.rules.resetBy = "") end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg bt "${XRAY_RULES_BT,,}" ' if $bt == "y" then .xray.rules.bt = 1 else .xray.rules.bt = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn == "y" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad == "y" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg tag "${CONFIG_TAG}" '.xray.tag = $tag')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${MULTI_NODES}" '.xray.nodes = $nodes')"
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.port = ((.xray.nodes[0].port // 443) | tonumber)')"
@@ -1677,8 +1688,12 @@ function handler_script_config() {
     local XHTTP_PATH=''
     local XHTTP_MODE="${CONFIG_DATA['xhttp-mode']:-auto}"
 
-    protocol_uses_vless_enc "${CONFIG_TAG}" && XRAY_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")"
-    [[ "${CONFIG_TAG,,}" == 'fallback' || "${CONFIG_TAG,,}" == 'sni' ]] && FALLBACK_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")"
+    if protocol_uses_vless_enc "${CONFIG_TAG}"; then
+        XRAY_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['uuid']}")" || return 1
+    fi
+    if [[ "${CONFIG_TAG,,}" == 'fallback' || "${CONFIG_TAG,,}" == 'sni' ]]; then
+        FALLBACK_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")" || return 1
+    fi
     [[ "${CONFIG_TAG,,}" == 'trojan' ]] && TROJAN_PASSWORD="${CONFIG_DATA['password']:-$(exec_generate '--password')}"
     [[ "${CONFIG_TAG,,}" == 'mkcp' ]] && KCP_SEED="${CONFIG_DATA['seed']:-$(exec_generate '--password')}"
     protocol_uses_xhttp "${CONFIG_TAG}" && XHTTP_PATH="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
@@ -1698,13 +1713,13 @@ function handler_script_config() {
     local CDN_DOWN_DOMAIN="${CONFIG_DATA['cdn-down']:-}"
     local CA_EMAIL="${CONFIG_DATA['email']}"
     # 更新脚本配置中的规则状态
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset != "n" then .xray.rules.reset = 1 else .xray.rules.reset = 0 end ')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg reset "${XRAY_RULES_STATUS,,}" ' if $reset == "y" then (.xray.rules.reset = 1 | .xray.rules.resetBy = (.version // "")) else (.xray.rules.reset = 0 | .xray.rules.resetBy = "") end ')"
     # 更新脚本配置中的 block bt 状态
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg bt "${XRAY_RULES_BT,,}" ' if $bt != "n" then .xray.rules.bt = 1 else .xray.rules.bt = 0 end ')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg bt "${XRAY_RULES_BT,,}" ' if $bt == "y" then .xray.rules.bt = 1 else .xray.rules.bt = 0 end ')"
     # 更新脚本配置中的 block cn 状态
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn != "n" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg cn "${XRAY_RULES_CN,,}" ' if $cn == "y" then .xray.rules.cn = 1 else .xray.rules.cn = 0 end ')"
     # 更新脚本配置中的 block ad 状态
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad != "n" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg ad "${XRAY_RULES_AD,,}" ' if $ad == "y" then .xray.rules.ad = 1 else .xray.rules.ad = 0 end ')"
     # 根据配置标签更新特定字段
     case "${CONFIG_TAG,,}" in
     trojan)
@@ -1723,11 +1738,11 @@ function handler_script_config() {
         # 更新 SS2022 pre-shared key
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${SS2022_KEY}" '.xray.ss2022Key = $key')"
         ;;
-    mkcp | vision | xhttp | fallback | sni | cdn)
-        # 更新 UUID
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.xray.uuid = $uuid')"
-        ;;
     esac
+    if protocol_uses_vless_enc "${CONFIG_TAG}"; then
+        # 更新 UUID（使用 VLESS encryption 的协议都带 uuid）
+        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg uuid "${XRAY_UUID}" '.xray.uuid = $uuid')"
+    fi
     # 根据配置标签更新特定字段 (第二部分)
     case "${CONFIG_TAG,,}" in
     fallback)
@@ -1840,18 +1855,18 @@ function handler_script_config() {
 # =============================================================================
 function handler_x25519_config() {
     # 打印绿色的配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.script.config_update")" >&2
+    log_config "$(t ".${CUR_FILE}.script.config_update")" >&2
     # 生成 X25519 密钥对
     local X25519
     if ! X25519="$(exec_generate '--x25519')"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.x25519.generate_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.x25519.generate_fail")" >&2
         return 1
     fi
 
     local PRIVATE_KEY PUBLIC_KEY HASH32
     IFS=',' read -r PRIVATE_KEY PUBLIC_KEY HASH32 <<<"${X25519}"
     if [[ -z "${PRIVATE_KEY}" || -z "${PUBLIC_KEY}" ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.x25519.generate_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.x25519.generate_fail")" >&2
         return 1
     fi
 
@@ -1862,7 +1877,7 @@ function handler_x25519_config() {
     # 将更新后的脚本配置写入文件
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
     # 私钥只写入受限配置文件，不打印到安装日志。
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.x25519.generated")" >&2
+    log_info "$(t ".${CUR_FILE}.x25519.generated")" >&2
 }
 
 # =============================================================================
@@ -1890,18 +1905,18 @@ function handler_mldsa65_config() {
         return 0
     fi
     # 打印绿色的配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generating")" >&2
+    log_config "$(t ".${CUR_FILE}.mldsa.generating")" >&2
     # 生成 ML-DSA-65 密钥对
     local MLDSA65
     if ! MLDSA65="$(exec_generate '--mldsa65')"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generate_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.mldsa.generate_fail")" >&2
         return 1
     fi
 
     local MLDSA65_SEED MLDSA65_VERIFY
     IFS=',' read -r MLDSA65_SEED MLDSA65_VERIFY <<<"${MLDSA65}"
     if [[ -z "${MLDSA65_SEED}" || -z "${MLDSA65_VERIFY}" ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generate_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.mldsa.generate_fail")" >&2
         return 1
     fi
 
@@ -1916,7 +1931,7 @@ function handler_mldsa65_config() {
     # 将更新后的脚本配置写入文件
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
     # Seed 是服务端私密材料，不打印到终端。
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.generated")" >&2
+    log_info "$(t ".${CUR_FILE}.mldsa.generated")" >&2
 }
 
 function configured_mldsa65_enable() {
@@ -1943,388 +1958,11 @@ function handler_reality_key_config() {
     handler_mldsa65_config "$(configured_mldsa65_enable)" || return 1
 }
 
-# =============================================================================
-# 函数名称: handler_xray_config
-# 功能描述: 处理并更新 Xray 核心配置文件 (/usr/local/etc/xray/config.json)。
-#           1. 打印配置更新提示。
-#           2. 从脚本配置中读取各项参数。
-#           3. 加载对应配置标签的模板文件。
-#           4. 根据配置标签和参数替换模板中的占位符。
-#           5. 处理路由规则 (保留当前规则或重置并添加默认规则)。
-#           6. 将更新后的配置写回 XRAY_CONFIG_PATH 和 SCRIPT_CONFIG_PATH 文件。
-# 参数: 无
-# 返回值: 无 (直接修改 XRAY_CONFIG 全局变量和 XRAY_CONFIG_PATH/SCRIPT_CONFIG_PATH 文件)
-# =============================================================================
-function open_xray_firewall_port() {
-    local port="$1"
-    local protocol="$2"
-    local firewall_ok=0
-    local ufw_available=0
-    local firewalld_available=0
-    local firewalld_rule_preexisting=0
-    local firewalld_query_status=0
-    local ufw_status=''
-    local firewalld_status=''
-
-    [[ -z "${port}" || -z "${protocol}" ]] && return 0
-
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_open") ${port}/${protocol}" >&2
-    if command -v ufw &>/dev/null; then
-        ufw_available=1
-        ufw_status="$(ufw status 2>/dev/null || true)"
-    fi
-    if command -v firewall-cmd &>/dev/null; then
-        firewalld_available=1
-        firewalld_status="$(firewall-cmd --state 2>/dev/null || true)"
-    fi
-
-    if [[ "${ufw_available}" -eq 1 ]] && grep -Eiq '^Status:[[:space:]]+active([[:space:]]|$)' <<<"${ufw_status}"; then
-        ufw allow "${port}"/"${protocol}" >/dev/null 2>&1 && firewall_ok=1
-    elif [[ "${firewalld_available}" -eq 1 && "${firewalld_status,,}" == 'running' ]]; then
-        firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1
-        firewalld_query_status=$?
-        case "${firewalld_query_status}" in
-        0) firewalld_rule_preexisting=1 ;;
-        1) firewalld_rule_preexisting=0 ;;
-        *) return 1 ;;
-        esac
-        if firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1; then
-            if firewall-cmd --reload >/dev/null 2>&1; then
-                firewall_ok=1
-            elif [[ "${firewalld_rule_preexisting}" -eq 0 ]]; then
-                firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 || true
-                firewall-cmd --reload >/dev/null 2>&1 || true
-            fi
-        fi
-    elif [[ "${ufw_available}" -eq 1 || "${firewalld_available}" -eq 1 ]]; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_inactive")" >&2
-        return 0
-    elif command -v iptables &>/dev/null; then
-        if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
-            iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-            firewall_ok=1
-        fi
-        if command -v ip6tables &>/dev/null; then
-            ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
-                ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || true
-        fi
-    else
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_skip")" >&2
-        return 0
-    fi
-
-    if [[ "${firewall_ok}" -ne 1 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_fail") ${port}/${protocol}" >&2
-        return 1
-    fi
-
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.firewall_ok")" >&2
-}
-
-function owned_firewall_rule_exists() {
-    local rule="$1"
-    local backend port protocol ipv4 ipv6 status
-    backend="$(echo "${rule}" | jq -er '.backend')" || return 2
-    port="$(echo "${rule}" | jq -er '.port')" || return 2
-    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 2
-    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 2
-    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 2
-
-    case "${backend}" in
-    ufw)
-        command -v ufw &>/dev/null || return 2
-        status="$(ufw show added 2>/dev/null)" || return 2
-        grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)" <<<"${status}"
-        ;;
-    firewalld)
-        command -v firewall-cmd &>/dev/null || return 2
-        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 2
-        firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1
-        ;;
-    iptables)
-        local present=1
-        if [[ "${ipv4}" == 'true' ]]; then
-            command -v iptables &>/dev/null || return 2
-            if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-                present=0
-            else
-                iptables -S INPUT >/dev/null 2>&1 || return 2
-            fi
-        fi
-        if [[ "${ipv6}" == 'true' ]]; then
-            command -v ip6tables &>/dev/null || return 2
-            if ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-                present=0
-            else
-                ip6tables -S INPUT >/dev/null 2>&1 || return 2
-            fi
-        fi
-        return "${present}"
-        ;;
-    *) return 2 ;;
-    esac
-}
-
-function remove_owned_firewall_rule_fields() {
-    local backend="$1"
-    local port="$2"
-    local protocol="$3"
-    local ipv4="$4"
-    local ipv6="$5"
-    case "${backend}" in
-    ufw)
-        command -v ufw &>/dev/null || return 1
-        if ufw show added 2>/dev/null |
-            grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)"; then
-            ufw delete allow "${port}"/"${protocol}" >/dev/null 2>&1
-        fi
-        ;;
-    firewalld)
-        command -v firewall-cmd &>/dev/null || return 1
-        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 1
-        if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
-            firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
-                firewall-cmd --reload >/dev/null 2>&1
-        fi
-        ;;
-    iptables)
-        if [[ "${ipv4}" == 'true' ]]; then
-            command -v iptables &>/dev/null || return 1
-            if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-                iptables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
-            fi
-        fi
-        if [[ "${ipv6}" == 'true' ]]; then
-            command -v ip6tables &>/dev/null || return 1
-            if ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-                ip6tables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
-            fi
-        fi
-        ;;
-    *) return 1 ;;
-    esac
-}
-
-function remove_owned_firewall_rule() {
-    local rule="$1"
-    local backend port protocol ipv4 ipv6
-    backend="$(echo "${rule}" | jq -er '.backend')" || return 1
-    port="$(echo "${rule}" | jq -er '.port')" || return 1
-    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 1
-    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 1
-    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 1
-    remove_owned_firewall_rule_fields \
-        "${backend}" "${port}" "${protocol}" "${ipv4}" "${ipv6}"
-}
-
-function restore_owned_firewall_rule() {
-    local rule="$1"
-    local backend port protocol ipv4 ipv6 status
-    backend="$(echo "${rule}" | jq -er '.backend')" || return 1
-    port="$(echo "${rule}" | jq -er '.port')" || return 1
-    protocol="$(echo "${rule}" | jq -er '.protocol')" || return 1
-    ipv4="$(echo "${rule}" | jq -er '.ipv4')" || return 1
-    ipv6="$(echo "${rule}" | jq -er '.ipv6')" || return 1
-
-    case "${backend}" in
-    ufw)
-        command -v ufw &>/dev/null || return 1
-        status="$(ufw show added 2>/dev/null)" || return 1
-        grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)" <<<"${status}" ||
-            ufw allow "${port}"/"${protocol}" >/dev/null 2>&1
-        ;;
-    firewalld)
-        command -v firewall-cmd &>/dev/null || return 1
-        [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 1
-        if ! firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
-            firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
-                firewall-cmd --reload >/dev/null 2>&1
-        fi
-        ;;
-    iptables)
-        if [[ "${ipv4}" == 'true' ]]; then
-            command -v iptables &>/dev/null || return 1
-            iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
-                iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
-        fi
-        if [[ "${ipv6}" == 'true' ]]; then
-            command -v ip6tables &>/dev/null || return 1
-            ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null ||
-                ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
-        fi
-        ;;
-    *) return 1 ;;
-    esac
-}
-
-function restore_owned_firewall_rules() {
-    local rule restore_status=0
-    for rule in "$@"; do
-        restore_owned_firewall_rule "${rule}" || restore_status=1
-    done
-    return "${restore_status}"
-}
-
-function open_owned_firewall_port() {
-    local feature="$1"
-    local port="$2"
-    local protocol="$3"
-    local backend='' ipv4=false ipv6=false rule existing_rule
-    local ufw_status firewalld_status previous_script_config updated_script_config
-
-    [[ "${port}" =~ ^[0-9]+$ ]] || return 1
-    port=$((10#${port}))
-    ((port >= 1 && port <= 65535)) || return 1
-    [[ "${protocol}" =~ ^(tcp|udp)$ ]] || return 1
-    existing_rule="$(echo "${SCRIPT_CONFIG}" | jq -cr \
-        --arg feature "${feature}" --argjson port "${port}" --arg protocol "${protocol}" \
-        '[.xray.firewallRules[]? | select(.feature == $feature and .port == $port and .protocol == $protocol)][0] // empty')" ||
-        return 1
-    if [[ -n "${existing_rule}" ]]; then
-        restore_owned_firewall_rule "${existing_rule}"
-        return $?
-    fi
-
-    if command -v ufw &>/dev/null; then
-        ufw_status="$(ufw status 2>/dev/null || true)"
-        if grep -Eiq '^Status:[[:space:]]+active([[:space:]]|$)' <<<"${ufw_status}"; then
-            if grep -Eq "^${port}/${protocol}[[:space:]]+ALLOW([[:space:]]|$)" <<<"${ufw_status}"; then
-                return 0
-            fi
-            ufw allow "${port}"/"${protocol}" >/dev/null 2>&1 || return 1
-            backend='ufw'
-        else
-            return 0
-        fi
-    elif command -v firewall-cmd &>/dev/null; then
-        firewalld_status="$(firewall-cmd --state 2>/dev/null || true)"
-        [[ "${firewalld_status,,}" == 'running' ]] || return 0
-        if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
-            return 0
-        fi
-        firewall-cmd --permanent --add-port="${port}"/"${protocol}" >/dev/null 2>&1 || return 1
-        if ! firewall-cmd --reload >/dev/null 2>&1; then
-            firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 || true
-            return 1
-        fi
-        backend='firewalld'
-    elif command -v iptables &>/dev/null; then
-        if ! iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-            iptables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null || return 1
-            ipv4=true
-        fi
-        if command -v ip6tables &>/dev/null &&
-            ! ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-            if ip6tables -I INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
-                ipv6=true
-            fi
-        fi
-        [[ "${ipv4}" == 'true' || "${ipv6}" == 'true' ]] || return 0
-        backend='iptables'
-    else
-        return 0
-    fi
-
-    rule="$(jq -n \
-        --arg feature "${feature}" --arg backend "${backend}" \
-        --argjson port "${port}" --arg protocol "${protocol}" \
-        --argjson ipv4 "${ipv4}" --argjson ipv6 "${ipv6}" \
-        '{feature:$feature,backend:$backend,port:$port,protocol:$protocol,ipv4:$ipv4,ipv6:$ipv6}')" || {
-        remove_owned_firewall_rule_fields \
-            "${backend}" "${port}" "${protocol}" "${ipv4}" "${ipv6}" || true
-        return 1
-    }
-    previous_script_config="${SCRIPT_CONFIG}"
-    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq --argjson rule "${rule}" '
-        .xray.firewallRules = ((.xray.firewallRules // []) + [$rule] | unique_by([.feature,.port,.protocol]))
-    ')" || {
-        remove_owned_firewall_rule "${rule}" || true
-        SCRIPT_CONFIG="${previous_script_config}"
-        return 1
-    }
-    SCRIPT_CONFIG="${updated_script_config}"
-    if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
-        if remove_owned_firewall_rule "${rule}"; then
-            SCRIPT_CONFIG="${previous_script_config}"
-        else
-            # Keep the ownership record in memory so the outer state
-            # transaction can retry removal or persist the unresolved rule.
-            SCRIPT_CONFIG="${updated_script_config}"
-        fi
-        return 1
-    fi
-}
-
-function close_owned_firewall_ports() {
-    local feature="$1"
-    local port="${2:-}"
-    local defer_write="${3:-0}"
-    local records rule existence_status updated_script_config
-    local previous_script_config="${SCRIPT_CONFIG}"
-    local -a removed_rules=()
-    records="$(echo "${SCRIPT_CONFIG}" | jq -c \
-        --arg feature "${feature}" --arg port "${port}" '
-        [.xray.firewallRules[]? | select(.feature == $feature and ($port == "" or (.port | tostring) == $port))]
-    ')" || return 1
-
-    while IFS= read -r rule; do
-        [[ -n "${rule}" ]] || continue
-        if owned_firewall_rule_exists "${rule}"; then
-            remove_owned_firewall_rule "${rule}" || {
-                restore_owned_firewall_rule "${rule}" ||
-                    echo 'Firewall rollback failed for the current owned port.' >&2
-                restore_owned_firewall_rules "${removed_rules[@]}" ||
-                    echo 'Firewall rollback failed while closing owned ports.' >&2
-                return 1
-            }
-            removed_rules+=("${rule}")
-        else
-            existence_status=$?
-            if [[ "${existence_status}" -eq 2 ]]; then
-                restore_owned_firewall_rules "${removed_rules[@]}" ||
-                    echo 'Firewall rollback failed while closing owned ports.' >&2
-                return 1
-            fi
-        fi
-    done < <(echo "${records}" | jq -c '.[]')
-    updated_script_config="$(echo "${SCRIPT_CONFIG}" | jq \
-        --arg feature "${feature}" --arg port "${port}" '
-        .xray.firewallRules = [
-            .xray.firewallRules[]? |
-            select(.feature != $feature or ($port != "" and (.port | tostring) != $port))
-        ]
-    ')" || {
-        restore_owned_firewall_rules "${removed_rules[@]}" ||
-            echo 'Firewall rollback failed after state update failure.' >&2
-        return 1
-    }
-    SCRIPT_CONFIG="${updated_script_config}"
-    if [[ "${defer_write}" -eq 1 ]]; then
-        return 0
-    fi
-    if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
-        SCRIPT_CONFIG="${previous_script_config}"
-        restore_owned_firewall_rules "${removed_rules[@]}" ||
-            echo 'Firewall rollback failed after configuration write failure.' >&2
-        return 1
-    fi
-}
-
-function restore_owned_firewall_feature_state() {
-    local previous_script_config="$1"
-    local feature="$2"
-    local port="$3"
-    local protocol="$4"
-    local restore_status=0
-
-    SCRIPT_CONFIG="${previous_script_config}"
-    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || restore_status=1
-    open_owned_firewall_port "${feature}" "${port}" "${protocol}" || restore_status=1
-    if [[ "${restore_status}" -ne 0 ]]; then
-        echo "Failed to restore ${feature} firewall ownership state." >&2
-    fi
-    return "${restore_status}"
-}
+# 防火墙放行规则的实现已全部收敛到 lib/firewall.sh（由 lib/common.sh 聚合引入）：
+#   firewall_owned_open / firewall_owned_close / firewall_owned_restore_feature
+#   firewall_rule_exists / firewall_rule_remove / firewall_rule_restore
+# 旧的 open_xray_firewall_port 只改防火墙不记账本，卸载时无法回收，已删除；
+# 其调用点改用 firewall_owned_open，历史遗留规则由 handler_legacy_firewall_sweep 回收。
 
 function multi_upsert_route_rule() {
     local rule="$1"
@@ -2363,6 +2001,9 @@ function multi_add_optional_block_rules() {
     fi
 }
 
+# current_node_tags 已下沉到 lib/protocols.sh（core/check.sh 等不加载 handler 的
+# 进程也要用它判定 multi 节点集合）。
+
 function handler_multi_firewall_ports() {
     local nodes="$(echo "${SCRIPT_CONFIG}" | jq -c '.xray.nodes // []')"
     local node_count="$(echo "${nodes}" | jq 'length')"
@@ -2372,19 +2013,14 @@ function handler_multi_firewall_ports() {
         local node="$(echo "${nodes}" | jq -c --argjson i "${i}" '.[$i]')"
         local node_tag="$(echo "${node}" | jq -r '.tag | ascii_downcase')"
         local node_port="$(echo "${node}" | jq -r '.port')"
+        local transports transport
 
-        case "${node_tag}" in
-        vision | xhttp | trojan | fallback)
-            open_xray_firewall_port "${node_port}" tcp || return 1
-            ;;
-        mkcp | hy2)
-            open_xray_firewall_port "${node_port}" udp || return 1
-            ;;
-        ss2022)
-            open_xray_firewall_port "${node_port}" tcp || return 1
-            open_xray_firewall_port "${node_port}" udp || return 1
-            ;;
-        esac
+        transports="$(protocol_firewall_transports "${node_tag}")"
+        while IFS= read -r transport; do
+            [[ -n "${transport}" ]] || continue
+            # feature 按节点命名，卸载/回滚时能逐个节点精确回收。
+            firewall_owned_open "node:${node_tag}" "${node_port}" "${transport}" || return 1
+        done <<<"${transports}"
     done
 }
 
@@ -2400,13 +2036,20 @@ function handler_multi_xray_config() {
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"
     local XRAY_RULES
     XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
+    # reset 是一次性动作，且只认当前脚本版本写入的标志（见
+    # xray_rules_reset_is_current）：本次重建丢弃已保存的用户规则，生成结束时把标志
+    # 复位，否则「重置」会变成持久状态，之后每次重建（含 handler_routing 新增规则）
+    # 都会再把用户规则抹掉一次。
+    if [[ "${XRAY_RULES_STATUS}" -eq 1 ]] && xray_rules_reset_is_current; then
+        XRAY_RULES='[]'
+    fi
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
 
     if [[ "${node_count}" -eq 0 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.multi.no_nodes")" >&2
+        log_error "$(t ".${CUR_FILE}.multi.no_nodes")" >&2
         return 1
     fi
 
@@ -2434,11 +2077,10 @@ function handler_multi_xray_config() {
     fi
 
     XRAY_CONFIG="$(jq '.inbounds = [.inbounds[0]]' "${SCRIPT_XRAY_DIR}/XHTTP.json")" || return 1
-    if [[ "${XRAY_RULES_STATUS}" -eq 0 ]]; then
-        merge_user_route_rules "${XRAY_RULES}" || return 1
-    fi
+    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）。
+    merge_user_route_rules "${XRAY_RULES}" || return 1
 
-    local used_listen_ports=("32768")
+    local used_listen_ports=("${XRAY_API_PORT}")
     local i
     for ((i = 0; i < node_count; i++)); do
         local configured_port
@@ -2486,7 +2128,7 @@ function handler_multi_xray_config() {
             local node_target="$(echo "${node}" | jq -r '.target')"
             local server_names="$(echo "${node}" | jq -c '.serverNames // []')"
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
-            local anti_port=$((32768 + suffix))
+            local anti_port=$((XRAY_API_PORT + suffix))
             while port_in_list "${anti_port}" "${used_listen_ports[@]}"; do
                 anti_port=$((anti_port + 1))
             done
@@ -2523,7 +2165,7 @@ function handler_multi_xray_config() {
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
             local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
             if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
                 return 1
             fi
             nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
@@ -2554,7 +2196,7 @@ function handler_multi_xray_config() {
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
             local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
             if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
                 return 1
             fi
             nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
@@ -2586,7 +2228,7 @@ function handler_multi_xray_config() {
             local short_ids="$(echo "${node}" | jq -c '.shortIds // [""]')"
             local xhttp_path="$(normalize_xhttp_path "$(echo "${node}" | jq -r '.path // ""')")"
             if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+                log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
                 return 1
             fi
             nodes="$(echo "${nodes}" | jq --argjson i "${i}" --arg path "${xhttp_path}" '.[$i].path = $path')" || return 1
@@ -2643,9 +2285,9 @@ function handler_multi_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson node_inbounds "${node_inbounds}" '.inbounds += $node_inbounds')"
     done
 
-    if [[ "${XRAY_RULES_STATUS}" -eq 1 ]]; then
-        multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}" || return 1
-    fi
+    # 可选默认拦截规则只由各自的开关决定，与「本次是否重置」无关：
+    # 之前把它们绑在 reset=1 上，用户选择保留规则时就永远加不上这些默认规则。
+    multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}" || return 1
 
     if [[ "${WARP_STATUS:-0}" -eq 1 ]]; then
         local container_ip=''
@@ -2663,21 +2305,34 @@ function handler_multi_xray_config() {
     handler_apply_lan_config || return 1
 
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${nodes}" --argjson rules "${XRAY_RULES}" '.xray.nodes = $nodes | .rules = $rules')" || return 1
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${nodes}" --argjson rules "${XRAY_RULES}" '.xray.nodes = $nodes | .rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
 
     handler_lan_open_firewall || return 1
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
-        open_owned_firewall_port 'reverse' "${reverse_port}" tcp || return 1
+        firewall_owned_open 'reverse' "${reverse_port}" tcp || return 1
     fi
 }
 
+# =============================================================================
+# 函数名称: handler_xray_config
+# 功能描述: 处理并更新 Xray 核心配置文件 (/usr/local/etc/xray/config.json)。
+#           1. 打印配置更新提示。
+#           2. 从脚本配置中读取各项参数。
+#           3. 加载对应配置标签的模板文件。
+#           4. 根据配置标签和参数替换模板中的占位符。
+#           5. 处理路由规则 (始终合并已保存的用户规则；.xray.rules.reset 只在本次
+#              生成时丢弃它们，生成结束即复位；bt/cn/ad 默认规则由各自开关决定)。
+#           6. 将更新后的配置写回 XRAY_CONFIG_PATH 和 SCRIPT_CONFIG_PATH 文件。
+# 参数: 无
+# 返回值: 无 (直接修改 XRAY_CONFIG 全局变量和 XRAY_CONFIG_PATH/SCRIPT_CONFIG_PATH 文件)
+# =============================================================================
 function handler_xray_config() {
     local skip_vlessenc="${1:-0}"
     # 打印绿色的 Xray 配置更新提示
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray.config_update")" >&2
+    log_config "$(t ".${CUR_FILE}.xray.config_update")" >&2
     normalize_and_validate_xray_state || return 1
     # 从脚本配置中读取各项参数
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"                # 获取配置标签
@@ -2700,6 +2355,11 @@ function handler_xray_config() {
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"        # 获取 ad 规则状态
     local XRAY_RULES
     XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
+    # reset 是一次性动作，且只认当前脚本版本写入的标志（见
+    # xray_rules_reset_is_current）：本次重建丢弃已保存的用户规则，生成结束时把标志复位。
+    if [[ "${XRAY_RULES_STATUS}" -eq 1 ]] && xray_rules_reset_is_current; then
+        XRAY_RULES='[]'
+    fi
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
@@ -2708,14 +2368,14 @@ function handler_xray_config() {
     if [[ "${CONFIG_TAG,,}" == 'cdn' ]]; then
         validate_cdn_split_domains || return 1
     fi
-    if [[ "${CONFIG_TAG,,}" == 'multi' ]]; then
+    if protocol_is_multi_config "${CONFIG_TAG}"; then
         handler_multi_xray_config "${skip_vlessenc}"
         return $?
     fi
     if protocol_uses_xhttp "${CONFIG_TAG}"; then
         XHTTP_PATH="$(normalize_xhttp_path "${XHTTP_PATH}")"
         if [[ -z "${XHTTP_PATH}" ]] || ! validate_xhttp_path "${XHTTP_PATH}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
             return 1
         fi
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg path "${XHTTP_PATH}" '.xray.path = $path')"
@@ -2744,9 +2404,8 @@ function handler_xray_config() {
     fi
     # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' "${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json")" || return 1
-    if [[ "${XRAY_RULES_STATUS}" -eq 0 ]]; then
-        merge_user_route_rules "${XRAY_RULES}" || return 1
-    fi
+    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）。
+    merge_user_route_rules "${XRAY_RULES}" || return 1
     if [[ "${CONFIG_TAG,,}" == 'cdn' && "${CDN_BACKEND}" == 'xray' ]]; then
         local CDN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
         local CDN_DOWN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
@@ -2758,7 +2417,7 @@ function handler_xray_config() {
         local CDN_PRIVKEY="${cdn_cert_dir}/privkey.pem"
 
         if ! validate_cdn_direct_certificate "${CDN_FULLCHAIN}" "${CDN_PRIVKEY}" "${CDN_DOMAIN}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.cert_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_invalid")" >&2
             return 1
         fi
 
@@ -2773,7 +2432,7 @@ function handler_xray_config() {
             local CDN_DOWN_FULLCHAIN="${cdn_down_cert_dir}/fullchain.pem"
             local CDN_DOWN_PRIVKEY="${cdn_down_cert_dir}/privkey.pem"
             if ! validate_cdn_direct_certificate "${CDN_DOWN_FULLCHAIN}" "${CDN_DOWN_PRIVKEY}" "${CDN_DOWN_DOMAIN}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.cert_invalid")" >&2
+                log_error "$(t ".${CUR_FILE}.cdn_split.cert_invalid")" >&2
                 return 1
             fi
             certificates_json="$(echo "${certificates_json}" | jq \
@@ -2900,21 +2559,17 @@ function handler_xray_config() {
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg mode "${XHTTP_MODE}" '.inbounds[2].streamSettings.xhttpSettings.mode = $mode')"
         ;;
     esac
-    # 处理可选默认规则；保留模式已在模板规则之上合并用户规则。
-    case "${XRAY_RULES_STATUS}" in
-    1)
-        # 重置并添加默认路由规则
-        if [[ "${XRAY_RULES_BT}" -eq 1 ]]; then
-            add_rule "bt" "protocol" "bittorrent" "block" 1 || return 1
-        fi
-        if [[ "${XRAY_RULES_CN}" -eq 1 ]]; then
-            add_rule "cn-ip" "ip" "geoip:cn" "block" "after" "private-ip" || return 1
-        fi
-        if [[ "${XRAY_RULES_AD}" -eq 1 ]]; then
-            add_rule "ad-domain" "domain" "geosite:category-ads-all" "block" || return 1
-        fi
-        ;;
-    esac
+    # 处理可选默认规则：只由各自开关决定，与「本次是否重置」无关。
+    # 用户规则已在模板规则之上合并（add_rule 对同 tag 规则做并集，重复调用幂等）。
+    if [[ "${XRAY_RULES_BT}" -eq 1 ]]; then
+        add_rule "bt" "protocol" "bittorrent" "block" 1 || return 1
+    fi
+    if [[ "${XRAY_RULES_CN}" -eq 1 ]]; then
+        add_rule "cn-ip" "ip" "geoip:cn" "block" "after" "private-ip" || return 1
+    fi
+    if [[ "${XRAY_RULES_AD}" -eq 1 ]]; then
+        add_rule "ad-domain" "domain" "geosite:category-ads-all" "block" || return 1
+    fi
     # Vision 防偷模式：在路由规则替换之后更新 anti-steal 相关配置
     # 确保 anti-steal-allow 的域名始终与当前 target/serverNames 一致
     if [[ "${CONFIG_TAG,,}" == 'vision' ]]; then
@@ -2947,35 +2602,31 @@ function handler_xray_config() {
     handler_apply_lan_config || return 1
 
     # 只持久化用户管理的规则，模板和功能派生规则在每次构建时重建。
+    # reset 在本次生成后复位：它描述的是「这一次要不要丢弃旧规则」，不是长期状态。
     XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules')" || return 1
+    SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
 
     # 仅在配置已通过 xray 校验并成功落盘后修改防火墙。
-    case "${CONFIG_TAG,,}" in
-    vision | xhttp | trojan | fallback)
-        open_xray_firewall_port "${XRAY_PORT}" tcp || return 1
-        ;;
-    cdn)
+    if [[ "${CONFIG_TAG,,}" == 'cdn' ]]; then
         if [[ "${CDN_BACKEND}" == 'xray' ]]; then
-            open_xray_firewall_port 443 tcp || return 1
+            firewall_owned_open 'xray' 443 tcp || return 1
         fi
-        ;;
-    mkcp | hy2)
-        open_xray_firewall_port "${XRAY_PORT}" udp || return 1
-        ;;
-    ss2022)
-        open_xray_firewall_port "${XRAY_PORT}" tcp || return 1
-        open_xray_firewall_port "${XRAY_PORT}" udp || return 1
-        ;;
-    esac
+    else
+        local config_transport config_transports
+        config_transports="$(protocol_firewall_transports "${CONFIG_TAG}")"
+        while IFS= read -r config_transport; do
+            [[ -n "${config_transport}" ]] || continue
+            firewall_owned_open 'xray' "${XRAY_PORT}" "${config_transport}" || return 1
+        done <<<"${config_transports}"
+    fi
 
     handler_lan_open_firewall || return 1
 
     # 反向代理端口放在最后处理，确保其成功后没有其他可失败的防火墙步骤。
     if [[ "${reverse_status}" -eq 1 ]]; then
         local reverse_port=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')
-        open_owned_firewall_port 'reverse' "${reverse_port}" tcp || return 1
+        firewall_owned_open 'reverse' "${reverse_port}" tcp || return 1
     fi
 }
 
@@ -2989,7 +2640,7 @@ function handler_xray_config() {
 function run_vlessenc_choice() {
     local eof_default="${1:-}"
     local vless_enc_reply
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
+    log_config "$(t ".${CUR_FILE}.vless_enc.prompt")" >&2
     if ! read -r vless_enc_reply && [[ -z "${vless_enc_reply}" ]]; then
         [[ -n "${eof_default}" ]] || return 1
         vless_enc_reply="${eof_default}"
@@ -3005,7 +2656,7 @@ function run_vlessenc_choice() {
 function run_mldsa65_choice() {
     local eof_default="${1:-}"
     local mldsa65_reply
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.mldsa.prompt")" >&2
+    log_config "$(t ".${CUR_FILE}.mldsa.prompt")" >&2
     if ! read -r mldsa65_reply && [[ -z "${mldsa65_reply}" ]]; then
         [[ -n "${eof_default}" ]] || return 1
         mldsa65_reply="${eof_default}"
@@ -3021,7 +2672,7 @@ function run_mldsa65_choice() {
 function run_github_proxy_choice() {
     local eof_default="${1:-}"
     local github_proxy_reply
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.prompt")" >&2
+    log_config "$(t ".${CUR_FILE}.gh_proxy.prompt")" >&2
     if ! read -r github_proxy_reply && [[ -z "${github_proxy_reply}" ]]; then
         [[ -n "${eof_default}" ]] || return 1
         github_proxy_reply="${eof_default}"
@@ -3038,7 +2689,7 @@ function run_vlessenc_prompt() {
     local auto="${1:-0}"
     local vless_enc_reply
     if [[ "${auto}" != "1" ]]; then
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.prompt")" >&2
+        log_config "$(t ".${CUR_FILE}.vless_enc.prompt")" >&2
         read -r vless_enc_reply
     else
         vless_enc_reply="y"
@@ -3047,17 +2698,17 @@ function run_vlessenc_prompt() {
         return 0
     fi
     if ! cmd_exists 'xray'; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.fail")" >&2
+        log_warn "$(t ".${CUR_FILE}.vless_enc.fail")" >&2
         return 0
     fi
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.running")" >&2
+    log_config "$(t ".${CUR_FILE}.vless_enc.running")" >&2
     local vlessenc_output
     vlessenc_output="$(printf '2\n' | xray vlessenc 2>&1)" || true
     local decryption encryption
     decryption="$(echo "${vlessenc_output}" | grep '"decryption"' | tail -1 | sed 's/.*"decryption": *"\([^"]*\)".*/\1/')"
     encryption="$(echo "${vlessenc_output}" | grep '"encryption"' | tail -1 | sed 's/.*"encryption": *"\([^"]*\)".*/\1/')"
     if [[ -z "${decryption}" || -z "${encryption}" ]]; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.vless_enc.parse_fail")" >&2
+        log_warn "$(t ".${CUR_FILE}.vless_enc.parse_fail")" >&2
         return 0
     fi
     CONFIG_DATA['vless_enc_decryption']="${decryption}"
@@ -3095,42 +2746,14 @@ function handler_read_xray_config() {
     if protocol_reads_public_port "${CONFIG_TAG}"; then
         exec_read 'port' || return 1
     fi
-    # 根据配置标签读取特定参数 (第一部分)
-    case "${CONFIG_TAG,,}" in
-    trojan) exec_read 'password' || return 1 ;;                             # 读取 Trojan 密码
-    hy2) exec_read 'hy2-auth' || return 1 ;;                                # 读取 HY2 auth 密码
-    ss2022) exec_read 'ss2022-password' || return 1 ;;                      # 读取 SS2022 PSK
-    mkcp | vision | xhttp | fallback | sni | cdn) exec_read 'uuid' || return 1 ;; # 读取 UUID
-    esac
-    # 根据配置标签读取特定参数 (第二部分)
-    case "${CONFIG_TAG,,}" in
-    fallback | sni) exec_read 'fallback' || return 1 ;; # 读取 Fallback UUID
-    mkcp) exec_read 'seed' || return 1 ;;               # 读取 mKCP Seed
-    esac
-    # 根据配置标签读取特定参数 (第三部分)
-    case "${CONFIG_TAG,,}" in
-    vision | xhttp | trojan | fallback) exec_read 'target' || return 1 ;; # 读取目标域名
-    sni)
-        # 为 SNI 配置读取域名和 CDN
-        exec_read 'domain' || return 1 # 读取域名
-        exec_read 'cdn' || return 1    # 读取 CDN
-        ;;
-    cdn)
-        exec_read 'cdn' || return 1      # 读取 CDN
-        exec_read 'cdn-down' || return 1 # 读取可选的下行 CDN
-        ;;
-    esac
-    # 根据配置标签读取特定参数 (第四部分)
-    case "${CONFIG_TAG,,}" in
-    vision | xhttp | trojan | fallback | sni) exec_read 'short' || return 1 ;; # 读取 Short IDs
-    esac
-    # 根据配置标签读取特定参数 (第五部分)
-    case "${CONFIG_TAG,,}" in
-    xhttp | trojan | fallback | sni | cdn)
-        exec_read 'path' || return 1
-        exec_read 'xhttp-mode' || return 1
-        ;;
-    esac
+    # 协议专属字段：清单与顺序来自 lib/protocols.sh 的 PROTOCOL_FIELDS，
+    # 与 multi 节点读取共用同一份定义（未登记的协议跳过，由 exec_check --tag 兜底）。
+    local config_fields field
+    config_fields="$(protocol_fields "${CONFIG_TAG}")" || config_fields=''
+    while IFS= read -r field; do
+        [[ -n "${field}" ]] || continue
+        exec_read "${field}" || return 1
+    done <<<"${config_fields}"
     if protocol_uses_vless_enc "${CONFIG_TAG}"; then
         run_vlessenc_choice || return 1
     fi
@@ -3149,19 +2772,8 @@ function handler_read_xray_config() {
 }
 
 function set_xray_certificate_permissions() {
-    local cert_dir="$1"
-
-    if getent group xray-nginx >/dev/null 2>&1; then
-        chown xray:xray-nginx \
-            "${cert_dir}" "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" \
-            2>/dev/null || return 1
-    elif id -u xray >/dev/null 2>&1; then
-        chown xray:xray \
-            "${cert_dir}" "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" \
-            2>/dev/null || return 1
-    fi
-    chmod 750 "${cert_dir}" 2>/dev/null || return 1
-    chmod 640 "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" 2>/dev/null || return 1
+    # 部署权限与 service/ssl.sh 共用（lib/cert.sh）：目录 750 / 证书 640
+    cert_set_permissions "$1" xray
 }
 
 function validate_cdn_direct_certificate() {
@@ -3248,6 +2860,7 @@ function install_custom_xray_certificate_pair_in_place() {
     local target_dir="$4"
     local cert_parent stage_dir backup_dir
     local had_fullchain=0 had_privkey=0
+    local backup_flags=''
 
     validate_cdn_direct_certificate "${source_fullchain}" "${source_privkey}" "${domain}" || return 1
     [[ ! -L "${target_dir}" &&
@@ -3271,41 +2884,25 @@ function install_custom_xray_certificate_pair_in_place() {
         return 1
     fi
 
-    if [[ -e "${target_dir}/fullchain.pem" ]]; then
-        cp -p -- "${target_dir}/fullchain.pem" "${backup_dir}/fullchain.pem" || {
-            rm -f -- "${stage_dir}/fullchain.pem" "${stage_dir}/privkey.pem"
-            rmdir -- "${stage_dir}" 2>/dev/null || true
-            rmdir -- "${backup_dir}" 2>/dev/null || true
-            return 1
-        }
-        had_fullchain=1
+    # 成对备份 / 成对回滚由 lib/cert.sh 负责，本函数只保留目录与暂存文件的清理。
+    if ! backup_flags="$(cert_backup_pair "${target_dir}" "${backup_dir}")"; then
+        rm -f -- "${stage_dir}/fullchain.pem" "${stage_dir}/privkey.pem"
+        rmdir -- "${stage_dir}" 2>/dev/null || true
+        # 备份可能只复制了一半：先删掉已落盘的副本，rmdir 才不会因目录非空失败。
+        rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
+        rmdir -- "${backup_dir}" 2>/dev/null || true
+        return 1
     fi
-    if [[ -e "${target_dir}/privkey.pem" ]]; then
-        cp -p -- "${target_dir}/privkey.pem" "${backup_dir}/privkey.pem" || {
-            rm -f -- "${stage_dir}/fullchain.pem" "${stage_dir}/privkey.pem"
-            rmdir -- "${stage_dir}" 2>/dev/null || true
-            rm -f -- "${backup_dir}/fullchain.pem"
-            rmdir -- "${backup_dir}" 2>/dev/null || true
-            return 1
-        }
-        had_privkey=1
-    fi
+    read -r had_fullchain had_privkey <<<"${backup_flags}"
 
     if ! cp -f -- "${stage_dir}/fullchain.pem" "${target_dir}/fullchain.pem" ||
         ! cp -f -- "${stage_dir}/privkey.pem" "${target_dir}/privkey.pem" ||
         ! validate_cdn_direct_certificate \
             "${target_dir}/fullchain.pem" "${target_dir}/privkey.pem" "${domain}" ||
         ! set_xray_certificate_permissions "${target_dir}"; then
-        if [[ "${had_fullchain}" -eq 1 ]]; then
-            cp -p -- "${backup_dir}/fullchain.pem" "${target_dir}/fullchain.pem" 2>/dev/null || true
-        else
-            rm -f -- "${target_dir}/fullchain.pem"
-        fi
-        if [[ "${had_privkey}" -eq 1 ]]; then
-            cp -p -- "${backup_dir}/privkey.pem" "${target_dir}/privkey.pem" 2>/dev/null || true
-        else
-            rm -f -- "${target_dir}/privkey.pem"
-        fi
+        cert_restore_pair \
+            "${target_dir}" "${backup_dir}" \
+            "${had_fullchain}" "${had_privkey}" || true
         if [[ "${had_fullchain}" -eq 1 && "${had_privkey}" -eq 1 ]]; then
             set_xray_certificate_permissions "${target_dir}" || true
         fi
@@ -3323,19 +2920,13 @@ function install_custom_xray_certificate_pair_in_place() {
 }
 
 function set_nginx_certificate_permissions() {
-    local cert_dir="$1"
+    # 部署权限与 service/ssl.sh 共用（lib/cert.sh）：目录 750 / 证书 640
+    cert_set_permissions "$1" nginx
+}
 
-    if getent group xray-nginx >/dev/null 2>&1; then
-        chown nginx:xray-nginx \
-            "${cert_dir}" "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" \
-            2>/dev/null || return 1
-    elif id -u nginx >/dev/null 2>&1; then
-        chown nginx:nginx \
-            "${cert_dir}" "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" \
-            2>/dev/null || return 1
-    fi
-    chmod 750 "${cert_dir}" 2>/dev/null || return 1
-    chmod 640 "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" 2>/dev/null || return 1
+function report_cert_retry() {
+    # run_with_debug_retry 的回调：第二次签发前提示一次
+    log_warn "$(t '.cert.retry_debug')"
 }
 
 function install_custom_nginx_certificate_pair() {
@@ -3346,6 +2937,7 @@ function install_custom_nginx_certificate_pair() {
     local cert_parent stage_dir backup_dir
     local had_fullchain=0 had_privkey=0 target_dir_created=0
     local old_dir_mode='' old_dir_uid='' old_dir_gid=''
+    local backup_flags=''
     local restore_status=0
 
     validate_cdn_direct_certificate \
@@ -3394,35 +2986,18 @@ function install_custom_nginx_certificate_pair() {
         return 1
     fi
 
-    if [[ -e "${target_dir}/fullchain.pem" ]]; then
-        [[ -f "${target_dir}/fullchain.pem" &&
-            ! -L "${target_dir}/fullchain.pem" ]] &&
-            cp -p -- \
-                "${target_dir}/fullchain.pem" \
-                "${backup_dir}/fullchain.pem" || {
-            rm -f -- "${stage_dir}/fullchain.pem" "${stage_dir}/privkey.pem"
-            rmdir -- "${stage_dir}" 2>/dev/null || true
-            rmdir -- "${backup_dir}" 2>/dev/null || true
-            return 1
-        }
-        had_fullchain=1
+    # 成对备份 / 成对回滚由 lib/cert.sh 负责；本函数额外负责目录属主与权限的恢复。
+    if ! backup_flags="$(cert_backup_pair "${target_dir}" "${backup_dir}")"; then
+        rm -f -- "${stage_dir}/fullchain.pem" "${stage_dir}/privkey.pem"
+        rmdir -- "${stage_dir}" 2>/dev/null || true
+        # 同 install_custom_xray_certificate_pair_in_place：备份可能只复制了一半。
+        rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
+        rmdir -- "${backup_dir}" 2>/dev/null || true
+        [[ "${target_dir_created}" -eq 0 ]] ||
+            rmdir -- "${target_dir}" 2>/dev/null || true
+        return 1
     fi
-    if [[ -e "${target_dir}/privkey.pem" ]]; then
-        [[ -f "${target_dir}/privkey.pem" &&
-            ! -L "${target_dir}/privkey.pem" ]] &&
-            cp -p -- \
-                "${target_dir}/privkey.pem" \
-                "${backup_dir}/privkey.pem" || {
-            rm -f -- \
-                "${stage_dir}/fullchain.pem" \
-                "${stage_dir}/privkey.pem" \
-                "${backup_dir}/fullchain.pem"
-            rmdir -- "${stage_dir}" 2>/dev/null || true
-            rmdir -- "${backup_dir}" 2>/dev/null || true
-            return 1
-        }
-        had_privkey=1
-    fi
+    read -r had_fullchain had_privkey <<<"${backup_flags}"
 
     if ! cp -f -- "${stage_dir}/fullchain.pem" "${target_dir}/fullchain.pem" ||
         ! cp -f -- "${stage_dir}/privkey.pem" "${target_dir}/privkey.pem" ||
@@ -3431,22 +3006,9 @@ function install_custom_nginx_certificate_pair() {
             "${target_dir}/privkey.pem" \
             "${domain}" ||
         ! set_nginx_certificate_permissions "${target_dir}"; then
-        if [[ "${had_fullchain}" -eq 1 ]]; then
-            cp -p -- \
-                "${backup_dir}/fullchain.pem" \
-                "${target_dir}/fullchain.pem" 2>/dev/null ||
-                restore_status=1
-        else
-            rm -f -- "${target_dir}/fullchain.pem" || restore_status=1
-        fi
-        if [[ "${had_privkey}" -eq 1 ]]; then
-            cp -p -- \
-                "${backup_dir}/privkey.pem" \
-                "${target_dir}/privkey.pem" 2>/dev/null ||
-                restore_status=1
-        else
-            rm -f -- "${target_dir}/privkey.pem" || restore_status=1
-        fi
+        cert_restore_pair \
+            "${target_dir}" "${backup_dir}" \
+            "${had_fullchain}" "${had_privkey}" || restore_status=1
         if [[ "${target_dir_created}" -eq 0 ]]; then
             chown "${old_dir_uid}:${old_dir_gid}" "${target_dir}" 2>/dev/null ||
                 restore_status=1
@@ -3463,7 +3025,7 @@ function install_custom_nginx_certificate_pair() {
         rmdir -- "${stage_dir}" 2>/dev/null || true
         rmdir -- "${backup_dir}" 2>/dev/null || true
         if [[ "${restore_status}" -ne 0 ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}" >&2
         fi
         return 1
     fi
@@ -3519,7 +3081,8 @@ function install_acme_managed_certificate() {
     local server_name="$2"
     local target_dir="$3"
     local consumer="$4"
-    local cert_parent backup_dir had_previous=0
+    local cert_parent backup_dir had_fullchain=0 had_privkey=0
+    local backup_flags=''
     local restore_status=0
     local reload_command=''
 
@@ -3537,15 +3100,13 @@ function install_acme_managed_certificate() {
     cert_parent="$(dirname "${target_dir}")"
     mkdir -p "${cert_parent}" "${target_dir}" || return 1
     backup_dir="$(mktemp -d "${cert_parent}/.xray-cert-backup.XXXXXX")" || return 1
-    if [[ -r "${target_dir}/fullchain.pem" && -r "${target_dir}/privkey.pem" ]]; then
-        if ! cp -f "${target_dir}/fullchain.pem" "${backup_dir}/fullchain.pem" ||
-            ! cp -f "${target_dir}/privkey.pem" "${backup_dir}/privkey.pem"; then
-            rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
-            rmdir -- "${backup_dir}" 2>/dev/null || true
-            return 1
-        fi
-        had_previous=1
+    # 成对备份由 lib/cert.sh 负责：缺哪个记哪个，回滚时缺的删掉。
+    if ! backup_flags="$(cert_backup_pair "${target_dir}" "${backup_dir}")"; then
+        rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
+        rmdir -- "${backup_dir}" 2>/dev/null || true
+        return 1
     fi
+    read -r had_fullchain had_privkey <<<"${backup_flags}"
 
     if ! "${ACME_PATH}" --install-cert --ecc -d "${acme_domain}" \
             --key-file "${target_dir}/privkey.pem" \
@@ -3555,36 +3116,23 @@ function install_acme_managed_certificate() {
             "${target_dir}/fullchain.pem" \
             "${target_dir}/privkey.pem" \
             "${server_name}" ||
-        { [[ "${consumer}" == 'xray' ]] &&
-            ! set_xray_certificate_permissions "${target_dir}"; } ||
-        { [[ "${consumer}" == 'nginx' ]] &&
-            ! set_nginx_certificate_permissions "${target_dir}"; }; then
-        if [[ "${had_previous}" -eq 1 ]]; then
-            cp -f "${backup_dir}/fullchain.pem" "${target_dir}/fullchain.pem" 2>/dev/null ||
+        ! cert_set_permissions "${target_dir}" "${consumer}"; then
+        if ! cert_restore_pair \
+            "${target_dir}" "${backup_dir}" \
+            "${had_fullchain}" "${had_privkey}"; then
+            restore_status=1
+        elif [[ "${had_fullchain}" -eq 1 && "${had_privkey}" -eq 1 ]]; then
+            # 只有原来就有一整对证书时才恢复权限并重载消费者：半对状态下
+            # cert_set_permissions 必然对缺失的那一半失败，会误报回滚失败。
+            if ! cert_set_permissions "${target_dir}" "${consumer}" ||
+                ! reload_certificate_consumer "${consumer}"; then
                 restore_status=1
-            cp -f "${backup_dir}/privkey.pem" "${target_dir}/privkey.pem" 2>/dev/null ||
-                restore_status=1
-            if [[ "${restore_status}" -eq 0 ]]; then
-                if [[ "${consumer}" == 'xray' ]]; then
-                    set_xray_certificate_permissions "${target_dir}" ||
-                        restore_status=1
-                else
-                    set_nginx_certificate_permissions "${target_dir}" ||
-                        restore_status=1
-                fi
             fi
-            if [[ "${restore_status}" -eq 0 ]]; then
-                reload_certificate_consumer "${consumer}" ||
-                    restore_status=1
-            fi
-        else
-            rm -f -- "${target_dir}/fullchain.pem" "${target_dir}/privkey.pem" ||
-                restore_status=1
         fi
         rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
         rmdir -- "${backup_dir}" 2>/dev/null || true
         if [[ "${restore_status}" -ne 0 ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}" >&2
         fi
         return 1
     fi
@@ -3655,7 +3203,7 @@ function emit_active_acme_certificate_consumer() {
 function list_active_acme_certificate_consumers() {
     local requested_main_domain="${1:-}"
     local config_tag backend role domain source target_dir
-    local acme_domain multi_has_hy2
+    local acme_domain
     local -a roles=()
 
     config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')" || return 1
@@ -3702,12 +3250,9 @@ function list_active_acme_certificate_consumers() {
                 'nginx' "${NGINX_CONFIG_DIR}/certs/${domain}" || return 1
         done
         ;;
-    hy2|multi)
-        if [[ "${config_tag,,}" == 'multi' ]]; then
-            multi_has_hy2="$(echo "${SCRIPT_CONFIG}" |
-                jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')" || return 1
-            [[ "${multi_has_hy2}" == 'true' ]] || return 0
-        fi
+    *)
+        # multi 节点集合的取法由 lib/protocols.sh 统一负责（含 multi 逐节点判定）。
+        protocol_tag_uses "${config_tag}" protocol_uses_hy2_certificate || return 0
         source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')" || return 1
         [[ "${source}" =~ ^[12]$ ]] || return 0
         domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertDomain // ""')" || return 1
@@ -3806,7 +3351,7 @@ function current_config_uses_acme_main_domain() {
     local target_main_domain="${1,,}"
     local requested_domain="${2,,}"
     local config_tag candidate managed_domain candidate_lines=''
-    local hy2_source='' multi_has_hy2='false'
+    local hy2_source=''
     local usage_status=1
     local -a candidates=()
 
@@ -3844,13 +3389,16 @@ function current_config_uses_acme_main_domain() {
         [[ -n "${candidate}" ]] && candidates+=("${candidate}")
     done <<<"${candidate_lines}"
 
-    if [[ "${config_tag,,}" == 'multi' ]]; then
-        multi_has_hy2="$(echo "${SCRIPT_CONFIG}" |
-            jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')" || return 2
-    fi
     hy2_source="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.hy2CertSource // ""')" || return 2
-    if { [[ "${config_tag,,}" == 'hy2' ]] || [[ "${multi_has_hy2}" == 'true' ]]; } &&
-        [[ "${hy2_source}" =~ ^[12]$ ]]; then
+    # 0-使用 HY2 证书 1-不使用 2-判定失败（调用方据此中止，不能当成「不使用」）
+    local hy2_in_use=0
+    protocol_tag_uses "${config_tag}" protocol_uses_hy2_certificate
+    case "$?" in
+    0) hy2_in_use=1 ;;
+    1) hy2_in_use=0 ;;
+    *) return 2 ;;
+    esac
+    if [[ "${hy2_in_use}" -eq 1 && "${hy2_source}" =~ ^[12]$ ]]; then
         candidate_lines="$(echo "${SCRIPT_CONFIG}" | jq -r '
             .xray.hy2CertDomain // empty,
             .xray.hy2CertAcmeDomain // empty
@@ -3994,15 +3542,7 @@ function configure_hy2_ip_renewal_cron() {
 }
 
 function current_config_uses_hy2() {
-    local config_tag
-
-    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
-    if [[ "${config_tag,,}" == 'hy2' ]]; then
-        return 0
-    fi
-    [[ "${config_tag,,}" == 'multi' ]] &&
-        echo "${SCRIPT_CONFIG}" |
-            jq -e 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")' >/dev/null
+    protocol_config_uses_current protocol_uses_hy2_certificate
 }
 
 function handler_cdn_direct_cert_role() {
@@ -4029,7 +3569,7 @@ function handler_cdn_direct_cert_role() {
     fi
 
     if [[ -z "${domain}" ]] || ! exec_check '--domain-format' "${domain}" >/dev/null 2>&1; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.domain_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_direct.domain_invalid")" >&2
         return 1
     fi
     if [[ "${cached_hostname}" != "${domain}" ]]; then
@@ -4053,34 +3593,34 @@ function handler_cdn_direct_cert_role() {
     while [[ ! "${source}" =~ ^[12]$ ]]; do
         local cert_prompt='prompt_cdn_direct'
         [[ "${role}" == 'cdnDown' ]] && cert_prompt='prompt_cdn_down_direct'
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.${cert_prompt}")" >&2
-        read -r source
+        log_config "$(t ".${CUR_FILE}.cert_source.${cert_prompt}")" >&2
+        source="$(read_line_or_abort)" || return 1
         source="${source:-1}"
         if [[ ! "${source}" =~ ^[12]$ ]]; then
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.source_invalid")" >&2
+            log_tip "$(t ".${CUR_FILE}.cert_source.source_invalid")" >&2
         fi
     done
     cert_dir="$(get_cdn_direct_cert_dir "${domain}" "${source}")" || return 1
 
     if [[ "${source}" == '2' ]]; then
         while [[ -z "${custom_fullchain}" || ! -r "${custom_fullchain}" ]]; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.fullchain")" >&2
-            read -r custom_fullchain
+            log_config "$(t ".${CUR_FILE}.cert_source.fullchain")" >&2
+            custom_fullchain="$(read_line_or_abort)" || return 1
             custom_fullchain="$(echo "${custom_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -r "${custom_fullchain}" ]] ||
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                log_tip "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
         done
         while [[ -z "${custom_privkey}" || ! -r "${custom_privkey}" ]]; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.privkey")" >&2
-            read -r custom_privkey
+            log_config "$(t ".${CUR_FILE}.cert_source.privkey")" >&2
+            custom_privkey="$(read_line_or_abort)" || return 1
             custom_privkey="$(echo "${custom_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [[ -r "${custom_privkey}" ]] ||
-                echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                log_tip "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
         done
         if ! install_custom_xray_certificate_pair \
                 "${custom_fullchain}" "${custom_privkey}" "${domain}" \
                 "${cert_dir}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.cert_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_invalid")" >&2
             return 1
         fi
     else
@@ -4097,14 +3637,14 @@ function handler_cdn_direct_cert_role() {
             [[ -n "${managed_acme_domain}" ]] || return 1
             acme_exists=1
         else
-            cert_reuse_choice="$(prompt_cert_reuse "${domain}" 'acme')"
+            cert_reuse_choice="$(prompt_cert_reuse "${domain}" 'acme')" || return 1
             if [[ "${cert_reuse_choice}" == 'new' ]]; then
                 acme_action='issue'
             else
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
+                log_info "$(t ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
                 managed_acme_domain="$(acme_main_domain_for_name "${cert_reuse_choice}" 2>/dev/null || true)"
                 if [[ -z "${managed_acme_domain}" ]]; then
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
+                    log_error "$(t ".${CUR_FILE}.cert_reuse.main_domain_missing")" >&2
                     return 1
                 fi
                 acme_exists=1
@@ -4118,7 +3658,7 @@ function handler_cdn_direct_cert_role() {
                 exec_read 'email' || return 1
                 account_email="${CONFIG_DATA['email']:-}"
                 if ! exec_check '--email' "${account_email}" >/dev/null 2>&1; then
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
+                    log_error "$(t ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
                     return 1
                 fi
                 SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg email "${account_email}" '.nginx.ca = $email')"
@@ -4137,8 +3677,9 @@ function handler_cdn_direct_cert_role() {
                     acme_status=$?
                 fi
             else
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.applying")" >&2
+                log_config "$(t ".${CUR_FILE}.hy2_cert.applying")" >&2
                 if run_with_nginx_temporarily_stopped \
+                    run_with_debug_retry report_cert_retry \
                     "${ACME_PATH}" --issue -d "${domain}" \
                     --standalone \
                     --keylength ec-256 \
@@ -4154,18 +3695,18 @@ function handler_cdn_direct_cert_role() {
             fi
 
             if [[ "${acme_status}" -eq 90 ]]; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
                 return 1
             fi
             if [[ "${acme_status}" -eq 91 ]]; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
                 return 1
             fi
             if [[ "${acme_status}" -ne 0 ]]; then
                 if [[ "${acme_action}" == 'renew' ]]; then
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.renew_fail")" >&2
+                    log_error "$(t ".${CUR_FILE}.cdn_direct.renew_fail")" >&2
                 else
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
+                    log_error "$(t ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
                 fi
                 return 1
             fi
@@ -4180,11 +3721,11 @@ function handler_cdn_direct_cert_role() {
         if [[ "${acme_exists}" -ne 1 ]] ||
             ! install_acme_xray_certificate \
                 "${managed_acme_domain}" "${domain}" "${cert_dir}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.apply_fail")" >&2
             return 1
         fi
         if [[ "${reused_acme_certificate}" -eq 1 ]]; then
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
+            log_info "$(t ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
         fi
     fi
 
@@ -4212,7 +3753,7 @@ function handler_cdn_direct_cert_role() {
         .xray.port = 443
     ')"
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.ready")" >&2
+    log_info "$(t ".${CUR_FILE}.cdn_direct.ready")" >&2
 }
 
 function handler_cdn_direct_cert() {
@@ -4330,7 +3871,7 @@ function handler_change_cdn_down_direct() {
             rm -rf -- "${custom_cert_dir}"
         fi
         [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.config_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_split.config_fail")" >&2
         return 1
     fi
 
@@ -4343,7 +3884,7 @@ function handler_change_cdn_down_direct() {
             cleanup_acme_certificate_if_unused \
                 "${old_domain}" 'y' "${old_acme_cert_dir}" || true
     fi
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
+    log_info "$(t ".${CUR_FILE}.cdn_split.updated")" >&2
 }
 
 function handler_change_cdn_down_nginx() {
@@ -4395,7 +3936,7 @@ function handler_change_cdn_down_nginx() {
         handler_restore_certificate_renewal_hooks >/dev/null 2>&1 || true
         handler_restart >/dev/null 2>&1 || true
         [[ -z "${runtime_snapshot}" ]] || rm -f -- "${runtime_snapshot}"
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.config_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_split.config_fail")" >&2
         return 1
     fi
     cleanup_change_domain_transaction "${transaction_dir}" || return 1
@@ -4404,7 +3945,7 @@ function handler_change_cdn_down_nginx() {
         acme_manages_certificate "${old_domain}"; then
         cleanup_acme_certificate_if_unused "${old_domain}" 'y' || true
     fi
-    echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.updated")" >&2
+    log_info "$(t ".${CUR_FILE}.cdn_split.updated")" >&2
 }
 
 function handler_cleanup_stale_cdn_down() {
@@ -4465,7 +4006,7 @@ function handler_hy2_cert() {
         [[ -n "${CERT_DOMAIN}" && "${CERT_DOMAIN}" != *$'\n'* ]] || return 1
         ;;
     *)
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.source_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.hy2_cert.source_invalid")" >&2
         return 1
         ;;
     esac
@@ -4477,11 +4018,11 @@ function handler_hy2_cert() {
         # acme.sh 申请证书 (standalone 模式)
         # 非首次安装时，检测已有证书并询问用户
         local cert_reuse_choice
-        cert_reuse_choice="$(prompt_cert_reuse "${CERT_DOMAIN}" "xray" "${CERT_SOURCE}")"
+        cert_reuse_choice="$(prompt_cert_reuse "${CERT_DOMAIN}" "xray" "${CERT_SOURCE}")" || return 1
 
         if [[ "${cert_reuse_choice}" != "new" ]]; then
             # 用户选择复用已有证书
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing")" >&2
+            log_info "$(t ".${CUR_FILE}.cert_reuse.reusing")" >&2
             mkdir -p "${CERT_DIR}"
             local reuse_acme_domain="${cert_reuse_choice}"
             local managed_reuse_acme_domain=''
@@ -4497,24 +4038,24 @@ function handler_hy2_cert() {
             if [[ -z "${managed_reuse_acme_domain}" ]] ||
                 ! install_acme_xray_certificate \
                     "${managed_reuse_acme_domain}" "${CERT_DOMAIN}" "${CERT_DIR}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             fi
             CERT_ACME_DOMAIN="${managed_reuse_acme_domain}"
             if [[ ! -r "${CERT_DIR}/fullchain.pem" || ! -r "${CERT_DIR}/privkey.pem" ]]; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             fi
             if ! validate_cdn_direct_certificate \
                     "${CERT_DIR}/fullchain.pem" \
                     "${CERT_DIR}/privkey.pem" \
                     "${CERT_DOMAIN}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.name_mismatch")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.name_mismatch")" >&2
                 return 1
             fi
             set_xray_certificate_permissions "${CERT_DIR}" || return 1
             certificate_ready=1
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
+            log_info "$(t ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
         else
             # 用户选择重新申请证书
             local previous_cert_fingerprint=''
@@ -4523,29 +4064,26 @@ function handler_hy2_cert() {
                 previous_cert_fingerprint="$(certificate_sha256_fingerprint "${CERT_DIR}/fullchain.pem" || true)"
             fi
             if ! exec_check '--email' "${ACCOUNT_EMAIL}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.email_invalid")" >&2
                 return 1
             fi
-            # 确保 acme.sh 已安装
-            if [[ ! -e "${HOME}/.acme.sh/acme.sh" ]]; then
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} Installing acme.sh..." >&2
-                curl https://get.acme.sh | sh -s email="${ACCOUNT_EMAIL}" || {
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
-                    return 1
-                }
-                "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade || return 1
-                "${HOME}/.acme.sh/acme.sh" --set-default-ca --server zerossl || return 1
+            # 确保 acme.sh 已安装（安装三步统一走 ssl.sh，与主菜单同一入口）
+            if [[ ! -e "${ACME_PATH}" ]] &&
+                ! handler_ssl_install; then
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                return 1
             fi
 
             # 创建证书存储目录
             mkdir -p "${CERT_DIR}" || return 1
 
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.applying")" >&2
+            log_config "$(t ".${CUR_FILE}.hy2_cert.applying")" >&2
 
             if [[ "${CERT_SOURCE}" == "1" ]]; then
                 # 域名证书: 使用 standalone 模式 (临时监听80端口), ZeroSSL
                 if run_with_nginx_temporarily_stopped \
-                    "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
+                    run_with_debug_retry report_cert_retry \
+                    "${ACME_PATH}" --issue -d "${CERT_DOMAIN}" \
                     --standalone \
                     --keylength ec-256 \
                     --accountkeylength ec-256 \
@@ -4559,18 +4097,19 @@ function handler_hy2_cert() {
                 fi
                 if [[ "${acme_status}" -ne 0 ]]; then
                     if [[ "${acme_status}" -eq 90 ]]; then
-                        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
+                        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
                     elif [[ "${acme_status}" -eq 91 ]]; then
-                        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
+                        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
                     fi
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                    log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                     return 1
                 fi
             else
                 # IP 证书: Let's Encrypt + shortlived profile (仅此 profile 支持 IP 标识符)
                 # 证书有效期短 (约一周)，--days 3 设置每 3 天检查续签
                 if run_with_nginx_temporarily_stopped \
-                    "${HOME}/.acme.sh/acme.sh" --issue -d "${CERT_DOMAIN}" \
+                    run_with_debug_retry report_cert_retry \
+                    "${ACME_PATH}" --issue -d "${CERT_DOMAIN}" \
                     --standalone \
                     --keylength ec-256 \
                     --accountemail "${ACCOUNT_EMAIL}" \
@@ -4584,23 +4123,23 @@ function handler_hy2_cert() {
                 fi
                 if [[ "${acme_status}" -ne 0 ]]; then
                     if [[ "${acme_status}" -eq 90 ]]; then
-                        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
+                        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
                     elif [[ "${acme_status}" -eq 91 ]]; then
-                        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
+                        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_restore_fail")" >&2
                     fi
-                    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                    log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                     return 1
                 fi
             fi
 
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_ok")" >&2
+            log_info "$(t ".${CUR_FILE}.hy2_cert.apply_ok")" >&2
 
             # 安装证书到 Xray 目录
             CERT_ACME_DOMAIN="$(acme_main_domain_for_name "${CERT_DOMAIN}" 2>/dev/null || true)"
             [[ -n "${CERT_ACME_DOMAIN}" ]] || return 1
             install_acme_xray_certificate \
                 "${CERT_ACME_DOMAIN}" "${CERT_DOMAIN}" "${CERT_DIR}" || {
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             }
 
@@ -4608,7 +4147,7 @@ function handler_hy2_cert() {
                     "${CERT_DIR}/fullchain.pem" \
                     "${CERT_DIR}/privkey.pem" \
                     "${CERT_DOMAIN}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             fi
             installed_cert_fingerprint="$(certificate_sha256_fingerprint "${CERT_DIR}/fullchain.pem" || true)"
@@ -4618,14 +4157,14 @@ function handler_hy2_cert() {
                 # A "new" request must actually install the newly issued
                 # certificate. Otherwise an old valid pair can hide an ACME
                 # client that printed an error but returned success.
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
                 return 1
             fi
 
             set_xray_certificate_permissions "${CERT_DIR}" || return 1
             certificate_ready=1
 
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
+            log_info "$(t ".${CUR_FILE}.hy2_cert.install_ok")" >&2
 
         fi # 结束 cert_reuse_choice 判断
         ;;
@@ -4636,7 +4175,7 @@ function handler_hy2_cert() {
 
         if ! validate_cdn_direct_certificate \
                 "${CUSTOM_FULLCHAIN}" "${CUSTOM_PRIVKEY}" "${CERT_DOMAIN}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.pair_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.hy2_cert.pair_invalid")" >&2
             return 1
         fi
 
@@ -4644,13 +4183,13 @@ function handler_hy2_cert() {
         if ! install_custom_xray_certificate_pair_in_place \
                 "${CUSTOM_FULLCHAIN}" "${CUSTOM_PRIVKEY}" "${CERT_DOMAIN}" \
                 "${CERT_DIR}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.hy2_cert.path_invalid")" >&2
             return 1
         fi
 
         certificate_ready=1
 
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.install_ok")" >&2
+        log_info "$(t ".${CUR_FILE}.hy2_cert.install_ok")" >&2
         ;;
     *)
         return 1
@@ -4662,16 +4201,16 @@ function handler_hy2_cert() {
     # from being treated as success by any caller.
     [[ "${certificate_ready}" -eq 1 ]] || return 1
     if [[ "${CERT_SOURCE}" =~ ^[12]$ ]]; then
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_setup")" >&2
+        log_config "$(t ".${CUR_FILE}.hy2_cert.cron_setup")" >&2
     fi
     if ! configure_hy2_ip_renewal_cron "${CERT_SOURCE}" "${CERT_DOMAIN}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.hy2_cert.cron_fail")" >&2
         return 1
     fi
     if [[ "${CERT_SOURCE}" =~ ^[12]$ ]]; then
         # Domain certificates use acme.sh's normal renewal job. IP
         # certificates additionally use the script-owned short-lived job.
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_ok")" >&2
+        log_info "$(t ".${CUR_FILE}.hy2_cert.cron_ok")" >&2
     fi
     if [[ "${CERT_SOURCE}" =~ ^[12]$ ]]; then
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
@@ -4706,7 +4245,7 @@ function handler_prepare_protocol_services() {
 
     if xray_runtime_owns_tcp_443 && systemctl -q is-active xray; then
         if ! systemctl -q stop xray; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.release_port_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.release_port_fail")" >&2
             return 1
         fi
     fi
@@ -4756,7 +4295,7 @@ function handler_xray_version() {
         # 获取最新的 Xray 版本
         if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases)" ||
             ! CONFIG_DATA['version']="$(jq -r '.[0].tag_name' <<<"${release_data}")"; then
-            _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+            _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
         fi
         ;;
     custom)
@@ -4767,12 +4306,12 @@ function handler_xray_version() {
         # 获取最新的 release 版本
         if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)" ||
             ! CONFIG_DATA['version']="$(jq -r '.tag_name' <<<"${release_data}")"; then
-            _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+            _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
         fi
         ;;
     esac
     if [[ -z "${CONFIG_DATA['version']:-}" || "${CONFIG_DATA['version']}" == 'null' ]]; then
-        _error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_version.fetch_fail")"
+        _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
     fi
     if [[ "${persist,,}" == 'n' ]]; then
         printf '%s\n' "${CONFIG_DATA['version']}"
@@ -4798,7 +4337,7 @@ function handler_change_xray_port() {
     local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
 
     if ! protocol_reads_public_port "${CONFIG_TAG}"; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.fixed")" >&2
+        log_tip "$(t ".${CUR_FILE}.port.fixed")" >&2
         return 1
     fi
 
@@ -4927,7 +4466,7 @@ function handler_install() {
         fi
 
         if ! script_content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${install_script_url}")"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.fetch_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.gh_proxy.fetch_fail")" >&2
             return 1
         fi
         if [[ "${use_gh_proxy_reply,,}" == "y" ]]; then
@@ -4935,7 +4474,7 @@ function handler_install() {
             script_content="$(printf '%s\n' "${script_content}" | sed 's|https://api\.github\.com|https://gh-proxy.com/https://api.github.com|g; s|https://github\.com|https://gh-proxy.com/https://github.com|g')"
         fi
         if [[ -z "${script_content}" ]] || ! bash -n <<<"${script_content}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.invalid_script")" >&2
+            log_error "$(t ".${CUR_FILE}.gh_proxy.invalid_script")" >&2
             return 1
         fi
 
@@ -4971,19 +4510,19 @@ function handler_install() {
         fi
         if ! printf '%s\n' "${script_content}" | bash -s -- install -u xray --version "${CONFIG_DATA['version']}"; then
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.install_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.gh_proxy.install_fail")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
                 ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
             fi
             return 1
         fi
         if ! xray_binary_version_matches "${CONFIG_DATA['version']}"; then
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.version_mismatch // .${CUR_FILE}.gh_proxy.xray_missing")" >&2
+            log_error "$(t ".${CUR_FILE}.gh_proxy.version_mismatch" ".${CUR_FILE}.gh_proxy.xray_missing")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
                 ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
             fi
             return 1
         fi
@@ -4994,17 +4533,81 @@ function handler_install() {
             staged_config=''
             if [[ -n "${binary_snapshot_dir}" ]] &&
                 ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
             fi
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.gh_proxy.config_commit_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.gh_proxy.config_commit_fail")" >&2
             return 1
         fi
         staged_config=''
         SCRIPT_CONFIG="${staged_script_config}"
         if ! discard_xray_binary_snapshot "${binary_snapshot_dir}"; then
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} Xray binary recovery data was left at: ${binary_snapshot_dir}" >&2
+            log_warn "Xray binary recovery data was left at: ${binary_snapshot_dir}" >&2
         fi
     fi
+}
+
+# =============================================================================
+# 函数名称: handler_legacy_firewall_sweep
+# 功能描述: 回收历史版本遗留的、未写入账本的防火墙放行规则。
+#           旧版 open_xray_firewall_port 只改防火墙、不记账本，升级后这些规则对
+#           firewall_owned_close 不可见。这里按历史放行形态（单配置端口、multi
+#           节点端口、CDN 后端为 xray 时的 443/tcp）做一次保守回收：
+#           - 已被账本接管的端口跳过，交给账本回收；
+#           - 只有规则确实存在时才删除，逐条打印；
+#           - 任一条失败只告警，不中断卸载。
+# 参数: 无
+# 返回值: 0-全部回收成功或无可回收 1-至少一条失败
+# =============================================================================
+function handler_legacy_firewall_sweep() {
+    local backend config_tag port protocol tag transport rule status=0 spec
+    local -a specs=()
+    local -A seen=()
+
+    config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // empty')" || return 1
+    if ! protocol_is_multi_config "${config_tag}"; then
+        port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port // empty')"
+        if [[ "${port}" =~ ^[0-9]+$ ]]; then
+            while IFS= read -r transport; do
+                [[ -n "${transport}" ]] || continue
+                specs+=("${port} ${transport}")
+            done < <(protocol_firewall_transports "${config_tag}")
+        fi
+    fi
+    while IFS=$'\t' read -r port tag; do
+        [[ "${port}" =~ ^[0-9]+$ ]] || continue
+        while IFS= read -r transport; do
+            [[ -n "${transport}" ]] || continue
+            specs+=("${port} ${transport}")
+        done < <(protocol_firewall_transports "${tag}")
+    done < <(echo "${SCRIPT_CONFIG}" | jq -r '.xray.nodes[]? | "\(.port)\t\(.tag | ascii_downcase)"')
+    if [[ "${config_tag,,}" == 'cdn' && "$(get_cdn_backend)" == 'xray' ]]; then
+        specs+=("443 tcp")
+    fi
+    ((${#specs[@]})) || return 0
+
+    backend="$(firewall_detect_backend)"
+    [[ "${backend}" != 'none' ]] || return 0
+
+    for spec in "${specs[@]}"; do
+        [[ -z "${seen[${spec}]:-}" ]] || continue
+        seen["${spec}"]=1
+        port="${spec%% *}"
+        protocol="${spec##* }"
+        # 已被账本接管的端口由账本回收，这里不重复处理。
+        firewall_ledger_port_owned "${port}" "${protocol}" && continue
+        rule="$(firewall_rule_json 'legacy' "${backend}" "${port}" "${protocol}" 'true' 'true')" || {
+            status=1
+            continue
+        }
+        firewall_rule_exists "${rule}" || continue
+        if firewall_rule_remove "${rule}"; then
+            log_config "$(t ".${CUR_FILE}.purge.legacy_sweep_removed") ${port}/${protocol}" >&2
+        else
+            log_warn "$(t ".${CUR_FILE}.purge.legacy_sweep_failed") ${port}/${protocol}" >&2
+            status=1
+        fi
+    done
+    return "${status}"
 }
 
 # =============================================================================
@@ -5018,13 +4621,45 @@ function handler_purge() {
     local script_content=''
     local updated_config=''
     local staged_config=''
+    local owned_features=''
+    local owned_feature=''
+    local confirm=''
+
+    # 卸载会同时销毁服务端 Xray 与本脚本的本地状态，且无法回滚，因此必须显式确认。
+    if [[ ! -t 0 ]]; then
+        log_error "$(t ".${CUR_FILE}.purge.tty_required")" >&2
+        return 1
+    fi
+    log_warn "$(t ".${CUR_FILE}.purge.warning")"
+    read -r -p "$(t ".${CUR_FILE}.purge.confirm"): " confirm
+    if [[ "${confirm}" != 'yes' ]]; then
+        echo "$(t ".${CUR_FILE}.purge.cancelled")"
+        return 0
+    fi
+
+    # 防火墙放行记录随后的 reset_json_fields 会一并清空，归属信息一旦丢失便无法再回收端口，
+    # 因此必须先从账本读出 feature 并逐个关闭放行规则。feature 由账本自身派生，新增 feature 无需改这里。
+    if ! owned_features="$(firewall_ledger_features)"; then
+        log_error "$(t ".${CUR_FILE}.purge.read_ledger_failed")" >&2
+        return 1
+    fi
+    while IFS= read -r owned_feature; do
+        [[ -n "${owned_feature}" ]] || continue
+        if ! firewall_owned_close "${owned_feature}"; then
+            log_error "$(t ".${CUR_FILE}.purge.close_port_failed" | sed "s/\${owned_feature}/${owned_feature}/")" >&2
+            return 1
+        fi
+    done <<<"${owned_features}"
+    # 升级前的放行规则没有账本记录，按已知端口形态补一次回收；失败不阻断卸载。
+    handler_legacy_firewall_sweep ||
+        log_warn "$(t ".${CUR_FILE}.purge.legacy_sweep_failed")" >&2
 
     if ! script_content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${install_script_url}")"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Failed to download the Xray uninstall script." >&2
+        log_error "Failed to download the Xray uninstall script." >&2
         return 1
     fi
     if [[ -z "${script_content}" ]] || ! bash -n <<<"${script_content}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Refusing to run an invalid Xray uninstall script." >&2
+        log_error "Refusing to run an invalid Xray uninstall script." >&2
         return 1
     fi
 
@@ -5037,12 +4672,12 @@ function handler_purge() {
 
     if ! bash -s -- remove --purge <<<"${script_content}"; then
         rm -f -- "${staged_config}"
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Xray uninstall failed; local state was preserved." >&2
+        log_error "Xray uninstall failed; local state was preserved." >&2
         return 1
     fi
 
     if ! mv -fT -- "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Xray was removed, but the prepared local state could not be committed. Recovery file: ${staged_config}" >&2
+        log_error "Xray was removed, but the prepared local state could not be committed. Recovery file: ${staged_config}" >&2
         return 1
     fi
     sync
@@ -5063,12 +4698,12 @@ function report_xray_service_failure() {
     local action="$1"
     local message
     case "${action}" in
-    start) message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_service.start_fail")" ;;
-    restart) message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_service.restart_fail")" ;;
-    enable) message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_service.enable_fail")" ;;
-    *) message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xray_service.active_fail")" ;;
+    start) message="$(t ".${CUR_FILE}.xray_service.start_fail")" ;;
+    restart) message="$(t ".${CUR_FILE}.xray_service.restart_fail")" ;;
+    enable) message="$(t ".${CUR_FILE}.xray_service.enable_fail")" ;;
+    *) message="$(t ".${CUR_FILE}.xray_service.active_fail")" ;;
     esac
-    echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} ${message}" >&2
+    log_error "${message}" >&2
     systemctl --no-pager --full status xray >&2 || true
 }
 
@@ -5158,7 +4793,7 @@ function handler_restart() {
     # runtime is still serving traffic.
     if ! current_config_uses_hy2 &&
         ! configure_hy2_ip_renewal_cron 'cleanup' ''; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.cron_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.hy2_cert.cron_fail")" >&2
         return 1
     fi
     if ! current_protocol_uses_nginx; then
@@ -5242,8 +4877,8 @@ function handler_share() {
 # 返回值: traffic.sh 脚本的输出
 # =============================================================================
 function handler_traffic() {
-    # 执行 traffic.sh 脚本
-    bash "${TRAFFIC_PATH}"
+    # 执行 traffic.sh 脚本，并把 API 端口传过去（traffic.sh 是独立进程，不 source 公共库）
+    XRAY_API_PORT="${XRAY_API_PORT}" bash "${TRAFFIC_PATH}"
 }
 
 # =============================================================================
@@ -5275,12 +4910,12 @@ function handler_geodata_cron() {
                 grep -Fv -- "${GEODATA_PATH}" || true)"
             printf '%s\n' "${filtered_crontab}" | sed '/^$/d' | crontab - || return 1
             # 打印关闭 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.close_cron")" >&2
+            echo -e "${GREEN}[$(t '.title.tip')] ${NC}$(t ".${CUR_FILE}.geodata.close_cron")" >&2
         else
             # 设置 geodata.sh 脚本为可执行
             chmod a+x "${GEODATA_PATH}" || return 1
             # 先更新 GeoData，失败时保持原有 Cron 状态不变。
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.update")" >&2
+            echo -e "${GREEN}[$(t '.title.tip')] ${NC}$(t ".${CUR_FILE}.geodata.update")" >&2
             "${GEODATA_PATH}" || return 1
             # 添加新的 GeoData Cron 任务 (每天 6:30 执行)
             {
@@ -5288,7 +4923,7 @@ function handler_geodata_cron() {
                 printf '%s\n' "30 6 * * * ${GEODATA_PATH} >/dev/null 2>&1"
             } | awk 'NF && !seen[$0]++' | crontab - || return 1
             # 打印已开启 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.geodata.open_cron")" >&2
+            echo -e "${GREEN}[$(t '.title.tip')] ${NC}$(t ".${CUR_FILE}.geodata.open_cron")" >&2
         fi
     fi
 }
@@ -5449,13 +5084,13 @@ function handler_nginx_install() {
     if ! cmd_exists 'nginx'; then
         local install_mode_reply
         while true; do
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_prompt")" >&2
-            echo -e "  ${GREEN}1)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_prebuilt")" >&2
-            echo -e "  ${GREEN}2)${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_compile")" >&2
-            read -r install_mode_reply
+            log_config "$(t ".${CUR_FILE}.nginx.install_mode_prompt")" >&2
+            echo -e "  ${GREEN}1)${NC} $(t ".${CUR_FILE}.nginx.install_mode_prebuilt")" >&2
+            echo -e "  ${GREEN}2)${NC} $(t ".${CUR_FILE}.nginx.install_mode_compile")" >&2
+            install_mode_reply="$(read_line_or_abort)" || return 1
             install_mode_reply="${install_mode_reply:-1}"
             [[ "${install_mode_reply}" =~ ^[12]$ ]] && break
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.install_mode_invalid")" >&2
+            log_tip "$(t ".${CUR_FILE}.nginx.install_mode_invalid")" >&2
         done
 
         if [[ "${install_mode_reply}" == "1" ]]; then
@@ -5537,7 +5172,7 @@ function handler_nginx_cron() {
             printf '%s\n' "${filtered_crontab}" | sed '/^$/d' | crontab - ||
                 return 1
             # 打印关闭 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.close_cron")" >&2
+            echo -e "${GREEN}[$(t '.title.tip')] ${NC}$(t ".${CUR_FILE}.nginx.close_cron")" >&2
         else
             # 设置 nginx.sh 脚本为可执行
             chmod a+x "${NGINX_PATH}" || return 1
@@ -5547,7 +5182,7 @@ function handler_nginx_cron() {
                 printf '%s\n' "0 3 * * * ${NGINX_PATH} --update --brotli >/dev/null 2>&1"
             } | awk 'NF && !seen[$0]++' | crontab - || return 1
             # 打印开启 Cron 任务的提示
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.tip')] ${NC}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.open_cron")" >&2
+            echo -e "${GREEN}[$(t '.title.tip')] ${NC}$(t ".${CUR_FILE}.nginx.open_cron")" >&2
         fi
     fi
 }
@@ -5631,7 +5266,7 @@ function handler_sync_nginx_xhttp_path() {
 
     xhttp_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
     if [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
         return 1
     fi
 
@@ -5667,7 +5302,7 @@ function handler_sync_nginx_xhttp_path() {
         }
         if ! render_nginx_site_xhttp_path "${site_conf}" "${temp_file}" "${xhttp_path}"; then
             rm -f -- "${temp_file}" "${temp_files[@]}"
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_sync_fail") ${site_conf}" >&2
+            log_error "$(t ".${CUR_FILE}.nginx.path_sync_fail") ${site_conf}" >&2
             return 1
         fi
         site_files+=("${site_conf}")
@@ -5675,7 +5310,7 @@ function handler_sync_nginx_xhttp_path() {
     done
 
     if [[ "${#site_files[@]}" -eq 0 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_sync_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.path_sync_fail")" >&2
         return 1
     fi
 
@@ -5740,7 +5375,7 @@ function handler_sync_nginx_xhttp_path() {
             "${temp_files[@]}" \
             "${site_backup_files[@]}" \
             "${enabled_backup_files[@]}"
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_sync_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.path_sync_fail")" >&2
         return 1
     fi
 
@@ -5808,7 +5443,7 @@ function handler_sync_nginx_xhttp_path() {
             "${temp_files[@]}" \
             "${site_backup_files[@]}" \
             "${enabled_backup_files[@]}"
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_sync_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.path_sync_fail")" >&2
         return 1
     fi
 
@@ -5834,15 +5469,15 @@ function handler_sync_nginx_xhttp_path() {
 function handler_nginx_start() {
     handler_sync_nginx_xhttp_path || return 1
     if cmd_exists nginx && ! nginx -t; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.config_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.config_invalid")" >&2
         return 1
     fi
     if ! systemctl -q is-active nginx && ! systemctl -q start nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.start_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.start_fail")" >&2
         return 1
     fi
     if ! systemctl -q is-enabled nginx && ! systemctl -q enable nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.enable_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.enable_fail")" >&2
         return 1
     fi
     systemctl -q is-active nginx
@@ -5860,11 +5495,11 @@ function handler_nginx_start() {
 # =============================================================================
 function handler_nginx_stop() {
     if systemctl -q is-active nginx && ! systemctl -q stop nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_stop_fail")" >&2
         return 1
     fi
     if systemctl -q is-enabled nginx && ! systemctl -q disable nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.nginx_disable_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.cdn_direct.nginx_disable_fail")" >&2
         return 1
     fi
     return 0
@@ -5880,7 +5515,7 @@ function handler_disable_cdn_web_stack() {
     (handler_cloudreve_v3 'stop') || cleanup_failed=1
     (handler_cloudreve_v4 'stop') || cleanup_failed=1
     if [[ "${cleanup_failed}" -ne 0 ]]; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.cleanup_incomplete")" >&2
+        log_warn "$(t ".${CUR_FILE}.cdn_direct.cleanup_incomplete")" >&2
     fi
     return 0
 }
@@ -5924,27 +5559,27 @@ function handler_nginx_restart() {
 
     handler_sync_nginx_xhttp_path || return 1
     if cmd_exists nginx && ! nginx -t; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.config_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.config_invalid")" >&2
         return 1
     fi
 
     systemctl reset-failed nginx 2>/dev/null || true
     if systemctl -q is-active nginx; then
         if ! systemctl -q restart nginx; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.restart_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.nginx.restart_fail")" >&2
             return 1
         fi
     elif ! systemctl -q start nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.start_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.start_fail")" >&2
         return 1
     fi
 
     if ! systemctl -q is-enabled nginx && ! systemctl -q enable nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.enable_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.enable_fail")" >&2
         return 1
     fi
     if ! systemctl -q is-active nginx; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.active_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.active_fail")" >&2
         return 1
     fi
 }
@@ -5966,13 +5601,6 @@ function handler_ssl_install() {
         # 调用 ssl.sh 脚本安装 acme.sh
         exec_ssl '--install' "--email=${CA_EMAIL}" || return 1
     fi
-}
-
-function valid_change_domain_transaction_domain() {
-    local domain="$1"
-    local domain_regex='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
-
-    ((${#domain} <= 250)) && [[ "${domain}" =~ ${domain_regex} ]]
 }
 
 function render_managed_site_domain() {
@@ -6024,12 +5652,12 @@ function change_domain_transaction_relative_path_is_safe() {
         domain="${domain%.conf}"
         [[ "${relative_path}" == "sites-available/${domain}.conf" ||
             "${relative_path}" == "sites-enabled/${domain}.conf" ]] &&
-            valid_change_domain_transaction_domain "${domain}"
+            valid_domain_filename "${domain}"
         ;;
     certs/*)
         domain="${relative_path#certs/}"
         [[ "${relative_path}" == "certs/${domain}" ]] &&
-            valid_change_domain_transaction_domain "${domain}"
+            valid_domain_filename "${domain}"
         ;;
     *)
         return 1
@@ -6194,15 +5822,29 @@ function cleanup_change_domain_transaction() {
     rm -rf -- "${transaction_dir}"
 }
 
+# 域名迁移事务的域名校验失败时给出可见原因：静默 return 1 会让用户完全不知道哪里不对
+function _change_domain_invalid() {
+    local domain="$1"
+    local message
+    message="$(t ".${CUR_FILE}.nginx.domain_invalid" |
+        sed "s/\${DOMAIN_FILENAME_MAX_LENGTH}/${DOMAIN_FILENAME_MAX_LENGTH}/")"
+    log_error "${message}${domain}" >&2
+}
+
 function create_change_domain_transaction() {
     local old_domain="$1"
     local new_domain="$2"
     local transaction_parent transaction_dir domain
     local domains=()
 
-    [[ -z "${old_domain}" ]] ||
-        valid_change_domain_transaction_domain "${old_domain}" || return 1
-    [[ -z "${new_domain}" ]] || valid_change_domain_transaction_domain "${new_domain}" || return 1
+    if [[ -n "${old_domain}" ]] && ! valid_domain_filename "${old_domain}"; then
+        _change_domain_invalid "${old_domain}"
+        return 1
+    fi
+    if [[ -n "${new_domain}" ]] && ! valid_domain_filename "${new_domain}"; then
+        _change_domain_invalid "${new_domain}"
+        return 1
+    fi
     transaction_parent="$(cd -P -- "$(dirname -- "${SCRIPT_CONFIG_PATH}")" && pwd -P)" ||
         return 1
     transaction_dir="$(
@@ -6287,7 +5929,7 @@ function handler_change_domain() {
     CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     if { protocol_uses_xhttp "${CONFIG_TAG}" && [[ -z "${XHTTP_PATH}" ]]; } ||
         ! validate_xhttp_path "${XHTTP_PATH}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.nginx.path_invalid")" >&2
         return 1
     fi
     # 获取目标域名类型参数
@@ -6316,13 +5958,13 @@ function handler_change_domain() {
     if [[ "${target_domain}" == 'cdnDown' ]]; then
         local uplink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
         if [[ -n "${new_domain}" && "${new_domain,,}" == "${uplink_domain,,}" ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
             return 1
         fi
     elif [[ "${target_domain}" == 'cdn' ]]; then
         local downlink_domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
         if [[ -n "${downlink_domain}" && "${new_domain,,}" == "${downlink_domain,,}" ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_split.domain_duplicate")" >&2
             return 1
         fi
     fi
@@ -6449,7 +6091,7 @@ function handler_change_domain() {
 
     while [[ ! "${cert_source_reply}" =~ ^[12]$ ]]; do
         if [[ -n "${cert_source_reply}" ]]; then
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.source_invalid")" >&2
+            log_tip "$(t ".${CUR_FILE}.cert_source.source_invalid")" >&2
         fi
         local cert_prompt_key='prompt_cdn'
         if [[ "${CONFIG_TAG,,}" == 'sni' && "${target_domain}" == 'domain' ]]; then
@@ -6459,8 +6101,8 @@ function handler_change_domain() {
         elif [[ "${target_domain}" == 'cdnDown' ]]; then
             cert_prompt_key='prompt_cdn_down'
         fi
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.${cert_prompt_key}")" >&2
-        read -r cert_source_reply
+        log_config "$(t ".${CUR_FILE}.cert_source.${cert_prompt_key}")" >&2
+        cert_source_reply="$(read_line_or_abort)" || return 1
         cert_source_reply="${cert_source_reply:-1}"
     done
     local cert_ok=false
@@ -6470,23 +6112,23 @@ function handler_change_domain() {
         local user_privkey="${cached_privkey}"
         if [[ -z "${user_fullchain}" || -z "${user_privkey}" || ! -r "${user_fullchain}" || ! -r "${user_privkey}" ]]; then
             while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.fullchain")" >&2
-                read -r user_fullchain
+                log_config "$(t ".${CUR_FILE}.cert_source.fullchain")" >&2
+                user_fullchain="$(read_line_or_abort)" || return 1
                 user_fullchain="$(echo "${user_fullchain}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
                 [[ -z "${user_fullchain}" ]] && continue
                 if [[ ! -r "${user_fullchain}" ]]; then
-                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                    log_warn "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
                     continue
                 fi
                 break
             done
             while true; do
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.privkey")" >&2
-                read -r user_privkey
+                log_config "$(t ".${CUR_FILE}.cert_source.privkey")" >&2
+                user_privkey="$(read_line_or_abort)" || return 1
                 user_privkey="$(echo "${user_privkey}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
                 [[ -z "${user_privkey}" ]] && continue
                 if [[ ! -r "${user_privkey}" ]]; then
-                    echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+                    log_warn "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
                     continue
                 fi
                 break
@@ -6499,24 +6141,24 @@ function handler_change_domain() {
             "${new_domain}" "${cert_dir}"; then
             cert_ok=true
         else
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.cert_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.cert_source.cert_invalid")" >&2
         fi
         if [[ "${cert_ok}" == true ]]; then
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.install_ok")" >&2
+            log_info "$(t ".${CUR_FILE}.cert_source.install_ok")" >&2
         fi
     fi
     if [[ "${cert_source_reply}" == "2" && "${cert_ok}" != true ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+        log_error "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
     fi
     if [[ "${cert_source_reply}" != "2" && "${cert_ok}" != true ]]; then
         local CA_EMAIL="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.ca')"
         # 非首次安装时，检测已有证书并询问用户
         local cert_reuse_choice
-        cert_reuse_choice="$(prompt_cert_reuse "${new_domain}" "nginx")"
+        cert_reuse_choice="$(prompt_cert_reuse "${new_domain}" "nginx")" || return 1
 
         if [[ "${cert_reuse_choice}" != "new" ]]; then
             # 用户选择复用已有证书
-            echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
+            log_info "$(t ".${CUR_FILE}.cert_reuse.reusing") ${cert_reuse_choice}" >&2
             local src_cert_dir="${NGINX_CONFIG_DIR}/certs/${cert_reuse_choice}"
             local dst_cert_dir="${NGINX_CONFIG_DIR}/certs/${new_domain}"
             local managed_reuse_domain=''
@@ -6539,10 +6181,10 @@ function handler_change_domain() {
                 fi
             fi
             if [[ "${cert_ok}" != true ]]; then
-                echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
+                log_error "$(t ".${CUR_FILE}.hy2_cert.apply_fail")" >&2
             fi
             if [[ "${cert_ok}" == true ]]; then
-                echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
+                log_info "$(t ".${CUR_FILE}.cert_reuse.reuse_ok")" >&2
             fi
         else
             # 用户选择重新申请证书
@@ -6575,15 +6217,15 @@ function handler_change_domain() {
         if ! validate_tls_certificate_pair "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" ||
             ! certificate_matches_server_name "${cert_dir}/fullchain.pem" "${new_domain}"; then
             cert_ok=false
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.cert_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.cert_source.cert_invalid")" >&2
         elif ! set_nginx_certificate_permissions "${cert_dir}"; then
             cert_ok=false
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cert_source.path_invalid")" >&2
+            log_error "$(t ".${CUR_FILE}.cert_source.path_invalid")" >&2
         elif ! ln -sfn \
             "${NGINX_CONFIG_DIR}/sites-available/${new_domain}.conf" \
             "${NGINX_CONFIG_DIR}/sites-enabled/${new_domain}.conf"; then
             cert_ok=false
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.nginx.path_sync_fail")" >&2
+            log_error "$(t ".${CUR_FILE}.nginx.path_sync_fail")" >&2
         fi
     fi
     if [[ "${cert_ok}" != true ]]; then
@@ -6991,7 +6633,7 @@ function handler_reverse_config() {
     reverse_port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')"
     config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     protocol_supports_reverse "${config_tag}" || {
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy is not supported by ${config_tag}." >&2
+        log_error "Reverse proxy is not supported by ${config_tag}." >&2
         return 1
     }
     [[ -n "${reverse_uuid}" ]] || return 1
@@ -7078,13 +6720,13 @@ function handler_reverse_toggle() {
     if [[ "${requested_state}" == 'enable' ]]; then
         xray_ver="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')" || return 1
         if [[ -z "${xray_ver}" ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.not_installed")" >&2
+            log_error "$(t ".${CUR_FILE}.reverse.not_installed")" >&2
             return 1
         fi
         local config_tag
         config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')" || return 1
         if ! protocol_supports_reverse "${config_tag}"; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy is not supported by ${config_tag}." >&2
+            log_error "Reverse proxy is not supported by ${config_tag}." >&2
             return 1
         fi
 
@@ -7102,7 +6744,7 @@ function handler_reverse_toggle() {
     if [[ "${requested_state}" == 'disable' ]]; then
         local previous_reverse_port
         previous_reverse_port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.reversePort // 8443')"
-        close_owned_firewall_ports 'reverse' "${previous_reverse_port}" 1 || return 1
+        firewall_owned_close 'reverse' "${previous_reverse_port}" 1 || return 1
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
             .xray.reverse = 0 |
             .xray.reverseUuid = "" |
@@ -7110,16 +6752,16 @@ function handler_reverse_toggle() {
             .xray.reverseMode = "" |
             del(.xray.reversePort)
         ')" || {
-            restore_owned_firewall_feature_state \
+            firewall_owned_restore_feature \
                 "${original_script_config}" 'reverse' "${previous_reverse_port}" tcp || true
             return 1
         }
         if ! apply_xray_state_transaction "${original_script_config}" "${original_xray_config}"; then
-            restore_owned_firewall_feature_state \
+            firewall_owned_restore_feature \
                 "${original_script_config}" 'reverse' "${previous_reverse_port}" tcp || true
             return 1
         fi
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.disabled")" >&2
+        log_config "$(t ".${CUR_FILE}.reverse.disabled")" >&2
     else
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq \
             --argjson port "${reverse_port}" --arg target "${reverse_target}" --arg uuid "${reverse_uuid}" '
@@ -7130,7 +6772,7 @@ function handler_reverse_toggle() {
             .xray.reverseMode = "forward"
         ')" || return 1
         apply_xray_state_transaction "${original_script_config}" "${original_xray_config}" || return 1
-        echo -e "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.config')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.enabled")" >&2
+        log_config "$(t ".${CUR_FILE}.reverse.enabled")" >&2
     fi
 }
 
@@ -7143,7 +6785,7 @@ function handler_reverse_toggle() {
 function handler_reverse_share() {
     local reverse_status=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.reverse // 0) | tonumber? // 0')
     if [[ "${reverse_status}" -ne 1 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.no_reverse")" >&2
+        log_error "$(t ".${CUR_FILE}.reverse.no_reverse")" >&2
         return 1
     fi
 
@@ -7158,16 +6800,16 @@ function handler_reverse_share() {
     local xhttp_mode=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.xhttpMode // "auto"')
 
     if ! protocol_supports_reverse "${current_tag}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy sharing is not supported by ${current_tag}." >&2
+        log_error "Reverse proxy sharing is not supported by ${current_tag}." >&2
         return 1
     fi
     if [[ -z "${reverse_uuid}" || -z "${reverse_target}" || -z "${server_name}" || -z "${public_key}" ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy state is incomplete." >&2
+        log_error "Reverse proxy state is incomplete." >&2
         return 1
     fi
     if protocol_uses_xhttp "${current_tag}" &&
         { [[ -z "${xhttp_path}" ]] || ! validate_xhttp_path "${xhttp_path}"; }; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} Reverse proxy XHTTP path is missing." >&2
+        log_error "Reverse proxy XHTTP path is missing." >&2
         return 1
     fi
     parse_host_port "${reverse_target}" || return 1
@@ -7180,7 +6822,7 @@ function handler_reverse_share() {
     local server_ip
     server_ip="$(curl -fsS4 --max-time 10 https://api.ipify.org 2>/dev/null || curl -fsS6 --max-time 10 https://api64.ipify.org 2>/dev/null)"
     if [[ -z "${server_ip}" ]] || ! valid_ip_literal "${server_ip}"; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.ip_fetch_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.reverse.ip_fetch_fail")" >&2
         return 1
     fi
 
@@ -7307,12 +6949,12 @@ function handler_reverse_share() {
             ]
         }')
 
-    echo -e "${GREEN}$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_title")${NC}"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_hint")"
+    echo -e "${GREEN}$(t ".${CUR_FILE}.reverse.bridge_title")${NC}"
+    echo -e "$(t ".${CUR_FILE}.reverse.bridge_hint")"
     echo "--------------------------------------------------"
     echo "${config}" | jq '.'
     echo "--------------------------------------------------"
-    echo -e "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse.bridge_info")"
+    echo -e "$(t ".${CUR_FILE}.reverse.bridge_info")"
 }
 
 # =============================================================================
@@ -7342,8 +6984,9 @@ function handler_quick_install() {
     if ! cmd_exists 'xray'; then
         run_github_proxy_choice 'n' || return 1
     fi
-    # 快速安装固定启用默认规则，并由 handler_xray_config 一次性提交。
-    CONFIG_DATA['rules']='Y'
+    # 快速安装固定启用默认拦截规则（bt/cn/ad），但不再顺带「重置」用户自定义规则：
+    # rules=N 保留已保存的 .rules，默认规则由各自的开关单独加入。
+    CONFIG_DATA['rules']='N'
     CONFIG_DATA['block-bt']='Y'
     CONFIG_DATA['block-cn']='Y'
     CONFIG_DATA['block-ad']='Y'
@@ -7420,7 +7063,7 @@ function main() {
     --deploy-acme-certificate) handler_deploy_acme_certificate "$@" ;;
     --restore-certificate-hooks) handler_restore_certificate_renewal_hooks ;;
     --script-config)
-        if [[ "${1,,}" == 'multi' ]]; then
+        if protocol_is_multi_config "$1"; then
             handler_read_multi_xray_config || return 1
         else
             handler_read_xray_config "$1" || return 1 # 读取 Xray 配置输入
@@ -7434,42 +7077,25 @@ function main() {
             handler_cdn_direct_cert || return 1
         fi
 
-        if [[ "${current_tag,,}" == 'multi' ]]; then
-            local has_hy2="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; (.tag | ascii_downcase) == "hy2")')"
-            local has_vless="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; ((.tag | ascii_downcase) == "mkcp") or ((.tag | ascii_downcase) == "vision") or ((.tag | ascii_downcase) == "xhttp") or ((.tag | ascii_downcase) == "fallback"))')"
-            local has_reality="$(echo "${SCRIPT_CONFIG}" | jq -r 'any(.xray.nodes[]?; ((.tag | ascii_downcase) == "vision") or ((.tag | ascii_downcase) == "xhttp") or ((.tag | ascii_downcase) == "trojan") or ((.tag | ascii_downcase) == "fallback"))')"
-            if [[ "${has_hy2}" == 'true' ]]; then
-                handler_hy2_cert || return 1
-            fi
-            if [[ "${has_reality}" == 'true' ]]; then
-                handler_reality_key_config || return 1
-            fi
-
-            if [[ "${has_vless}" == 'true' ]]; then
-                handler_xray_config || return 1
-            else
-                handler_xray_config 1 || return 1
-            fi
-        elif protocol_uses_hy2_certificate "${current_tag}"; then
+        # multi 是否使用某协议特征（以及 multi 节点的 tag 从哪来）由 lib/protocols.sh
+        # 统一判定：单协议 tag 直接判定，multi 逐个节点判定。这里不再区分两条分支。
+        if protocol_tag_uses "${current_tag}" protocol_uses_hy2_certificate; then
             handler_hy2_cert || return 1
-            handler_xray_config 1 || return 1
+        fi
+        if protocol_tag_uses "${current_tag}" protocol_uses_reality; then
+            handler_reality_key_config || return 1
+        fi
+        if protocol_tag_uses "${current_tag}" protocol_uses_vless_enc; then
+            handler_xray_config || return 1
         else
-            if protocol_uses_reality "${current_tag}"; then
-                handler_reality_key_config || return 1
-            fi
-
-            if protocol_uses_vless_enc "${current_tag}"; then
-                handler_xray_config || return 1
-            else
-                handler_xray_config 1 || return 1
-            fi
+            handler_xray_config 1 || return 1
         fi
         ;;
     --routing) handler_routing "$@" ;; # 处理路由规则
     --change-domain)
         local change_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
         if [[ "${change_tag,,}" == 'cdn' && "$(get_cdn_backend)" == 'xray' ]]; then
-            echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.cdn_direct.use_reconfigure")" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.use_reconfigure")" >&2
             return 1
         fi
         handler_change_domain "$1" || return 1 # 处理域名配置

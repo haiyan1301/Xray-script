@@ -2,7 +2,9 @@
 # =============================================================================
 # 脚本名称: common.sh
 # 功能描述: Xray-script 项目的公共函数库。
-#           提供颜色常量、操作系统检测、命令检测、i18n 加载等公共功能。
+#           提供颜色常量、版本门槛、端口常量等公共定义，并聚合五个可独立复用的
+#           子库：lib/i18n.sh（取值层）、lib/log.sh（日志层）、lib/system.sh（探测层）、
+#           lib/firewall.sh（防火墙放行与账本层）、lib/cert.sh（证书与 ACME 层）。
 #           其他脚本通过 source 引入本文件以避免代码重复。
 # 作者: zxcvos
 # 时间: 2025-07-25
@@ -15,26 +17,40 @@
 [[ -n "${_COMMON_SH_LOADED:-}" ]] && return 0
 readonly _COMMON_SH_LOADED=1
 
+# --- 子库聚合 ---
+# 这六个子库各自只定义一类函数（取值/日志/探测/防火墙/证书/事务调度），不定义颜色与
+# PATH，因此不 source 本文件的 core/read.sh 与 service/*.sh 也能按需单独引用。
+readonly _COMMON_LIB_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${_COMMON_LIB_DIR}/i18n.sh"
+source "${_COMMON_LIB_DIR}/log.sh"
+source "${_COMMON_LIB_DIR}/system.sh"
+source "${_COMMON_LIB_DIR}/firewall.sh"
+source "${_COMMON_LIB_DIR}/cert.sh"
+source "${_COMMON_LIB_DIR}/transaction.sh"
+
 # --- 颜色常量 ---
 readonly GREEN='\033[32m'  # 绿色
 readonly YELLOW='\033[33m' # 黄色
 readonly RED='\033[31m'    # 红色
 readonly NC='\033[0m'      # 无颜色（重置）
 
+# --- 支持的最低系统版本 ---
+# 与 README「已测试系统」一致；service/nginx.sh 编译 Nginx 也要求这一下限。
+# 提示文案由这些常量生成，避免多处硬编码出现互相矛盾的版本号。
+readonly MIN_UBUNTU=20
+readonly MIN_DEBIAN=10
+readonly MIN_CENTOS=7
+
+# --- Xray API 端口 ---
+# 该端口由 Xray 内置 API 占用，不能分配给入站节点。config/xray/*.json 模板中的
+# api 入站同样写死这个值；改动时需同步模板。
+readonly XRAY_API_PORT=32768
+
 # --- 环境设置 ---
 PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:${HOME}/bin:/snap/bin:${PATH:-}"
 export PATH
 
-# =============================================================================
-# 函数名称: cmd_exists
-# 功能描述: 检查指定的命令是否存在于系统中。
-# 参数:
-#   $1: 要检查的命令名称
-# 返回值: 0-命令存在 1-命令不存在
-# =============================================================================
-function cmd_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+# cmd_exists / _os / _os_full / _os_ver 由 lib/system.sh 提供（见上方聚合 source）。
 
 function valid_ipv4_literal() {
     local value="$1"
@@ -109,13 +125,44 @@ function valid_hostname() {
     done
 }
 
+# 域名字面量：RFC 1035 上限 253 字节
+readonly DOMAIN_REGEX='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
+readonly DOMAIN_MAX_LENGTH=253
+# 域名会被用作文件名（Nginx 站点配置 <domain>.conf）时的上限，为 ".conf" 预留 5 字节
+readonly DOMAIN_FILENAME_MAX_LENGTH=250
+
+# =============================================================================
+# 函数名称: valid_domain
+# 功能描述: 校验字符串是否为合法域名（253 字节上限）。
+# 参数:
+#   $1: 待校验的字符串
+# 返回值: 0-有效 1-无效
+# =============================================================================
+function valid_domain() {
+    local domain="$1"
+    ((${#domain} > 0 && ${#domain} <= DOMAIN_MAX_LENGTH)) && [[ "${domain}" =~ ${DOMAIN_REGEX} ]]
+}
+
+# =============================================================================
+# 函数名称: valid_domain_filename
+# 功能描述: 校验字符串是否为「可安全用作文件名」的合法域名。
+#           比 valid_domain 更严格：预留 ".conf" 后缀，避免域名过长导致文件名超限。
+# 参数:
+#   $1: 待校验的字符串
+# 返回值: 0-有效 1-无效
+# =============================================================================
+function valid_domain_filename() {
+    local domain="$1"
+    ((${#domain} > 0 && ${#domain} <= DOMAIN_FILENAME_MAX_LENGTH)) && [[ "${domain}" =~ ${DOMAIN_REGEX} ]]
+}
+
 declare PARSED_HOST=''
 declare PARSED_PORT=''
 declare PARSED_HOST_IS_IP=0
 
 function parse_host_port() {
     local value="$1"
-    local host='' port=''
+    local host='' port='' normalized_port=''
 
     PARSED_HOST=''
     PARSED_PORT=''
@@ -136,8 +183,14 @@ function parse_host_port() {
     else
         return 1
     fi
+    # 与 core/check.sh 的 check_port 同一套字符串层归一化：20 位十进制串进入 Bash
+    # 的 64 位算术会回绕（18446744073709551617 → 1），超范围的反代目标端口可能被
+    # 静默接受成另一个端口。先去掉前导零并限位，再做算术比较。
     [[ "${port}" =~ ^[0-9]+$ ]] || return 1
-    port=$((10#${port}))
+    normalized_port="${port#"${port%%[!0]*}"}"
+    normalized_port="${normalized_port:-0}"
+    [[ "${#normalized_port}" -le 5 ]] || return 1
+    port=$((10#${normalized_port}))
     ((port >= 1 && port <= 65535)) || return 1
     PARSED_HOST="${host}"
     PARSED_PORT="${port}"
@@ -174,81 +227,35 @@ function is_managed_hy2_ip_cron_line() {
 }
 
 # =============================================================================
-# 函数名称: _os
-# 功能描述: 检测当前操作系统的发行版名称。
+# 函数名称: probe_public_ip
+# 功能描述: 探测本机公网地址（IPv4 / IPv6 各请求一次），同一进程内只探测一次。
+#           结果写入 PUBLIC_IPV4 / PUBLIC_IPV6，供 DNS 校验、分享链接等复用。
 # 参数: 无
-# 返回值: 操作系统名称 (echo 输出: debian/ubuntu/centos/...)
+# 返回值: 0-至少探测到一个地址 1-两个地址都没探测到
 # =============================================================================
-function _os() {
-    local os=""
-    if [[ -f "/etc/debian_version" ]]; then
-        source /etc/os-release && os="${ID}"
-        printf -- "%s" "${os}" && return
-    fi
-    if [[ -f "/etc/redhat-release" ]]; then
-        os="centos"
-        printf -- "%s" "${os}" && return
-    fi
-}
+declare PUBLIC_IPV4=''
+declare PUBLIC_IPV6=''
+declare PUBLIC_IP_PROBED=0
 
-# =============================================================================
-# 函数名称: _os_full
-# 功能描述: 获取当前操作系统的完整发行版信息。
-# 参数: 无
-# 返回值: 完整的操作系统版本信息 (echo 输出)
-# =============================================================================
-function _os_full() {
-    if [[ -f /etc/redhat-release ]]; then
-        awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
-    fi
-    if [[ -f /etc/os-release ]]; then
-        awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
-    fi
-    if [[ -f /etc/lsb-release ]]; then
-        awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
-    fi
-}
+function probe_public_ip() {
+    local candidate=''
 
-# =============================================================================
-# 函数名称: _os_ver
-# 功能描述: 获取当前操作系统的主版本号。
-# 参数: 无
-# 返回值: 操作系统的主版本号 (echo 输出)
-# =============================================================================
-function _os_ver() {
-    local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
-    printf -- "%s" "${main_ver%%.*}"
-}
-
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           从 config.json 读取语言设置，加载对应的 JSON i18n 文件。
-# 参数: 无（使用全局变量 SCRIPT_CONFIG_PATH 和 I18N_DIR）
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# =============================================================================
-function load_i18n() {
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
+    if [[ "${PUBLIC_IP_PROBED}" -eq 1 ]]; then
+        [[ -n "${PUBLIC_IPV4}" || -n "${PUBLIC_IPV6}" ]]
+        return
     fi
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
+    PUBLIC_IP_PROBED=1
+    PUBLIC_IPV4=''
+    PUBLIC_IPV6=''
+    if candidate="$(curl -fsS4L --max-time 10 https://api.ipify.org 2>/dev/null)" &&
+        valid_ipv4_literal "${candidate}"; then
+        PUBLIC_IPV4="${candidate}"
     fi
-    local i18n_file="${I18N_DIR}/${lang}.json"
-    if [[ ! -f "${i18n_file}" ]]; then
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        exit 1
+    if candidate="$(curl -fsS6L --max-time 10 https://api64.ipify.org 2>/dev/null)" &&
+        valid_ipv6_literal "${candidate}"; then
+        PUBLIC_IPV6="${candidate}"
     fi
-    I18N_DATA="$(jq '.' "${i18n_file}")"
+    [[ -n "${PUBLIC_IPV4}" || -n "${PUBLIC_IPV6}" ]]
 }
 
 # =============================================================================
@@ -294,4 +301,25 @@ function write_config() {
         return 1
     fi
     sync
+}
+
+# =============================================================================
+# 函数名称: read_line_or_abort
+# 功能描述: 读取一行用户输入，区分「EOF / stdin 关闭」与「用户按回车」。
+#           交互循环里的裸 read 在 EOF 下变量保持空、校验必然失败，于是无限重试，
+#           非交互调用（stdin 已耗尽）会把脚本挂死；带默认值的裸 read 则把 EOF 当成
+#           用户接受了默认项，静默执行签发证书这类不可逆动作。两种都不接受：
+#           读取失败时打印中止提示并返回 1，由调用方 return 中止整条操作。
+#           用法: value="$(read_line_or_abort)" || return 1
+# 参数: 无
+# 返回值: 0-读到一行（stdout 输出该行，可为空串）1-EOF / 读取失败
+# =============================================================================
+function read_line_or_abort() {
+    local value=''
+    if ! read -r value; then
+        printf '\n' >&2
+        log_error "$(t '.menu.aborted')" >&2
+        return 1
+    fi
+    printf '%s\n' "${value}"
 }

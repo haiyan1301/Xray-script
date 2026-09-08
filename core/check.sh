@@ -17,6 +17,14 @@
 # 配置:
 #   - ${SCRIPT_CONFIG_DIR}/config.json: 用于读取语言设置 (language)
 #   - ${I18N_DIR}/${lang}.json: 用于读取具体的提示文本 (i18n 数据文件)
+#
+# 退出码契约（调用方只依赖退出码，不解析输出）:
+#   0 - 校验通过
+#   1 - 校验失败（输入不合法）
+#   2 - 用法错误（未知选项；绝不可当成「校验通过」放行）
+# 所有提示信息一律写 stderr（main 里各分支显式 >&2），stdout 留给调用方。
+# 规则单一来源：IP/域名/主机端口在 lib/common.sh，路径规则在 lib/protocols.sh，
+# 本脚本只负责「取值 + 打印 + 返回码」，不再自带第二套正则。
 # =============================================================================
 
 # set -Eeuxo pipefail
@@ -26,16 +34,15 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin:/snap/bin
 export PATH
 
-# 定义颜色代码，用于在终端输出带颜色的信息
-readonly GREEN='\033[32m'  # 绿色
-readonly YELLOW='\033[33m' # 黄色
-readonly RED='\033[31m'    # 红色
-readonly NC='\033[0m'      # 无颜色（重置）
-
 # 获取当前脚本的目录、文件名（不含扩展名）和项目根目录的绝对路径
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+
+# 复用公共的 IPv4/IPv6 语法校验器；本脚本仍保持可独立执行。
+source "${PROJECT_ROOT}/lib/common.sh"
+# 复用 lib/protocols.sh 里的路径规则（validate_path_rules），避免与 handler 各自维护一套。
+source "${PROJECT_ROOT}/lib/protocols.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -44,128 +51,30 @@ readonly CONFIG_DIR="${PROJECT_ROOT}/config"                   # 配置文件目
 readonly CONFIG_XRAY_DIR="${CONFIG_DIR}/xray"                  # Xray 配置文件目录
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主配置文件路径
 
+# --- 退出码契约常量 ---
+# 见文件头「退出码契约」。调用方（core/handler.sh 的 exec_check）只依赖这三个码。
+readonly CHECK_OK=0      # 校验通过
+readonly CHECK_INVALID=1 # 校验失败（输入不合法）
+readonly CHECK_USAGE=2   # 用法错误（未知选项）
+
 # --- 正则表达式常量 ---
 # 定义各种数据格式的正则表达式，用于验证输入
-readonly DOMAIN_REGEX="^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"                   # 域名
-readonly IPV4_REGEX='^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$' # IPv4
-readonly IPV6_REGEX='^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'                                            # IPv6 (简化版)
+# DOMAIN_REGEX 由 lib/common.sh 提供（与 valid_domain / valid_domain_filename 同源）
 readonly HEX_REGEX='^[0-9a-fA-F]+$'                                                                         # 十六进制字符串
-readonly UUID_REGEX='^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$' # UUID
+readonly UUID_REGEX='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' # UUID
 readonly EMAIL_LOCAL_REGEX='^[a-zA-Z0-9_%+-]+(\.[a-zA-Z0-9_%+-]+)*$'                                       # 邮箱本地部分（点分原子）
 
 # --- 全局变量声明 ---
 # 声明用于存储语言参数和国际化数据的全局变量
 declare LANG_PARAM='' # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''  # 存储从 i18n JSON 文件中读取的全部数据
+
+
+# _info / _pass / _fail / _test 由 lib/log.sh 统一提供（经第 35 行的 lib/common.sh）。
+# 统一后 .title.info 与全仓其它位置一致使用绿色（原先此处是黄色）。
 
 # =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
+# 域名校验由 lib/common.sh 的 valid_domain 统一提供（本脚本第 35 行已 source）。
 # =============================================================================
-function load_i18n() {
-    # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
-
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
-    fi
-
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
-
-# =============================================================================
-# 函数名称: _info
-# 功能描述: 打印信息级别的提示消息。
-# 参数:
-#   $1: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function _info() {
-    # 从 i18n 数据中读取 "信息" 标题，然后用黄色打印消息
-    printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.info')]${NC} %s\n" "$1" >&2
-}
-
-# =============================================================================
-# 函数名称: _pass
-# 功能描述: 打印成功/通过级别的提示消息。
-# 参数:
-#   $1: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function _pass() {
-    # 从 i18n 数据中读取 "通过" 标题，然后用绿色打印消息
-    printf "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.pass')]${NC} %s\n" "$1" >&2
-}
-
-# =============================================================================
-# 函数名称: _fail
-# 功能描述: 打印失败/错误级别的提示消息。
-# 参数:
-#   $1: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function _fail() {
-    # 从 i18n 数据中读取 "失败" 标题，然后用红色打印消息
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.fail')]${NC} %s\n" "$1" >&2
-}
-
-# =============================================================================
-# 函数名称: _test
-# 功能描述: 打印测试/检查过程中的提示消息。
-# 参数:
-#   $1: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function _test() {
-    # 从 i18n 数据中读取 "测试" 标题，然后用黄色打印消息
-    printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.test')]${NC} %s\n" "$1" >&2
-}
-
-# =============================================================================
-# 函数名称: valid_domain
-# 功能描述: 使用正则表达式检查给定字符串是否为有效的域名格式。
-# 参数:
-#   $1: 待检查的域名字符串 (domain)
-# 返回值: 0-有效 1-无效 (直接由 [[ =~ ]] 命令的退出码决定)
-# =============================================================================
-function valid_domain() {
-    local domain="$1" # 获取域名参数
-
-    # 使用正则表达式匹配域名格式，成功匹配返回 0，否则返回 1
-    ((${#domain} <= 253)) && [[ "$domain" =~ $DOMAIN_REGEX ]]
-}
 
 # =============================================================================
 # 函数名称: resolve_domain
@@ -195,10 +104,17 @@ function resolve_domain() {
 # =============================================================================
 function dns_resolution() {
     local domain=$1 # 获取域名参数
+    local expected_ipv4 expected_ipv6
 
-    # 获取当前服务器的公网 IPv4 和 IPv6 地址
-    local expected_ipv4="$(curl -fsS4L --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-    local expected_ipv6="$(curl -fsS6L --max-time 10 https://api64.ipify.org 2>/dev/null || true)"
+    # 父进程已探测过公网地址时直接复用，避免每个域名都重新请求一次。
+    if [[ "${CHECK_DNS_IP_PROBED:-0}" -eq 1 ]]; then
+        expected_ipv4="${CHECK_DNS_EXPECTED_IPV4:-}"
+        expected_ipv6="${CHECK_DNS_EXPECTED_IPV6:-}"
+    else
+        probe_public_ip || true
+        expected_ipv4="${PUBLIC_IPV4}"
+        expected_ipv6="${PUBLIC_IPV6}"
+    fi
 
     local resolved=0 # 初始化标志变量，表示是否匹配
 
@@ -227,8 +143,8 @@ function dns_resolution() {
 function test_tcp_connection() {
     # 尝试打开到 host:port 的 TCP 连接，将输出重定向到 /dev/null
     # 成功则返回 0，失败（如连接被拒绝、超时）则返回非 0
+    # 让 /dev/tcp 操作直接成为函数的最终状态，避免额外读取和转发 `$?`。
     echo >/dev/tcp/"$1"/"$2" 2>/dev/null
-    return $? # 返回上一条命令的退出码
 }
 
 # =============================================================================
@@ -257,19 +173,19 @@ function check_ip() {
     local ip="$1" # 获取 IP 地址参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ip.check")${ip}"
+    _info "$(t ".${CUR_FILE}.ip.check")${ip}"
 
     # 使用正则表达式检查 IPv4 格式
-    if [[ "$ip" =~ $IPV4_REGEX ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ip.ipv4_valid")$ip"
+    if valid_ipv4_literal "$ip"; then
+        _pass "$(t ".${CUR_FILE}.ip.ipv4_valid")$ip"
         return 0
     # 使用正则表达式检查 IPv6 格式
-    elif [[ "$ip" =~ $IPV6_REGEX ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ip.ipv6_valid")$ip"
+    elif valid_ipv6_literal "$ip"; then
+        _pass "$(t ".${CUR_FILE}.ip.ipv6_valid")$ip"
         return 0
     else
         # 如果都不匹配，则为无效 IP
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ip.invalid")$ip"
+        _fail "$(t ".${CUR_FILE}.ip.invalid")$ip"
         return 1
     fi
 }
@@ -277,57 +193,84 @@ function check_ip() {
 # =============================================================================
 # 函数名称: check_port
 # 功能描述: 验证端口号是否在有效范围内 (1-65535)。
+#           先在字符串层归一化再算术比较，避免超长数字在 Bash 算术中回绕。
 # 参数:
 #   $1: 待检查的端口号 (port)
 # 返回值: 0-有效或为空 1-无效 (并打印相应的提示信息到 >&2)
 # =============================================================================
 function check_port() {
     local port="$1" # 获取端口号参数
+    local normalized=''
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.check")${port}"
+    _info "$(t ".${CUR_FILE}.port.check")${port}"
 
     # 如果端口为空，则认为是有效的（可能表示使用默认值）
     if [[ -z "${port}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.empty")"
-    elif [[ "${port}" =~ ^0*32768$ ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.reserved_error")"
-        return 1
-    # 检查端口号是否在 1-65535 范围内
-    elif [[ "${port}" =~ ^[0-9]+$ ]] && ((10#${port} <= 65535 && 10#${port} >= 1)); then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.valid")$port"
-    else
-        # 如果超出范围，则为无效
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.port.range_error")$port"
+        _pass "$(t ".${CUR_FILE}.port.empty")"
+        return 0
+    fi
+
+    # 先在字符串层归一化（纯数字 + 去前导零 + 限位），再做算术比较。
+    # 20 位十进制串进入 Bash 的 64 位算术会回绕：18446744073709551617 会变成 1，
+    # 18446744073709584384 会变成 32768，超范围输入因此被静默接受成另一个端口。
+    if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+        _fail "$(t ".${CUR_FILE}.port.range_error")$port"
         return 1
     fi
+    normalized="${port#"${port%%[!0]*}"}"
+    normalized="${normalized:-0}"
+
+    # 检查归一化后的端口号是否在 1-65535 范围内
+    if [[ "${#normalized}" -gt 5 ]] || ((10#${normalized} < 1 || 10#${normalized} > 65535)); then
+        _fail "$(t ".${CUR_FILE}.port.range_error")$port"
+        return 1
+    fi
+
+    # 保留端口在归一化之后比较，避免 "032768" 之类绕过检查。
+    if [[ -n "${XRAY_API_PORT:-}" ]] && ((10#${normalized} == XRAY_API_PORT)); then
+        _fail "$(t ".${CUR_FILE}.port.reserved_error" | sed "s/32768/${XRAY_API_PORT}/g")"
+        return 1
+    fi
+
+    _pass "$(t ".${CUR_FILE}.port.valid")$port"
     return 0
 }
 
 # =============================================================================
 # 函数名称: check_uuid
-# 功能描述: 验证 UUID 是否符合标准格式。
-#           注意：此函数的逻辑似乎与注释描述有出入，它将空 UUID 和非标准格式视为 "pass"。
+# 功能描述: 验证 UUID 输入。空值与普通字符串按设计放行（前者自动生成，后者由 Xray 映射成
+#           UUID），但含空白或控制字符的值无法安全写入配置，判为无效。
 # 参数:
 #   $1: 待检查的 UUID 字符串 (uuid)
-# 返回值: 总是返回 0 (并打印相应的提示信息到 >&2)
+# 返回值: 0-有效 1-无效 (并打印相应的提示信息到 >&2)
 # =============================================================================
 function check_uuid() {
     local uuid="$1" # 获取 UUID 参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uuid.check")${uuid}"
+    _info "$(t ".${CUR_FILE}.uuid.check")${uuid}"
 
     # 如果 UUID 为空，则认为是有效的（可能表示使用默认值或自动生成）
     if [[ -z "${uuid}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uuid.empty")"
-    # 如果 UUID 不符合标准格式，则认为是有效的字符串（可能表示使用普通字符串）
-    elif ! [[ "$uuid" =~ $UUID_REGEX ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uuid.string")$uuid"
-    else
-        # 如果符合标准格式，则为有效 UUID
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.uuid.valid")$uuid"
+        _pass "$(t ".${CUR_FILE}.uuid.empty")"
+        return 0
     fi
+
+    # 含空白或控制字符的输入既无法安全落盘，也无法作为参数传递
+    if [[ "${uuid}" =~ [[:space:][:cntrl:]] ]]; then
+        _fail "$(t ".${CUR_FILE}.uuid.unsafe")${uuid}"
+        return 1
+    fi
+
+    # 如果 UUID 不符合标准格式，则认为是有效的字符串（可能表示使用普通字符串）
+    if ! [[ "${uuid}" =~ $UUID_REGEX ]]; then
+        _pass "$(t ".${CUR_FILE}.uuid.string")${uuid}"
+        return 0
+    fi
+
+    # 如果符合标准格式，则为有效 UUID
+    _pass "$(t ".${CUR_FILE}.uuid.valid")${uuid}"
     return 0
 }
 
@@ -342,28 +285,28 @@ function check_password() {
     local password="$1" # 获取密码参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.check")${password}"
+    _info "$(t ".${CUR_FILE}.password.check")${password}"
 
     # 如果密码为空，则认为无效
     if [[ -z "${password}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.empty")"
+        _pass "$(t ".${CUR_FILE}.password.empty")"
         return 0
     fi
 
     # 检查密码中是否包含空格
     if [[ "${password}" == *" "* ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.space_error")$password"
+        _fail "$(t ".${CUR_FILE}.password.space_error")$password"
         return 1
     fi
 
     # 检查密码长度是否小于 8
     if ((${#password} < 8)); then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.length_error")$password"
+        _fail "$(t ".${CUR_FILE}.password.length_error")$password"
         return 1
     fi
 
     # 如果所有检查都通过，则密码有效
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.password.valid")$password"
+    _pass "$(t ".${CUR_FILE}.password.valid")$password"
     return 0
 }
 
@@ -371,24 +314,25 @@ function check_ss2022_key() {
     local key="$1"
     local decoded_size
 
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.check")"
+    _info "$(t ".${CUR_FILE}.ss2022_key.check")"
     if [[ -z "${key}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.empty")"
+        _pass "$(t ".${CUR_FILE}.ss2022_key.empty")"
         return 0
     fi
 
     if [[ ! "${key}" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.invalid")"
+        _fail "$(t ".${CUR_FILE}.ss2022_key.invalid")"
         return 1
     fi
 
     decoded_size="$(printf '%s' "${key}" | base64 --decode 2>/dev/null | wc -c | tr -d '[:space:]')"
     if [[ "${decoded_size}" != '32' ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.invalid")"
+        _fail "$(t ".${CUR_FILE}.ss2022_key.invalid")"
         return 1
     fi
 
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.ss2022_key.valid")"
+    _pass "$(t ".${CUR_FILE}.ss2022_key.valid")"
+    return "${CHECK_OK}"
 }
 
 function check_xhttp_mode() {
@@ -399,108 +343,68 @@ function check_xhttp_mode() {
         return 0
         ;;
     *)
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.xhttp_mode.invalid")${1}"
+        _fail "$(t ".${CUR_FILE}.xhttp_mode.invalid")${1}"
         return 1
         ;;
     esac
 }
 
 # =============================================================================
-# 函数名称: check_path
-# 功能描述: 验证路径字符串是否符合 URL 路径格式要求。
+# 函数名称: _path_fail
+# 功能描述: 根据 validate_path_rules 返回的原因打印对应的 i18n 失败信息。
+# 参数:
+#   $1: 失败原因 (validate_path_rules 设置的 _PATH_ERROR)
+#   $2: 待检查的路径字符串
+# 返回值: 无 (打印到 >&2)
+# =============================================================================
+function _path_fail() {
+    local reason="$1" path="$2"
+    # 失败原因 -> i18n 键后缀的映射由 lib/protocols.sh 的 path_error_key 统一提供，
+    # 本脚本不再自己维护一份（否则 protocols.sh 新增原因时会静默落到 char_error）。
+    _fail "$(t ".${CUR_FILE}.path.$(path_error_key "${reason}")")${path}"
+}
+
+# =============================================================================
+# 函数名称: check_path_ex
+# 功能描述: 路径校验的共用实现。check_path 与 check_path_required 只差两组参数，
+#           规则本身来自 lib/protocols.sh 的 validate_path_rules。
 # 参数:
 #   $1: 待检查的路径字符串 (path)
+#   $2: 是否允许为空 (yes/no)
+#   $3: 是否要求首尾斜杠 (yes/no)
 # 返回值: 0-有效 1-无效 (并打印相应的提示信息到 >&2)
 # =============================================================================
-function check_path() {
-    local path="$1" # 获取路径参数
+function check_path_ex() {
+    local path="$1"
+    local allow_empty="${2:-no}"
+    local require_slashes="${3:-no}"
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.check")${path}"
+    _info "$(t ".${CUR_FILE}.path.check")${path}"
 
-    # 如果路径为空，则认为是有效的（可能表示使用根路径）
-    if [[ -z "${path}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.empty")"
-        return 0
+    # 允许为空且确实为空：放行并给出「将使用默认值」的提示。
+    # 不能省掉这一步只靠 validate_path_rules 的 allow_empty——那样会走到 .path.valid
+    # 分支，少一条 .path.empty 提示。
+    if [[ -z "${path}" && "${allow_empty}" == 'yes' ]]; then
+        _pass "$(t ".${CUR_FILE}.path.empty")"
+        return "${CHECK_OK}"
     fi
 
-    if [[ "${path}" == "/" ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.root_error")$path"
-        return 1
-    fi
-
-    # 检查路径中是否包含空格
-    if [[ "${path}" == *" "* ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
-        return 1
-    fi
-
-    # 检查路径长度是否超过 128
-    if ((${#path} > 128)); then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.length_error")$path"
-        return 1
-    fi
-
-    # 检查路径是否包含不允许的字符（只允许字母、数字、下划线、斜杠、点、连字符）
-    if [[ "${path}" =~ [^a-zA-Z0-9_/.\-] ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.char_error")$path"
-        return 1
-    fi
-
-    # 检查路径是否包含连续的斜杠
-    if [[ "${path}" =~ // ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.double_slash_error")$path"
-        return 1
+    if ! validate_path_rules "${path}" "${allow_empty}" "${require_slashes}"; then
+        _path_fail "${_PATH_ERROR}" "${path}"
+        return "${CHECK_INVALID}"
     fi
 
     # 如果所有检查都通过，则路径有效
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.valid")$path"
-    return 0
+    _pass "$(t ".${CUR_FILE}.path.valid")${path}"
+    return "${CHECK_OK}"
 }
 
-function check_path_required() {
-    local path="$1"
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.check")${path}"
+# 允许为空，不要求首尾斜杠（非 xhttp 协议的路径）
+function check_path() { check_path_ex "${1:-}" 'yes' 'no'; }
 
-    if [[ -z "${path}" ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.required_error")"
-        return 1
-    fi
-
-    if [[ "${path}" == "/" ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.root_error")$path"
-        return 1
-    fi
-
-    # XHTTP paths must be absolute and end at a path boundary.
-    if [[ "${path}" != /* || "${path}" != */ ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.slash_error")$path"
-        return 1
-    fi
-
-    if [[ "${path}" == *" "* ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.space_error")$path"
-        return 1
-    fi
-
-    if ((${#path} > 128)); then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.length_error")$path"
-        return 1
-    fi
-
-    if [[ "${path}" =~ [^a-zA-Z0-9_/.\-] ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.char_error")$path"
-        return 1
-    fi
-
-    if [[ "${path}" =~ // ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.double_slash_error")$path"
-        return 1
-    fi
-
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.path.valid")$path"
-    return 0
-}
+# 不允许为空，且要求首尾斜杠（xhttp 协议的路径）
+function check_path_required() { check_path_ex "${1:-}" 'no' 'yes'; }
 
 # =============================================================================
 # 函数名称: check_short_id
@@ -513,34 +417,34 @@ function check_short_id() {
     local short_id="$1" # 获取 Short ID 参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.check")${short_id}"
+    _info "$(t ".${CUR_FILE}.short.check")${short_id}"
 
     # 如果 Short ID 为空，则认为是有效的
     if [[ -z "${short_id}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.empty")"
+        _pass "$(t ".${CUR_FILE}.short.empty")"
         return 0
     fi
 
     # 如果 Short ID 是 0-8 的单个数字，则认为是有效的（表示生成指定长度的 ID）
     if [[ ${short_id} =~ ^[0-8]$ ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.digit")$short_id"
+        _pass "$(t ".${CUR_FILE}.short.digit")$short_id"
         return 0
     fi
 
     # 检查 Short ID 的长度是否为奇数或超过 16
     if ((${#short_id} % 2 != 0 || ${#short_id} > 16)); then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.length_error")$short_id"
+        _fail "$(t ".${CUR_FILE}.short.length_error")$short_id"
         return 1
     fi
 
     # 检查 Short ID 是否为有效的十六进制字符串
     if ! [[ "${short_id}" =~ $HEX_REGEX ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.hex_error")$short_id"
+        _fail "$(t ".${CUR_FILE}.short.hex_error")$short_id"
         return 1
     fi
 
     # 如果所有检查都通过，则 Short ID 有效
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.short.valid")$short_id"
+    _pass "$(t ".${CUR_FILE}.short.valid")$short_id"
     return 0
 }
 
@@ -555,57 +459,57 @@ function check_domain_security() {
     local domain="$1" # 获取域名参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.security_check")${domain}"
+    _info "$(t ".${CUR_FILE}.domain.security_check")${domain}"
 
     # 如果域名为空，则认为是有效的（可能表示不使用域名）
     if [[ -z "${domain}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.empty")"
+        _pass "$(t ".${CUR_FILE}.domain.empty")"
         return 0
     fi
 
     # 检查域名格式是否有效
     if ! valid_domain "$domain"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.format_error")$domain"
+        _fail "$(t ".${CUR_FILE}.domain.format_error")$domain"
         return 1
     fi
 
     # 测试域名解析
-    _test "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.resolve")${domain}"
+    _test "$(t ".${CUR_FILE}.domain.resolve")${domain}"
     if ! resolve_domain "$domain"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.resolve_fail")$domain"
+        _fail "$(t ".${CUR_FILE}.domain.resolve_fail")$domain"
         return 1
     fi
 
     # 测试到域名 443 端口的 TCP 连接
-    _test "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tcp.connect_check"): ${domain}:443"
+    _test "$(t ".${CUR_FILE}.tcp.connect_check"): ${domain}:443"
     if ! test_tcp_connection "$domain" 443; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tcp.connect_fail" | sed "s/\${domain}/${domain}/")"
+        _fail "$(t ".${CUR_FILE}.tcp.connect_fail" | sed "s/\${domain}/${domain}/")"
         return 1
     fi
 
     # 获取域名的 TLS 信息
-    _test "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tls.info"): ${domain}"
+    _test "$(t ".${CUR_FILE}.tls.info"): ${domain}"
     local tls_info
     tls_info=$(get_tls_info "$domain")
 
     # 检查是否支持 TLS 1.3
     if ! echo "$tls_info" | grep -q "TLSv1.3"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tls.error")"
+        _fail "$(t ".${CUR_FILE}.tls.error")"
         return 1
     else
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tls.pass")"
+        _pass "$(t ".${CUR_FILE}.tls.pass")"
     fi
 
     # 检查是否使用 X25519 密钥交换算法
     if echo "$tls_info" | grep -q "X25519"; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tls.key_exchange_pass")"
+        _pass "$(t ".${CUR_FILE}.tls.key_exchange_pass")"
     else
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.tls.key_exchange_warn")$domain"
+        _fail "$(t ".${CUR_FILE}.tls.key_exchange_warn")$domain"
         return 1
     fi
 
     # 如果所有检查都通过，则域名安全检查通过
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.security_pass" | sed "s/\${domain}/${domain}/")"
+    _pass "$(t ".${CUR_FILE}.domain.security_pass" | sed "s/\${domain}/${domain}/")"
     return 0
 }
 
@@ -620,23 +524,23 @@ function check_dns_resolution() {
     local domain="$1" # 获取域名参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.dns.check_start")${domain}"
+    _info "$(t ".${CUR_FILE}.dns.check_start")${domain}"
 
     # 检查域名格式是否有效
     if ! valid_domain "$domain"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.format_error")$domain"
+        _fail "$(t ".${CUR_FILE}.domain.format_error")$domain"
         return 1
     fi
 
     # 测试域名解析
-    _test "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.resolve"): ${domain}"
+    _test "$(t ".${CUR_FILE}.domain.resolve"): ${domain}"
     if ! dns_resolution "$domain"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.dns.resolution_fail")$domain"
+        _fail "$(t ".${CUR_FILE}.dns.resolution_fail")$domain"
         return 1
     fi
 
     # 如果解析正确，则检查通过
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.dns.check_pass" | sed "s/\${domain}/${domain}/")"
+    _pass "$(t ".${CUR_FILE}.dns.check_pass" | sed "s/\${domain}/${domain}/")"
     return 0
 }
 
@@ -651,7 +555,7 @@ function check_domain_format() {
     local domain="$1"
 
     if ! valid_domain "$domain"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain.format_error")$domain"
+        _fail "$(t ".${CUR_FILE}.domain.format_error")$domain"
         return 1
     fi
 
@@ -671,14 +575,14 @@ function check_xray_config_exists() {
     local CONFIG_FILE="${CONFIG_XRAY_DIR}/${SCRIPT_FILE}.json"
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config.check")${CONFIG_FILE}"
+    _info "$(t ".${CUR_FILE}.config.check")${CONFIG_FILE}"
 
     # 检查文件是否存在
     if [[ -f "${CONFIG_FILE}" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config.exist")${CONFIG_FILE}"
+        _pass "$(t ".${CUR_FILE}.config.exist")${CONFIG_FILE}"
         return 0
     else
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.config.not_exist")${CONFIG_FILE}"
+        _fail "$(t ".${CUR_FILE}.config.not_exist")${CONFIG_FILE}"
         return 1
     fi
 }
@@ -694,7 +598,7 @@ function check_xray_version_exists() {
     local version="$1" # 获取版本号参数
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.version.check")v${version}"
+    _info "$(t ".${CUR_FILE}.version.check")v${version}"
 
     # 构造 GitHub Releases 页面的 URL
     local version_url="https://github.com/XTLS/Xray-core/releases/tag/v${version#*v}"
@@ -704,10 +608,10 @@ function check_xray_version_exists() {
 
     # 检查状态码是否为 200 (OK)
     if [[ "$status_code" == "200" ]]; then
-        _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.version.exist")${version}"
+        _pass "$(t ".${CUR_FILE}.version.exist")${version}"
         return 0
     else
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.version.not_exist")${version}"
+        _fail "$(t ".${CUR_FILE}.version.not_exist")${version}"
         return 1
     fi
 }
@@ -724,11 +628,11 @@ function validate_email() {
     local local_part domain_part
 
     # 打印正在检查的信息
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.check")${email}"
+    _info "$(t ".${CUR_FILE}.email.check")${email}"
 
     # 如果邮箱地址为空，则认为无效
     if [[ -z "${email}" ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.empty")"
+        _fail "$(t ".${CUR_FILE}.email.empty")"
         return 1
     fi
 
@@ -740,11 +644,11 @@ function validate_email() {
         [[ "${email}" != *@* || "${domain_part}" == *"@"* ]] ||
         [[ ! "${local_part}" =~ ${EMAIL_LOCAL_REGEX} ]] ||
         ! valid_domain "${domain_part}"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.format_error")$email"
+        _fail "$(t ".${CUR_FILE}.email.format_error")$email"
         return 1
     fi
 
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.email.valid")$email"
+    _pass "$(t ".${CUR_FILE}.email.valid")$email"
     return 0
 }
 
@@ -759,20 +663,20 @@ function validate_email() {
 function check_reverse_target() {
     local target="$1"
 
-    _info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.check")${target}"
+    _info "$(t ".${CUR_FILE}.reverse_target.check")${target}"
 
     # 检查是否为空
     if [[ -z "${target}" ]]; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.empty")"
+        _fail "$(t ".${CUR_FILE}.reverse_target.empty")"
         return 1
     fi
 
     if ! parse_host_port "${target}"; then
-        _fail "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.format_error")${target}"
+        _fail "$(t ".${CUR_FILE}.reverse_target.format_error")${target}"
         return 1
     fi
 
-    _pass "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.reverse_target.valid")${target}"
+    _pass "$(t ".${CUR_FILE}.reverse_target.valid")${target}"
     return 0
 }
 
@@ -784,7 +688,8 @@ function check_reverse_target() {
 #   $1: 操作选项 (e.g., --ip, --port, --uuid 等)
 #   $@: 剩余参数，传递给被调用的具体函数
 # 返回值: 无 (调用具体函数并输出其结果到 >&2)
-# 退出码: 如果选项无效，则输出错误信息并退出脚本 (exit 1)
+# 退出码: 0-通过 / 1-校验失败 / 2-未知选项（见文件头「退出码契约」）。
+#         case 各分支的最后一条命令就是具体校验函数，其退出码即 main 的返回值。
 # =============================================================================
 function main() {
     # 加载国际化数据
@@ -812,6 +717,11 @@ function main() {
     --xray) check_xray_version_exists "$@" >&2 ;; # 检查 Xray 版本
     --email) validate_email "$@" >&2 ;;           # 验证邮箱
     --reverse-target) check_reverse_target "$@" >&2 ;; # 检查反向代理目标地址
+    *)
+        # 未知选项不能静默返回 0：调用方会把 0 当作「校验通过」而放行未校验的值
+        _fail "$(t ".${CUR_FILE}.usage.invalid_option")${option}"
+        return "${CHECK_USAGE}"
+        ;;
     esac
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-_APISERVER=127.0.0.1:32768
+# Xray API 端口由调用方（core/handler.sh）通过环境变量传入，避免这里再写死一份
+_APISERVER="127.0.0.1:${XRAY_API_PORT:?XRAY_API_PORT is not set}"
 _XRAY=/usr/local/bin/xray
 
 apidata() {
@@ -39,7 +40,16 @@ print_sum() {
         column -t
 }
 
-DATA=$(apidata $1)
+# numfmt 来自 coreutils，column 来自 util-linux / bsdmainutils。
+# 先给出可读提示，避免直接抛 "command not found"。
+for _cmd in numfmt column; do
+    if ! command -v "${_cmd}" >/dev/null 2>&1; then
+        echo "Required command not found: ${_cmd}" >&2
+        exit 1
+    fi
+done
+
+DATA=$(apidata "${1:-}")
 echo "------------Inbound----------"
 print_sum "$DATA" "inbound"
 echo "-----------------------------"

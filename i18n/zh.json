@@ -11,15 +11,28 @@
     "test": "测试",
     "multiple_values": "多个值请用英文逗号分隔"
   },
+  "firewall": {
+    "open": "正在开放防火墙端口",
+    "ok": "防火墙端口已开放",
+    "skip": "未发现受支持的防火墙管理工具，未修改本机防火墙规则",
+    "inactive": "已安装的防火墙管理工具未启用，未修改本机防火墙规则",
+    "fail": "防火墙端口开放失败"
+  },
+  "cert": {
+    "retry_debug": "首次签发失败，尝试启用调试模式重新签发..."
+  },
   "main": {
     "not_support": "该功能仅适用于当前已安装的 CDN 或 SNI 模式",
     "rollback_fail": "新配置失败后未能完整恢复旧运行状态，请立即检查 Xray 与 Nginx 服务",
     "install_busy": "已有协议安装或重配任务正在运行",
     "post_install_cleanup_fail": "安装已成功，但恢复日志未能清理，已保留在：",
-    "share_after_install_fail": "安装已成功，但分享链接生成失败，请稍后从分享菜单重试"
+    "share_after_install_fail": "安装已成功，但分享链接生成失败，请稍后从分享菜单重试",
+    "tty_required": "当前不是交互式终端，主菜单无法获取选择。请在交互式终端中运行。"
   },
   "menu": {
     "choose": "请选择操作",
+    "invalid_choice": "选项无效，请重新输入。",
+    "aborted": "未收到输入，已取消本次操作。",
     "status": {
       "default": "默认",
       "not_installed": "未安装",
@@ -154,7 +167,7 @@
       "option4": "更新 nginx",
       "option5": "开/关 nginx 自动更新",
       "option6": "修改 Web 配置",
-      "option7": "重置 Cloudreve v3 版管理员数据",
+      "option7": "重建数据库并重置 Cloudreve v3 管理员",
       "info1": "Reality 对应的域名",
       "info2": "套用 CDN 的域名"
     },
@@ -166,7 +179,7 @@
       "option4": "更新 Nginx",
       "option5": "开/关 Nginx 自动更新",
       "option6": "修改伪装站点内容",
-      "option7": "重置 Cloudreve v3 管理员数据"
+      "option7": "重建数据库并重置 Cloudreve v3 管理员"
     },
     "cdn_direct_config": {
       "title": "CDN 低资源模式管理",
@@ -197,6 +210,16 @@
   "handler": {
     "script": {
       "config_update": "正在更新脚本配置"
+    },
+    "purge": {
+      "warning": "卸载将删除服务端 Xray 与本脚本的全部本地配置，且无法恢复。",
+      "confirm": "请输入 yes 确认继续",
+      "cancelled": "已取消卸载，未做任何改动。",
+      "tty_required": "当前不是交互式终端，已拒绝执行卸载。请在交互式终端中重试。",
+      "read_ledger_failed": "无法读取防火墙放行记录，已中止卸载（本地配置未被修改）。",
+      "close_port_failed": "回收 ${owned_feature} 的防火墙放行端口失败，已中止卸载（本地配置未被修改）。",
+      "legacy_sweep_removed": "已回收历史遗留的防火墙放行规则",
+      "legacy_sweep_failed": "回收历史遗留的防火墙放行规则失败"
     },
     "xray": {
       "config_update": "正在更新 Xray 配置"
@@ -239,6 +262,7 @@
       "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)",
       "install_mode_invalid": "请选择 1 或 2",
       "path_invalid": "配置的 XHTTP 路径无效，未修改 Nginx",
+      "domain_invalid": "域名无效或过长（用作文件名时不得超过 ${DOMAIN_FILENAME_MAX_LENGTH} 个字符）：",
       "path_sync_fail": "同步受管 Nginx XHTTP 路径失败：",
       "config_invalid": "Nginx 配置校验失败",
       "start_fail": "Nginx 服务启动失败",
@@ -268,6 +292,9 @@
       "port_conflict": "端口 {port} 为保留端口或已分配给其他节点，正在生成随机端口。",
       "hy2_shared_cert": "多节点模式下的 HY2 节点共用一套 TLS 证书。",
       "no_nodes": "多节点配置中没有节点。"
+    },
+    "read": {
+      "unknown_field": "内部错误：字段未登记在 lib/protocols.sh 的字段表中: "
     },
     "cert_source": {
       "prompt_cdn": "CDN 站点 TLS 证书 [1. 自动申请 / 2. 自定义证书路径] (默认 1): ",
@@ -326,11 +353,6 @@
       "ip_fetch_fail": "无法获取有效的公网 IP，请检查网络后重试",
       "detected_ip": "检测到的公网 IP：",
       "email_invalid": "保存的 ACME 账户邮箱无效，请输入合法邮箱后重试",
-      "firewall_open": "正在开放防火墙端口",
-      "firewall_ok": "防火墙端口已开放",
-      "firewall_skip": "未发现受支持的防火墙管理工具，未修改本机防火墙规则",
-      "firewall_inactive": "已安装的防火墙管理工具未启用，未修改本机防火墙规则",
-      "firewall_fail": "防火墙端口开放失败",
       "cron_setup": "正在设置证书自动续签定时任务",
       "cron_fail": "证书自动续签任务配置失败",
       "cron_ok": "证书自动续签已配置"
@@ -341,7 +363,8 @@
       "option_existing": "使用已有证书: ",
       "expires": "过期时间",
       "reusing": "复用已有证书",
-      "reuse_ok": "已成功复用证书"
+      "reuse_ok": "已成功复用证书",
+      "main_domain_missing": "无法复用该证书：未找到对应的主域名记录，已中止"
     },
     "mldsa": {
       "prompt": "是否启用 ML-DSA-65 后量子签名验证？(y/N, 默认: N)",
@@ -371,6 +394,7 @@
       "server_address_prompt": "请输入 Hub 公网 IP 或域名: ",
       "host_invalid": "IP 或域名格式无效",
       "keygen_failed": "组网密钥生成失败",
+      "identity_reused": "已复用现有组网身份（公钥 / Short ID 不变）",
       "enabled": "异地组网 Hub 已启用",
       "disabled": "异地组网已禁用，地点数据仍保留",
       "site_id_prompt": "地点 ID（小写字母/数字/-/_）: ",
@@ -459,7 +483,8 @@
       "check": "正在检查 UUID 类型：",
       "string": "输入值为普通字符串，将使用 Xray 映射生成 UUID",
       "empty": "输入值为空，将自动生成一份 UUID",
-      "valid": "UUID 合法："
+      "valid": "UUID 合法：",
+      "unsafe": "输入值含空白或控制字符，无法安全写入配置，请重新输入："
     },
     "password": {
       "check": "正在检查密码合法性：",
@@ -542,6 +567,9 @@
       "valid": "电子邮箱格式合法：",
       "empty": "电子邮箱不能为空",
       "format_error": "电子邮箱格式不合法："
+    },
+    "usage": {
+      "invalid_option": "未知选项："
     }
   },
   "docker": {
@@ -549,7 +577,11 @@
       "start": "正在安装 Docker",
       "centos8_fix": "检测到 CentOS 8，正在修复安装脚本兼容性问题",
       "dry_run": "执行安装前检查（dry-run）",
-      "running": "正在运行 Docker 安装脚本"
+      "running": "正在运行 Docker 安装脚本",
+      "download_fail": "下载 Docker 官方安装脚本失败。",
+      "dry_run_fail": "Docker 安装脚本的预检查（dry-run）失败，已中止安装。",
+      "run_fail": "Docker 安装脚本执行失败。",
+      "verify_fail": "安装脚本已结束，但未检测到 docker 命令，Docker 未安装成功。"
     },
     "warp": {
       "build": {
@@ -572,18 +604,28 @@
       "admin_info": "用户名: ${username} , 密码: ${password}",
       "aria2_token": "aria2 token: ${token}",
       "reset": "正在重置 Cloudreve v3 信息",
-      "purge": "卸载 Cloudreve v3 服务",
+      "reset_scope": "重置管理员账户会重建整个数据库：所有用户、文件记录与分享都会丢失（已先备份 cloudreve.db）。",
+      "reset_confirm": "请输入 yes 确认重建数据库",
+      "reset_cancelled": "已取消重置 Cloudreve v3 管理员。",
+      "reset_tty_required": "当前不是交互式终端，已拒绝执行会重建整个数据库的重置操作。",
+      "reset_backup_fail": "备份 cloudreve.db 失败，已中止重置以避免数据丢失。",
+      "down_fail": "停止 Cloudreve v3 服务失败，已中止重置以避免数据库损坏。",
+      "up_fail": "启动 Cloudreve v3 服务失败，请检查容器日志。",
+      "purge": "卸载 Cloudreve v3 服务并删除其数据（上传文件、数据库、Aria2 配置与下载），无法恢复。",
       "start_service": "启动 Cloudreve v3 服务",
-      "install_fallback": "未找到 Cloudreve v3 相关目录"
+      "install_fallback": "未找到 Cloudreve v3 相关目录",
+      "already_installed": "Cloudreve v3 已安装，跳过安装。"
     },
     "cloudreve_v4": {
       "create_dir": "创建 Cloudreve v4 相关目录。",
       "start": "启动 Cloudreve v4 服务",
+      "up_fail": "启动 Cloudreve v4 服务失败，请检查容器日志。",
       "stop": "停止 Cloudreve v4 服务",
       "update": "更新 Cloudreve v4 镜像",
-      "purge": "卸载 Cloudreve v4 服务",
+      "purge": "卸载 Cloudreve v4 服务并删除其数据卷（后端数据 / PostgreSQL / Redis），无法恢复。",
       "start_service": "启动 Cloudreve v4 服务",
-      "install_fallback": "未找到 Cloudreve v4 相关目录"
+      "install_fallback": "未找到 Cloudreve v4 相关目录",
+      "already_installed": "Cloudreve v4 已安装，跳过安装。"
     }
   },
   "ssl": {
@@ -601,7 +643,6 @@
     },
     "purge": {
       "start": "正在卸载 acme.sh...",
-      "fail_disable_autoupgrade": "禁用 acme.sh 自动升级失败。",
       "fail_uninstall_cmd": "acme.sh 卸载命令执行失败。",
       "success": "acme.sh 及相关目录已删除。"
     },
@@ -613,9 +654,9 @@
       "fail_backup_nginx": "无法备份 Nginx 配置文件: ${nginx_conf}",
       "fail_reload_nginx": "Nginx 重载失败，请检查配置文件。",
       "fail_start_nginx": "Nginx 启动失败，请检查配置文件。",
-      "fail_first_attempt": "首次签发失败，尝试启用调试模式重新签发...",
       "fail_ecc_issue": "ECC 证书申请失败。",
-      "fail_install_cert": "安装证书失败。"
+      "fail_install_cert": "安装证书失败。",
+      "fail_set_owner": "证书已签发，但设置证书属主失败（不影响本次签发，请检查 xray-nginx 组与用户）。"
     },
     "renew": {
       "start": "正在强制续期所有 SSL 证书...",
@@ -651,7 +692,8 @@
       "cmd_help": "显示此帮助信息",
       "options_title": "选项",
       "opt_domain": "指定域名",
-      "opt_email": "指定 acme.sh 账户邮箱"
+      "opt_email": "指定 acme.sh 账户邮箱",
+      "unknown_option": "未知参数："
     }
   },
   "nginx": {
@@ -694,9 +736,9 @@
     },
     "os": {
       "unsupported_os": "不支持的操作系统。",
-      "unsupported_ubuntu": "不支持的操作系统，请切换到 Ubuntu 20+ 并重试。",
-      "unsupported_debian": "不支持的操作系统，请切换到 Debian 10+ 并重试。",
-      "unsupported_centos": "不支持的操作系统，请切换到 CentOS 7+ 并重试。"
+      "unsupported_ubuntu": "不支持的操作系统，请切换到 Ubuntu ${MIN_UBUNTU}+ 并重试。",
+      "unsupported_debian": "不支持的操作系统，请切换到 Debian ${MIN_DEBIAN}+ 并重试。",
+      "unsupported_centos": "不支持的操作系统，请切换到 CentOS ${MIN_CENTOS}+ 并重试。"
     },
     "backup_files": {
       "backup": "备份"

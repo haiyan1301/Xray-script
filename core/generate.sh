@@ -73,7 +73,7 @@ function generate_random() {
 # =============================================================================
 function generate_port() {
     # 调用 generate_random 函数，指定范围为 1025 到 65535
-    echo $(generate_random 1025 65535)
+    echo "$(generate_random 1025 65535)"
 }
 
 # =============================================================================
@@ -88,23 +88,36 @@ function generate_uuid() {
     local input="${1}" # 获取可选的输入参数
     local uuid         # 声明用于存储 UUID 的局部变量
 
+    # 标准格式的 UUID 无需 xray 派生，直接采用
+    if [[ "${input}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        echo "${input}"
+        return 0
+    fi
+
     # 检查系统中是否存在 xray 命令
     if command -v xray &>/dev/null; then
         # 如果没有提供输入参数
         if [[ -z "${input}" ]]; then
             # 直接生成一个新的 UUID
             uuid=$(xray uuid)
-        # 如果提供的输入参数已经是标准格式的 UUID
-        elif [[ "${input}" =~ ^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$ ]]; then
-            # 则直接使用该输入作为 UUID
-            uuid=${input}
         else
             # 否则，使用提供的输入字符串生成一个基于该输入的 UUID
             uuid=$(xray uuid -i "${input}")
         fi
     else
+        # 没有 xray 就无法把自定义输入派生为 UUID。静默返回随机 UUID 会让用户
+        # 以为输入已生效，因此必须失败并让调用方感知。
+        if [[ -n "${input}" ]]; then
+            echo "xray command is required to derive a UUID from the given input" >&2
+            return 1
+        fi
         # 如果没有安装 xray，则使用系统方法生成 UUID
         uuid=$(cat /proc/sys/kernel/random/uuid)
+    fi
+    # 生成失败时输出空串会写出非法配置，因此一并拦截
+    if [[ -z "${uuid}" ]]; then
+        echo "Failed to generate a UUID" >&2
+        return 1
     fi
     # 输出生成的 UUID
     echo "${uuid}"
@@ -347,11 +360,11 @@ function generate_short_ids() {
         if [[ $arg =~ ^[0-8]$ ]]; then
             # 调用 generate_short_id 生成对应长度的 ID，
             # 并使用 jq -R 将其转换为 JSON 字符串格式后添加到 ids 数组
-            ids+=($(generate_short_id "${arg}" | jq -R))
+            ids+=("$(generate_short_id "${arg}" | jq -R)")
         else
             # 如果不是数字，则直接将参数作为 ID 值，
             # 同样使用 jq -R 转换为 JSON 字符串格式后添加到 ids 数组
-            ids+=($(echo "${arg}" | jq -R))
+            ids+=("$(echo "${arg}" | jq -R)")
         fi
     done
 

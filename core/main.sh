@@ -40,29 +40,11 @@ readonly NGINX_CONFIG_DIR="${NGINX_CONFIG_DIR_OVERRIDE:-/usr/local/nginx/conf}"
 
 # --- 全局变量声明 ---
 declare LANG_PARAM=''
-declare I18N_DATA=''
 declare SCRIPT_CONFIG=''
 
 
-# =============================================================================
-# 函数名称: _error
-# 功能描述: 打印错误信息到标准错误输出并退出脚本。
-# 参数:
-#   $@: 要输出的错误信息文本
-# 返回值: 无 (直接打印到标准错误输出 >&2 并退出)
-# 退出码: 1
-# =============================================================================
-
-function _error() {
-    # 打印红色的错误标题（从 i18n 数据获取）
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}"
-    # 打印传入的错误信息
-    printf -- "%s" "$@"
-    # 打印换行符
-    printf "\n"
-    # 退出脚本，错误码为 1
-    exit 1
-}
+# 注: 本脚本原先自带一份 _error（且未加 >&2，与注释所述不符），但全脚本零调用；
+# 已删除，需要「打印后退出」时使用 lib/log.sh 的 _error / log_error。
 
 # =============================================================================
 # 函数名称: exec_menu
@@ -105,7 +87,9 @@ function exec_handler() {
 
 function choose_web_backend() {
     exec_menu '--web'
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     case ${choose} in
     1) echo 'normal' ;;
     2) echo 'v3' ;;
@@ -116,7 +100,9 @@ function choose_web_backend() {
 
 function choose_cdn_backend() {
     exec_menu '--cdn-backend'
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     case ${choose} in
     1) echo 'nginx' ;;
     2) echo 'xray' ;;
@@ -138,14 +124,6 @@ function restore_protocol_snapshot() {
     fi
 }
 
-function valid_nginx_artifact_domain() {
-    local domain="$1"
-    local domain_regex='^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
-
-    # The domain is also a single filename component followed by ".conf".
-    ((${#domain} <= 250)) && [[ "${domain}" =~ ${domain_regex} ]]
-}
-
 function nginx_artifact_relative_path_is_safe() {
     local relative_path="$1"
     local domain
@@ -158,13 +136,13 @@ function nginx_artifact_relative_path_is_safe() {
         domain="${relative_path#sites-available/}"
         domain="${domain%.conf}"
         [[ "${relative_path}" == "sites-available/${domain}.conf" ]] &&
-            valid_nginx_artifact_domain "${domain}"
+            valid_domain_filename "${domain}"
         ;;
     sites-enabled/*.conf)
         domain="${relative_path#sites-enabled/}"
         domain="${domain%.conf}"
         [[ "${relative_path}" == "sites-enabled/${domain}.conf" ]] &&
-            valid_nginx_artifact_domain "${domain}"
+            valid_domain_filename "${domain}"
         ;;
     *)
         return 1
@@ -191,7 +169,7 @@ function collect_nginx_artifact_domains() {
             # A valid domain needs no JSON escapes and contains only this set.
             [[ "${domain_json}" =~ ^\"[a-zA-Z0-9.-]+\"$ ]] || return 1
             domain="${domain_json:1:${#domain_json}-2}"
-            valid_nginx_artifact_domain "${domain}" || return 1
+            valid_domain_filename "${domain}" || return 1
             found=0
             for existing in "${domains[@]}"; do
                 if [[ "${existing}" == "${domain}" ]]; then
@@ -418,17 +396,7 @@ function read_protocol_crontab() {
 }
 
 function protocol_config_file_uses_hy2() {
-    local config_file="$1"
-
-    [[ -f "${config_file}" ]] || return 1
-    jq -e '
-        (.xray.tag // "" | ascii_downcase) as $tag |
-        ($tag == "hy2") or
-        (
-            $tag == "multi" and
-            any(.xray.nodes[]?; (.tag // "" | ascii_downcase) == "hy2")
-        )
-    ' "${config_file}" >/dev/null 2>&1
+    protocol_config_file_uses "$1" protocol_uses_hy2_certificate
 }
 
 function snapshot_managed_hy2_ip_cron() {
@@ -575,7 +543,7 @@ function rollback_protocol_install() {
         rm -f -- "${cron_snapshot}"
     fi
     if [[ "${rollback_status}" -ne 0 ]]; then
-        echo -e "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.rollback_fail")" >&2
+        log_error "$(t ".${CUR_FILE}.rollback_fail")" >&2
         [[ "${script_snapshot_restored}" -eq 1 ]] ||
             printf 'Script config recovery copy retained at: %s\n' "${script_snapshot}" >&2
         [[ -z "${runtime_snapshot}" || "${runtime_snapshot_restored}" -eq 1 ]] ||
@@ -595,13 +563,9 @@ function install_protocol() (
     local cron_snapshot='' cron_snapshot_state='unavailable' cron_current=''
     local nginx_artifact_journal=''
     local install_lock_fd=''
-    local mutation_started=0
-    local rollback_started=0
-    local transaction_committed=0
 
     function rollback_current_protocol_install() {
-        [[ "${rollback_started}" -eq 0 ]] || return 0
-        rollback_started=1
+        txn_begin_rollback || return 0
         rollback_protocol_install \
             "${script_snapshot}" "${runtime_snapshot}" \
             "${cron_snapshot}" "${cron_snapshot_state}" \
@@ -611,9 +575,9 @@ function install_protocol() (
     function finish_protocol_install_transaction() {
         local status="$1"
 
-        trap - EXIT HUP INT TERM
-        if [[ "${transaction_committed}" -eq 0 ]]; then
-            if [[ "${mutation_started}" -eq 1 ]]; then
+        txn_finish_enter
+        if ! txn_is_committed; then
+            if txn_is_mutation_started; then
                 rollback_current_protocol_install || status=1
             else
                 rm -f -- \
@@ -628,16 +592,15 @@ function install_protocol() (
         exit "${status}"
     }
 
-    trap 'finish_protocol_install_transaction "$?"' EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    # 事务调度骨架（trap / 信号码 / 提交与回滚标记）在 lib/transaction.sh；
+    # 快照集合与回滚体仍留在本函数（三套事务的这些部分互不相同）。
+    txn_begin finish_protocol_install_transaction
 
     config_tag="$(protocol_template_tag "$1")" || return 1
     command -v flock >/dev/null 2>&1 || return 1
     exec {install_lock_fd}>"${SCRIPT_CONFIG_PATH}.lock" || return 1
     if ! flock -n "${install_lock_fd}"; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.install_busy')" >&2
+        log_warn "$(t '.main.install_busy')" >&2
         return 1
     fi
 
@@ -667,7 +630,9 @@ function install_protocol() (
     # a later service failure can restore the old, still-active deployment.
     if command -v crontab >/dev/null 2>&1 &&
         {
-            [[ "${config_tag,,}" =~ ^(hy2|multi)$ ]] ||
+            # 新配置是 hy2 / multi（可能含 hy2 节点）时直接快照；否则看旧快照是否用过 HY2。
+            protocol_uses_hy2_certificate "${config_tag}" ||
+                protocol_is_multi_config "${config_tag}" ||
                 protocol_config_file_uses_hy2 "${script_snapshot}"
         }; then
         cron_snapshot="$(mktemp "${SCRIPT_CONFIG_PATH}.cron.XXXXXX")" || {
@@ -695,7 +660,7 @@ function install_protocol() (
         cron_current=''
     fi
 
-    mutation_started=1
+    txn_mark_mutation
     if ! exec_handler '--script-config' "${config_tag}"; then
         return 1
     fi
@@ -745,23 +710,23 @@ function install_protocol() (
 
     # The new runtime is healthy: from here on, cleanup/share failures are
     # post-commit warnings and must never roll back a working installation.
-    transaction_committed=1
+    txn_commit
     local old_cdn_down new_cdn_down
     old_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${script_snapshot}")"
     new_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${SCRIPT_CONFIG_PATH}")"
     if [[ -n "${old_cdn_down}" && "${old_cdn_down}" != "${new_cdn_down}" ]] &&
         ! exec_handler '--cleanup-cdn-down' "${old_cdn_down}"; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.post_install_cleanup_fail')" >&2
+        log_warn "$(t '.main.post_install_cleanup_fail')" >&2
     fi
     if ! cleanup_nginx_artifact_journal "${nginx_artifact_journal}"; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.post_install_cleanup_fail') ${nginx_artifact_journal}" >&2
+        log_warn "$(t '.main.post_install_cleanup_fail') ${nginx_artifact_journal}" >&2
     else
         nginx_artifact_journal=''
     fi
     rm -f -- "${script_snapshot}" "${runtime_snapshot}" "${cron_snapshot}" ||
         true
     if ! exec_handler '--share'; then
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r '.main.share_after_install_fail')" >&2
+        log_warn "$(t '.main.share_after_install_fail')" >&2
     fi
     return 0
 )
@@ -849,7 +814,9 @@ function processes_routing() {
     # 显示路由规则菜单
     exec_menu '--route'
     # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     # 根据用户选择执行不同的路由配置操作
     case ${choose} in
     1) exec_handler '--warp' ;;                               # 选择 1：配置 WARP
@@ -867,7 +834,7 @@ function processes_routing() {
 # 功能描述: 根据当前模式显示互不混用的 CDN 或 SNI 站点管理菜单。
 # 参数: 无
 # 返回值: 无 (通过调用其他函数和脚本执行操作)
-# 退出码: 当前配置不是 CDN/SNI 时调用 _error 退出脚本 (exit 1)
+# 退出码: 当前配置不是 CDN/SNI 时提示 .main.not_support 并返回 1
 # =============================================================================
 
 function change_web_backend() {
@@ -891,12 +858,14 @@ function processes_web_mode_config() {
         fi
         ;;
     *)
-        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.not_support")" >&2
+        log_tip "$(t ".${CUR_FILE}.not_support")" >&2
         return 1
         ;;
     esac
     # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     if [[ "${tag,,}" == 'sni' ]]; then
         case ${choose} in
         1) exec_handler '--change-domain' 'domain' ;;
@@ -942,17 +911,28 @@ function processes_language() {
     # 显示语言设置菜单
     exec_menu '--language'
     # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     # 根据用户选择设置不同的语言
     case ${choose} in
-    2) LANG_PARAM="en" ;; # 选择英文
-    *) LANG_PARAM="zh" ;; # 默认中文
+    2) LANG_PARAM="en" ;;   # 选择英文
+    0 | 1) LANG_PARAM="zh" ;; # 选择中文（0 = 直接回车取默认项）
+    *)
+        # 255 = menu.sh 在 EOF / 超时下没拿到输入（见 get_choose）。不能当成「选了默认
+        # 中文」：那样非交互调用会静默改写配置。保持原语言并退回配置菜单。
+        log_tip "$(t '.menu.aborted')" >&2
+        return 0
+        ;;
     esac
     # 更新配置文件中的语言设置
     backup_config "${SCRIPT_CONFIG_PATH}" || return 1
     SCRIPT_CONFIG="$(jq --arg language "${LANG_PARAM}" '.language = $language' "${SCRIPT_CONFIG_PATH}")" || return 1
     write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-    bash "${CUR_DIR}/${CUR_FILE}.sh" && exit 0
+    # load_i18n 每次都从 config.json 读语言，就地重新加载即可，无需重启脚本进程；
+    # 随后重绘调用方（配置管理）菜单，用户不会被弹回主菜单。
+    load_i18n
+    processes_config
 }
 
 # =============================================================================
@@ -972,7 +952,9 @@ function processes_language() {
 # =============================================================================
 function processes_reverse() {
     exec_menu '--reverse'
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     case ${choose} in
     1) exec_handler '--reverse' 'enable' ;;
     2) exec_handler '--reverse' 'disable' ;;
@@ -985,7 +967,9 @@ function processes_reverse() {
 
 function processes_lan() {
     exec_menu '--lan'
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     case ${choose} in
     1) exec_handler '--lan-enable' ;;
     2) exec_handler '--lan-add' ;;
@@ -1001,7 +985,9 @@ function processes_config() {
     # 显示主配置管理菜单
     exec_menu '--management'
     # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     local config_tag
     config_tag="$(jq -r '.xray.tag // ""' "${SCRIPT_CONFIG_PATH}")"
     # 根据用户选择进入不同的子流程
@@ -1012,7 +998,7 @@ function processes_config() {
         if [[ "${config_tag,,}" == 'cdn' || "${config_tag,,}" == 'sni' ]]; then
             processes_web_mode_config
         else
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.not_support")" >&2
+            log_tip "$(t ".${CUR_FILE}.not_support")" >&2
             return 1
         fi
         ;;
@@ -1020,7 +1006,7 @@ function processes_config() {
         if protocol_reads_public_port "${config_tag}"; then
             exec_handler '--change-port'
         else
-            echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.tip')]${NC} $(echo "$I18N_DATA" | jq -r '.handler.port.fixed')" >&2
+            log_tip "$(t '.handler.port.fixed')" >&2
             return 1
         fi
         ;;
@@ -1042,14 +1028,17 @@ function processes_config() {
 # =============================================================================
 
 function processes_index() {
-    # 显示 Banner
-    exec_menu '--banner'
-    # 显示状态信息
-    exec_menu '--status'
-    # 显示主菜单
+    # 主菜单是纯交互流程：stdin 不是终端时拿不到真实选择，直接拒绝而不是执行默认项。
+    if [[ ! -t 0 ]]; then
+        log_error "$(t ".${CUR_FILE}.tty_required")" >&2
+        exit 1
+    fi
+    # Banner、状态与主菜单由 menu.sh 一次渲染，避免三次 fork。
     exec_menu '--index'
     # 获取菜单选择的退出码 (代表用户选择)
-    local choose=$(echo $?)
+    # 必须捕获上一条命令的退出码，拆成两条语句会被 local 重置为 0
+    # shellcheck disable=SC2155
+    local choose=$?
     # 根据用户选择执行不同的主操作
     case ${choose} in
     1) processes_full_installation ;; # 选择 1：选择版本、协议并执行完整安装

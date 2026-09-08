@@ -46,6 +46,18 @@ readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件
 readonly I18N_DIR="${PROJECT_ROOT}/i18n"                       # 国际化文件目录
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
 
+# 复用统一的子库（i18n 取值 / 日志 / 系统探测）。它们只定义函数，不定义颜色、
+# PATH 等常量，因此不与本脚本自己的 readonly 定义冲突。
+source "${PROJECT_ROOT}/lib/i18n.sh"
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/system.sh"
+# 证书对校验 / 部署权限 / 成对备份回滚 / acme.sh 安装步骤与 core/handler.sh 共用，
+# 见 lib/cert.sh（只定义函数，不与本脚本的 readonly 常量冲突）。
+source "${PROJECT_ROOT}/lib/cert.sh"
+# 事务调度骨架（trap 注册 / 信号码 / 提交与回滚标记）与 core/main.sh、
+# service/nginx.sh 共用，见 lib/transaction.sh。
+source "${PROJECT_ROOT}/lib/transaction.sh"
+
 # 定义 Nginx 配置、ACME 验证、 SSL 证书的路径
 readonly NGINX_CONFIG_PATH="${NGINX_CONFIG_PATH_OVERRIDE:-/usr/local/nginx/conf}" # Nginx 配置目录
 readonly ACME_WEBROOT_PATH="${ACME_WEBROOT_PATH_OVERRIDE:-/var/www/_zerossl}"      # ACME HTTP 验证 webroot 目录
@@ -62,92 +74,9 @@ declare DOMAIN=''        # 存储要操作的域名
 declare ACCOUNT_EMAIL='' # 存储 acme.sh 账户邮箱
 declare DELETE_DEPLOYED_CERT=0 # 停止续签时是否同时删除已部署证书
 declare LANG_PARAM=''    # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''     # 存储从 i18n JSON 文件中读取的全部数据
 
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
-    fi
-
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
-
-# =============================================================================
-# 函数名称: print_info
-# 功能描述: 以绿色打印信息级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_info() {
-    # 从 i18n 数据中读取 "信息" 标题，然后用绿色打印消息
-    printf "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_warn
-# 功能描述: 以黄色打印警告级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_warn() {
-    # 从 i18n 数据中读取 "警告" 标题，然后用黄色打印消息
-    printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_error
-# 功能描述: 以红色打印错误级别的提示消息，并退出脚本。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2，然后 exit 1)
-# =============================================================================
-function print_error() {
-    # 从 i18n 数据中读取 "错误" 标题，然后用红色打印消息
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
-    # 打印错误信息后退出脚本，错误码为 1
-    exit 1
-}
+# print_info / print_warn / print_error 由 lib/log.sh 统一提供。
 
 function valid_certificate_domain() {
     local domain="$1"
@@ -164,21 +93,24 @@ function valid_certificate_domain() {
 function install_acme_sh() {
     # 检查 acme.sh 是否已经安装
     if [[ -e "${HOME}/.acme.sh/acme.sh" ]]; then
-        print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.already_installed")"
+        print_info "$(t ".${CUR_FILE}.install.already_installed")"
         return 0
     fi
 
     # 打印安装信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.start")"
+    print_info "$(t ".${CUR_FILE}.install.start")"
 
-    # 使用 curl 下载并运行 acme.sh 安装脚本，设置账户邮箱
-    curl https://get.acme.sh | sh -s email="${ACCOUNT_EMAIL}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    # 三步安装命令在 lib/cert.sh（与 handler 的安装路径共用），文案留在本进程
+    acme_client_download "${ACCOUNT_EMAIL}" ||
+        print_error "$(t ".${CUR_FILE}.install.fail_download")"
 
     # 启用 acme.sh 的自动升级功能
-    "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_autoupgrade")"
+    acme_client_enable_autoupgrade ||
+        print_error "$(t ".${CUR_FILE}.install.fail_autoupgrade")"
 
     # 设置 acme.sh 的默认 CA 为 ZeroSSL
-    "${HOME}/.acme.sh/acme.sh" --set-default-ca --server zerossl || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_set_ca")"
+    acme_client_set_default_ca ||
+        print_error "$(t ".${CUR_FILE}.install.fail_set_ca")"
 }
 
 # =============================================================================
@@ -189,10 +121,10 @@ function install_acme_sh() {
 # =============================================================================
 function update_acme_sh() {
     # 打印更新信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.update.start")"
+    print_info "$(t ".${CUR_FILE}.update.start")"
 
     # 执行 acme.sh 的升级命令
-    "${HOME}/.acme.sh/acme.sh" --upgrade || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.update.fail")"
+    "${HOME}/.acme.sh/acme.sh" --upgrade || print_error "$(t ".${CUR_FILE}.update.fail")"
 }
 
 # =============================================================================
@@ -203,21 +135,19 @@ function update_acme_sh() {
 # =============================================================================
 function purge_acme_sh() {
     # 打印卸载信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.start")"
+    print_info "$(t ".${CUR_FILE}.purge.start")"
 
     # 检查 acme.sh 是否存在
     if [[ -e "${HOME}/.acme.sh/acme.sh" ]]; then
-        # 禁用 acme.sh 的自动升级
-        "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade 0 || print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.fail_disable_autoupgrade")"
-        # 执行 acme.sh 的卸载命令
-        "${HOME}/.acme.sh/acme.sh" --uninstall || print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.fail_uninstall_cmd")"
+        # 直接卸载即可：--uninstall 自带 uninstallcronjob，先联网 --upgrade 只会让离线卸载卡住
+        "${HOME}/.acme.sh/acme.sh" --uninstall || print_warn "$(t ".${CUR_FILE}.purge.fail_uninstall_cmd")"
     fi
 
     # 只卸载 ACME 客户端和挑战目录。部署目录可能同时包含用户提供的
     # 自定义证书；卸载续签工具不应让仍在运行的 Nginx 站点立即失效。
     rm -rf -- "${HOME}/.acme.sh" "${ACME_WEBROOT_PATH}"
     # 打印删除成功信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.success")"
+    print_info "$(t ".${CUR_FILE}.purge.success")"
 }
 
 # =============================================================================
@@ -227,49 +157,18 @@ function purge_acme_sh() {
 # 返回值: 无 (签发成功或失败后退出)
 # =============================================================================
 function report_issue_error() {
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
+    log_error "$*"
 }
 
-function validate_installed_certificate_pair() {
-    local fullchain="$1"
-    local privkey="$2"
-    local cert_public_key key_public_key
-
-    [[ -r "${fullchain}" && -r "${privkey}" ]] || return 1
-    cert_public_key="$(openssl x509 -in "${fullchain}" -pubkey -noout 2>/dev/null |
-        openssl pkey -pubin -outform PEM 2>/dev/null)" || return 1
-    key_public_key="$(openssl pkey -in "${privkey}" -pubout -outform PEM 2>/dev/null)" || return 1
-    [[ -n "${cert_public_key}" && "${cert_public_key}" == "${key_public_key}" ]] ||
-        return 1
-    openssl x509 -in "${fullchain}" -noout -checkend 0 >/dev/null 2>&1
-}
-
-function restore_certificate_pair() {
-    local cert_path="$1"
-    local backup_dir="$2"
-    local had_fullchain="$3"
-    local had_privkey="$4"
-    local restore_status=0
-
-    if [[ "${had_fullchain}" -eq 1 ]]; then
-        cp -p -- "${backup_dir}/fullchain.pem" "${cert_path}/fullchain.pem" ||
-            restore_status=1
-    else
-        rm -f -- "${cert_path}/fullchain.pem" || restore_status=1
-    fi
-    if [[ "${had_privkey}" -eq 1 ]]; then
-        cp -p -- "${backup_dir}/privkey.pem" "${cert_path}/privkey.pem" ||
-            restore_status=1
-    else
-        rm -f -- "${cert_path}/privkey.pem" || restore_status=1
-    fi
-    return "${restore_status}"
+# run_with_debug_retry 的回调：第二次签发前提示一次
+function report_issue_retry() {
+    print_warn "$(t ".cert.retry_debug")"
 }
 
 function issue_certificate() (
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -eq 0 ]]; then
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.no_domain")"
+        print_error "$(t ".${CUR_FILE}.issue.no_domain")"
     fi
 
     # 定义证书存储路径
@@ -284,6 +183,7 @@ function issue_certificate() (
     local nginx_was_active=0
     local had_fullchain=0
     local had_privkey=0
+    local backup_flags=''
     local certificate_touched=0
     local certificate_restored=0
     local operation_failed=0
@@ -292,7 +192,6 @@ function issue_certificate() (
     local nginx_state_captured=0
     local nginx_conf_mutated=0
     local runtime_dirty=0
-    local transaction_committed=0
     local transaction_cleanup_finished=0
     local error_message=''
     local reload_command
@@ -339,11 +238,11 @@ function issue_certificate() (
 
         # Until the commit flag is set, the certificate destination belongs
         # to the transaction and must be restored as one pair.
-        if [[ "${transaction_committed}" -eq 0 &&
-            "${certificate_touched}" -eq 1 &&
-            "${certificate_restored}" -eq 0 ]]; then
+        if ! txn_is_committed &&
+            [[ "${certificate_touched}" -eq 1 &&
+                "${certificate_restored}" -eq 0 ]]; then
             if [[ -n "${cert_backup}" && -d "${cert_backup}" ]] &&
-                restore_certificate_pair \
+                cert_restore_pair \
                     "${cert_path}" "${cert_backup}" \
                     "${had_fullchain}" "${had_privkey}"; then
                 certificate_restored=1
@@ -398,9 +297,9 @@ function issue_certificate() (
             fi
         fi
         if [[ -n "${cert_backup}" && -d "${cert_backup}" ]]; then
-            if [[ "${transaction_committed}" -eq 1 ||
-                "${certificate_touched}" -eq 0 ||
-                "${certificate_restored}" -eq 1 ]]; then
+            if txn_is_committed ||
+                [[ "${certificate_touched}" -eq 0 ||
+                    "${certificate_restored}" -eq 1 ]]; then
                 rm -f -- \
                     "${cert_backup}/fullchain.pem" \
                     "${cert_backup}/privkey.pem" ||
@@ -422,35 +321,31 @@ function issue_certificate() (
         local original_status="$1"
         local trap_cleanup_status=0
 
-        trap - EXIT
-        trap '' HUP INT TERM
+        txn_finish_enter ignore
         if [[ "${transaction_cleanup_finished}" -eq 0 ]]; then
             cleanup_interrupted_issue || trap_cleanup_status=$?
         fi
-        if [[ "${original_status}" -eq 0 &&
-            "${transaction_committed}" -eq 0 ]]; then
+        if [[ "${original_status}" -eq 0 ]] && ! txn_is_committed; then
             original_status=1
         fi
         [[ "${trap_cleanup_status}" -eq 0 ]] || original_status=1
         exit "${original_status}"
     }
 
-    trap 'handle_issue_transaction_exit "$?"' EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    # 事务调度骨架在 lib/transaction.sh；证书/配置/运行时的恢复体留在本函数。
+    txn_begin handle_issue_transaction_exit
 
     # 打印签发信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.start")"
+    print_info "$(t ".${CUR_FILE}.issue.start")"
 
     # 创建 ACME 验证目录
     [[ -d "${ACME_WEBROOT_PATH}" ]] || mkdir -vp "${ACME_WEBROOT_PATH}" ||
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_acme_dir" | sed "s|\${ACME_WEBROOT_PATH}|${ACME_WEBROOT_PATH}|")"
+        print_error "$(t ".${CUR_FILE}.issue.fail_create_acme_dir" | sed "s|\${ACME_WEBROOT_PATH}|${ACME_WEBROOT_PATH}|")"
     # 创建证书存储目录
     [[ -d "${cert_path}" ]] || mkdir -vp "${cert_path}" ||
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_create_cert_dir" | sed "s|\${cert_path}|${cert_path}|")"
+        print_error "$(t ".${CUR_FILE}.issue.fail_create_cert_dir" | sed "s|\${cert_path}|${cert_path}|")"
     if [[ -L "${cert_path}" || -L "${fullchain_path}" || -L "${privkey_path}" ]]; then
-        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+        report_issue_error "$(t ".${CUR_FILE}.issue.fail_install_cert")"
         return 1
     fi
 
@@ -458,10 +353,10 @@ function issue_certificate() (
     if [[ -f "${nginx_conf}" ]]; then
         nginx_had_config=1
         nginx_conf_backup="$(mktemp "${nginx_conf}.ssl_script.XXXXXX")" ||
-            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+            print_error "$(t ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
         if ! cp -p -- "${nginx_conf}" "${nginx_conf_backup}"; then
             rm -f -- "${nginx_conf_backup}"
-            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+            print_error "$(t ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
         fi
     fi
     if "${SSL_SYSTEMCTL_COMMAND}" is-active --quiet nginx; then
@@ -472,7 +367,7 @@ function issue_certificate() (
     # 生成一个临时的 Nginx 配置文件，用于 ACME HTTP-01 验证
     nginx_conf_temp="$(mktemp "${nginx_conf}.challenge.XXXXXX")" || {
         rm -f -- "${nginx_conf_backup}"
-        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        report_issue_error "$(t ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
         return 1
     }
     if ! cat >"${nginx_conf_temp}" <<EOF
@@ -497,7 +392,7 @@ http {
 EOF
     then
         rm -f -- "${nginx_conf_temp}" "${nginx_conf_backup}"
-        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        report_issue_error "$(t ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
         return 1
     fi
     if [[ "${nginx_had_config}" -eq 1 ]]; then
@@ -515,7 +410,7 @@ EOF
         nginx_conf_mutated=0
         runtime_dirty=0
         rm -f -- "${nginx_conf_temp}" "${nginx_conf_backup}"
-        report_issue_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
+        report_issue_error "$(t ".${CUR_FILE}.issue.fail_backup_nginx" | sed "s|\${nginx_conf}|${nginx_conf}|")"
         return 1
     fi
     nginx_conf_temp=''
@@ -526,61 +421,43 @@ EOF
         if ! "${SSL_NGINX_COMMAND}" -t ||
             ! "${SSL_SYSTEMCTL_COMMAND}" reload nginx; then
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_reload_nginx")"
         fi
     else
         # 如果未运行，则测试配置并启动
         if ! "${SSL_NGINX_COMMAND}" -t ||
             ! "${SSL_SYSTEMCTL_COMMAND}" start nginx; then
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_start_nginx")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_start_nginx")"
         fi
     fi
 
-    # 使用 acme.sh 签发 ECC 证书
+    # 使用 acme.sh 签发 ECC 证书；首次失败时按 lib/cert.sh 的统一约定加 --debug 重试
     if [[ "${operation_failed}" -eq 0 ]] &&
-        ! "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
+        ! run_with_debug_retry report_issue_retry \
+            "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
             --webroot "${ACME_WEBROOT_PATH}" \
             --keylength ec-256 \
             --accountkeylength ec-256 \
             --server zerossl \
             --ocsp \
             --force; then
-        # 如果首次签发失败，则尝试启用调试模式重新签发
-        print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_first_attempt")"
-        if ! "${HOME}/.acme.sh/acme.sh" --issue -d "${DOMAIN}" \
-                --webroot "${ACME_WEBROOT_PATH}" \
-                --keylength ec-256 \
-                --accountkeylength ec-256 \
-                --server zerossl \
-                --ocsp \
-                --force \
-                --debug; then
-            operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_ecc_issue")"
-        fi
+        operation_failed=1
+        error_message="$(t ".${CUR_FILE}.issue.fail_ecc_issue")"
     fi
 
     if [[ "${operation_failed}" -eq 0 ]]; then
         cert_backup="$(mktemp -d "${cert_path}.ssl-backup.XXXXXX")" || {
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_install_cert")"
         }
     fi
-    if [[ "${operation_failed}" -eq 0 && -e "${fullchain_path}" ]]; then
-        if cp -p -- "${fullchain_path}" "${cert_backup}/fullchain.pem"; then
-            had_fullchain=1
-        else
+    if [[ "${operation_failed}" -eq 0 ]]; then
+        if ! backup_flags="$(cert_backup_pair "${cert_path}" "${cert_backup}")"; then
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
-        fi
-    fi
-    if [[ "${operation_failed}" -eq 0 && -e "${privkey_path}" ]]; then
-        if cp -p -- "${privkey_path}" "${cert_backup}/privkey.pem"; then
-            had_privkey=1
+            error_message="$(t ".${CUR_FILE}.issue.fail_install_cert")"
         else
-            operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+            read -r had_fullchain had_privkey <<<"${backup_flags}"
         fi
     fi
 
@@ -593,30 +470,32 @@ EOF
                 --key-file "${privkey_path}" \
                 --fullchain-file "${fullchain_path}" \
                 --reloadcmd "${reload_command}" ||
-            ! validate_installed_certificate_pair "${fullchain_path}" "${privkey_path}"; then
+            ! cert_validate_pair "${fullchain_path}" "${privkey_path}"; then
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_install_cert")"
         fi
     fi
 
-    # 设置证书目录权限，确保 nginx worker 可读
+    # 设置证书目录权限，确保 nginx worker 可读。
+    # cert_set_permissions 的返回码：1 = chmod 失败（硬失败），2 = 只 chown 失败。
+    # 属主下发失败不能算事务失败：证书已经签发并安装好，nginx 主进程以 root 读取
+    # 证书，属主只影响其它消费方；为此回滚刚签发的证书比迁移前（`chown ... || true`）
+    # 更糟。迁移前的 ssl.sh 也只把 chmod 失败当硬失败。
     if [[ "${operation_failed}" -eq 0 ]]; then
-        if getent group xray-nginx >/dev/null 2>&1; then
-            chown -R nginx:xray-nginx "${cert_path}" 2>/dev/null || true
-        else
-            chown -R nginx:nginx "${cert_path}" 2>/dev/null || true
-        fi
-        if ! chmod 750 "${cert_path}" 2>/dev/null ||
-            ! chmod 640 "${fullchain_path}" "${privkey_path}" 2>/dev/null; then
+        local permissions_status=0
+        cert_set_permissions "${cert_path}" nginx || permissions_status=$?
+        if [[ "${permissions_status}" -eq 1 ]]; then
             operation_failed=1
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_install_cert")"
+        elif [[ "${permissions_status}" -eq 2 ]]; then
+            print_warn "$(t ".${CUR_FILE}.issue.fail_set_owner")"
         fi
     fi
 
     # A failed install/validation must put the previous pair back before the
     # original Nginx configuration is made active again.
     if [[ "${operation_failed}" -ne 0 && "${certificate_touched}" -eq 1 ]]; then
-        if restore_certificate_pair \
+        if cert_restore_pair \
             "${cert_path}" "${cert_backup}" \
             "${had_fullchain}" "${had_privkey}"; then
             certificate_restored=1
@@ -638,7 +517,7 @@ EOF
             operation_failed=1
             cleanup_failed=1
             [[ -n "${error_message}" ]] ||
-                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+                error_message="$(t ".${CUR_FILE}.issue.fail_reload_nginx")"
         fi
     elif rm -f -- "${nginx_conf}"; then
         nginx_conf_mutated=0
@@ -647,7 +526,7 @@ EOF
         operation_failed=1
         cleanup_failed=1
         [[ -n "${error_message}" ]] ||
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_reload_nginx")"
     fi
 
     if [[ "${config_restored}" -eq 1 ]]; then
@@ -658,7 +537,7 @@ EOF
             if [[ "${operation_failed}" -eq 0 &&
                 "${certificate_touched}" -eq 1 &&
                 "${certificate_restored}" -eq 0 ]]; then
-                if restore_certificate_pair \
+                if cert_restore_pair \
                     "${cert_path}" "${cert_backup}" \
                     "${had_fullchain}" "${had_privkey}"; then
                     certificate_restored=1
@@ -668,9 +547,9 @@ EOF
             fi
             operation_failed=1
             if [[ "${nginx_was_active}" -eq 1 ]]; then
-                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_reload_nginx")"
+                error_message="$(t ".${CUR_FILE}.issue.fail_reload_nginx")"
             else
-                error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_start_nginx")"
+                error_message="$(t ".${CUR_FILE}.issue.fail_start_nginx")"
             fi
             if restore_issue_nginx_runtime; then
                 runtime_dirty=0
@@ -684,7 +563,7 @@ EOF
 
     if [[ "${operation_failed}" -eq 0 && "${cleanup_failed}" -eq 0 &&
         "${nginx_conf_mutated}" -eq 0 && "${runtime_dirty}" -eq 0 ]]; then
-        transaction_committed=1
+        txn_commit
     fi
 
     if [[ -n "${cert_backup}" && -d "${cert_backup}" &&
@@ -700,7 +579,7 @@ EOF
 
     if [[ "${operation_failed}" -ne 0 || "${cleanup_failed}" -ne 0 ]]; then
         [[ -n "${error_message}" ]] ||
-            error_message="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.issue.fail_install_cert")"
+            error_message="$(t ".${CUR_FILE}.issue.fail_install_cert")"
         report_issue_error "${error_message}"
         if [[ "${cleanup_failed}" -eq 0 ]]; then
             transaction_cleanup_finished=1
@@ -721,10 +600,10 @@ EOF
 # =============================================================================
 function renew_certificates() {
     # 打印续期信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.renew.start")"
+    print_info "$(t ".${CUR_FILE}.renew.start")"
 
     # 执行 acme.sh 的强制续期命令
-    "${HOME}/.acme.sh/acme.sh" --cron --force || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.renew.fail")"
+    "${HOME}/.acme.sh/acme.sh" --cron --force || print_error "$(t ".${CUR_FILE}.renew.fail")"
 }
 
 # =============================================================================
@@ -735,18 +614,18 @@ function renew_certificates() {
 # =============================================================================
 function stop_renew_certificates() {
     # 打印停止续期信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.start")"
+    print_info "$(t ".${CUR_FILE}.stop_renew.start")"
 
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -gt 0 ]]; then
         local managed_domain
         managed_domain="$(find_acme_main_domain "${DOMAIN}")" || {
-            print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
+            print_warn "$(t ".${CUR_FILE}.stop_renew.fail_cmd")"
             return 1
         }
         # 执行 acme.sh 的移除命令（停止续期）
         if ! "${HOME}/.acme.sh/acme.sh" --remove -d "${managed_domain}" --ecc; then
-            print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.fail_cmd")"
+            print_warn "$(t ".${CUR_FILE}.stop_renew.fail_cmd")"
             return 1
         fi
         # 删除该域名的 acme.sh 本地存储目录
@@ -757,8 +636,9 @@ function stop_renew_certificates() {
             rm -rf -- "${NGINX_CONFIG_PATH}/certs/${DOMAIN}" || return 1
         fi
     else
-        # 如果未提供域名，则打印警告
-        print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.stop_renew.no_domain")"
+        # 如果未提供域名，则打印警告。返回非 0：什么都没做不能算成功。
+        print_warn "$(t ".${CUR_FILE}.stop_renew.no_domain")"
+        return 1
     fi
 }
 
@@ -770,7 +650,7 @@ function stop_renew_certificates() {
 # =============================================================================
 function check_cron_jobs() {
     # 打印检查信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.check_cron.start")"
+    print_info "$(t ".${CUR_FILE}.check_cron.start")"
 
     # 执行 acme.sh 的 cron 检查命令
     "${HOME}/.acme.sh/acme.sh" --cron --home "${HOME}/.acme.sh"
@@ -785,7 +665,7 @@ function check_cron_jobs() {
 function check_certificate_status() {
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -eq 0 ]]; then
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.status.no_domain")"
+        print_error "$(t ".${CUR_FILE}.status.no_domain")"
     fi
 
     find_acme_main_domain "${DOMAIN}"
@@ -825,13 +705,13 @@ function find_acme_main_domain() {
 function show_certificate_info() {
     # 检查是否提供了域名
     if [[ ${#DOMAIN} -eq 0 ]]; then
-        print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.info.no_domain")"
+        print_error "$(t ".${CUR_FILE}.info.no_domain")"
     fi
 
     local managed_domain
     managed_domain="$(find_acme_main_domain "${DOMAIN}")" || return 1
     # 打印显示信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.info.start")"
+    print_info "$(t ".${CUR_FILE}.info.start")"
 
     # 执行 acme.sh 的信息显示命令
     "${HOME}/.acme.sh/acme.sh" --info -d "${managed_domain}" --ecc
@@ -840,26 +720,28 @@ function show_certificate_info() {
 # =============================================================================
 # 函数名称: show_help
 # 功能描述: 显示脚本的使用帮助信息。
-# 参数: 无
-# 返回值: 无 (打印帮助信息后 exit 0)
+# 参数:
+#   $1 (可选): 退出码，默认 0
+# 返回值: 无 (打印帮助信息后按 $1 退出)
 # =============================================================================
 function show_help() {
+    local exit_code="${1:-0}"
     # 从 i18n 数据中读取帮助信息的各个部分
-    local usage="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.usage" | sed "s|\${script_name}|$0|")"
-    local commands_title="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.commands_title")"
-    local cmd_install="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_install")"
-    local cmd_update="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_update")"
-    local cmd_purge="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_purge")"
-    local cmd_issue="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_issue")"
-    local cmd_renew="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_renew")"
-    local cmd_stop_renew="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_stop_renew")"
-    local cmd_check_cron="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_check_cron")"
-    local cmd_info="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_info")"
-    local cmd_status="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_status")"
-    local cmd_help="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.cmd_help")"
-    local options_title="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.options_title")"
-    local opt_domain="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.opt_domain")"
-    local opt_email="$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.help.opt_email")"
+    local usage="$(t ".${CUR_FILE}.help.usage" | sed "s|\${script_name}|$0|")"
+    local commands_title="$(t ".${CUR_FILE}.help.commands_title")"
+    local cmd_install="$(t ".${CUR_FILE}.help.cmd_install")"
+    local cmd_update="$(t ".${CUR_FILE}.help.cmd_update")"
+    local cmd_purge="$(t ".${CUR_FILE}.help.cmd_purge")"
+    local cmd_issue="$(t ".${CUR_FILE}.help.cmd_issue")"
+    local cmd_renew="$(t ".${CUR_FILE}.help.cmd_renew")"
+    local cmd_stop_renew="$(t ".${CUR_FILE}.help.cmd_stop_renew")"
+    local cmd_check_cron="$(t ".${CUR_FILE}.help.cmd_check_cron")"
+    local cmd_info="$(t ".${CUR_FILE}.help.cmd_info")"
+    local cmd_status="$(t ".${CUR_FILE}.help.cmd_status")"
+    local cmd_help="$(t ".${CUR_FILE}.help.cmd_help")"
+    local options_title="$(t ".${CUR_FILE}.help.options_title")"
+    local opt_domain="$(t ".${CUR_FILE}.help.opt_domain")"
+    local opt_email="$(t ".${CUR_FILE}.help.opt_email")"
 
     # 使用 here document 打印帮助信息
     cat <<EOF
@@ -879,8 +761,8 @@ ${options_title}:
   --domain            ${opt_domain}
   --email             ${opt_email}
 EOF
-    # 退出脚本，状态码为 0 (成功)
-    exit 0
+    # 退出脚本，状态码由调用方指定（未知参数时为 2）
+    exit "${exit_code}"
 }
 
 # =============================================================================
@@ -921,9 +803,14 @@ function main() {
         --delete-cert)
             DELETE_DEPLOYED_CERT=1
             ;;
-        # 匹配帮助或未知选项
-        --help | *)
-            show_help # 显示帮助并退出
+        # 匹配帮助选项
+        --help)
+            show_help 0 # 显示帮助并正常退出
+            ;;
+        # 未知选项必须失败：返回 0 会让调用方的 || return 1 把「什么都没做」当成成功
+        *)
+            print_warn "$(t ".${CUR_FILE}.help.unknown_option")$1"
+            show_help 2 # 显示帮助并以 2 退出
             ;;
         esac
         shift # 移动到下一个参数
@@ -934,7 +821,7 @@ function main() {
     case "${ACTION}" in
     issue|stop-renew|status|info)
         valid_certificate_domain "${DOMAIN}" ||
-            print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.domain_invalid")"
+            print_error "$(t ".${CUR_FILE}.domain_invalid")"
         ;;
     esac
 

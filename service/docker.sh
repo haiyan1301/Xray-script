@@ -62,159 +62,22 @@ readonly CLOUDREVE_V4_DIR="${DOCKER_DIR}/cloudreve/v4"         # Cloudreve v4 Do
 readonly CLOUDREVE_V4_YAML_DIR="${CONFIG_DIR}/cloudreve/v4"    # Cloudreve v4 配置文件目录
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配置文件路径
 
+# 复用统一的子库（i18n 取值 / 日志 / 系统探测）。它们只定义函数，不定义颜色、
+# PATH 等常量，因此不与本脚本自己的 readonly 定义冲突。
+source "${PROJECT_ROOT}/lib/i18n.sh"
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/system.sh"
+# 事务调度骨架（trap 注册 / 信号码）与 core/main.sh、service/ssl.sh、
+# service/nginx.sh 共用，见 lib/transaction.sh。
+source "${PROJECT_ROOT}/lib/transaction.sh"
+
 # --- 全局变量声明 ---
 # 声明用于存储语言参数和国际化数据的全局变量
 declare LANG_PARAM='' # (未在脚本中实际使用，可能是预留)
-declare I18N_DATA=''  # 存储从 i18n JSON 文件中读取的全部数据
 
-# =============================================================================
-# 函数名称: load_i18n
-# 功能描述: 加载国际化 (i18n) 数据。
-#           1. 从 config.json 读取语言设置。
-#           2. 如果设置为 "auto"，则尝试从系统环境变量 $LANG 推断语言。
-#           3. 根据确定的语言，加载对应的 JSON i18n 文件。
-#           4. 将文件内容读入全局变量 I18N_DATA。
-# 参数: 无
-# 返回值: 无 (直接修改全局变量 I18N_DATA)
-# 退出码: 如果 i18n 文件不存在，则输出错误信息并退出脚本 (exit 1)
-# =============================================================================
-function load_i18n() {
-    # 从配置文件中读取语言设置
-    local lang="$(jq -r '.language // ""' "${SCRIPT_CONFIG_PATH}")"
 
-    # 如果语言设置为 "auto"，则使用系统环境变量 LANG 的第一部分作为语言代码
-    if [[ "$lang" == "auto" ]]; then
-        lang="${LANG:-}"
-        lang="${lang%%.*}"
-        lang="${lang%%_*}"
-        [[ "${lang,,}" == 'zh' ]] && lang='zh' || lang='en'
-    fi
-
-    # 如果语言为空或为 "null"，则默认使用中文
-    if [[ -z "$lang" || "$lang" == "null" ]]; then
-        lang="zh"
-    fi
-
-    # 构造 i18n 文件的完整路径
-    local i18n_file="${I18N_DIR}/${lang}.json"
-
-    # 检查 i18n 文件是否存在
-    if [[ ! -f "${i18n_file}" ]]; then
-        # 文件不存在时，根据语言输出不同的错误信息
-        if [[ "$lang" == "zh" ]]; then
-            echo -e "${RED}[错误]${NC} 文件不存在: ${i18n_file}" >&2
-        else
-            echo -e "${RED}[Error]${NC} File Not Found: ${i18n_file}" >&2
-        fi
-        # 退出脚本，错误码为 1
-        exit 1
-    fi
-
-    # 读取 i18n 文件的全部内容到全局变量 I18N_DATA
-    I18N_DATA="$(jq '.' "${i18n_file}")"
-}
-
-# =============================================================================
-# 函数名称: print_info
-# 功能描述: 以绿色打印信息级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_info() {
-    # 从 i18n 数据中读取 "信息" 标题，然后用绿色打印消息
-    printf "${GREEN}[$(echo "$I18N_DATA" | jq -r '.title.info')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_warn
-# 功能描述: 以黄色打印警告级别的提示消息。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2)
-# =============================================================================
-function print_warn() {
-    # 从 i18n 数据中读取 "警告" 标题，然后用黄色打印消息
-    printf "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')] ${NC}%s\n" "$*" >&2
-}
-
-# =============================================================================
-# 函数名称: print_error
-# 功能描述: 以红色打印错误级别的提示消息，并退出脚本。
-# 参数:
-#   $@: 消息内容 (msg)
-# 返回值: 无 (直接打印到标准错误输出 >&2，然后 exit 1)
-# =============================================================================
-function print_error() {
-    # 从 i18n 数据中读取 "错误" 标题，然后用红色打印消息
-    printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
-    # 打印错误信息后退出脚本，错误码为 1
-    exit 1
-}
-
-# =============================================================================
-# 函数名称: _os
-# 功能描述: 检测当前操作系统的发行版名称。
-# 参数: 无
-# 返回值: 操作系统名称 (echo 输出: debian/ubuntu/centos/amazon/...)
-# =============================================================================
-function _os() {
-    local os="" # 声明局部变量存储操作系统名称
-
-    # 检查 Debian/Ubuntu 系列
-    if [[ -f "/etc/debian_version" ]]; then
-        # 读取 /etc/os-release 文件并提取 ID 字段
-        source /etc/os-release && os="${ID}"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
-
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f "/etc/redhat-release" ]]; then
-        os="centos"
-        # 输出检测到的操作系统名称
-        printf -- "%s" "${os}" && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_full
-# 功能描述: 获取当前操作系统的完整发行版信息。
-# 参数: 无
-# 返回值: 完整的操作系统版本信息 (echo 输出)
-# =============================================================================
-function _os_full() {
-    # 检查 Red Hat/CentOS 系列
-    if [[ -f /etc/redhat-release ]]; then
-        # 从 /etc/redhat-release 文件中提取发行版名称和版本号
-        awk '{print ($1,$3~/^[0-9]/?$3:$4)}' /etc/redhat-release && return
-    fi
-
-    # 检查通用的 os-release 文件
-    if [[ -f /etc/os-release ]]; then
-        # 从 /etc/os-release 文件中提取 PRETTY_NAME 字段
-        awk -F'[= "]' '/PRETTY_NAME/{print $3,$4,$5}' /etc/os-release && return
-    fi
-
-    # 检查 LSB (Linux Standard Base) 发布文件
-    if [[ -f /etc/lsb-release ]]; then
-        # 从 /etc/lsb-release 文件中提取 DESCRIPTION 字段
-        awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release && return
-    fi
-}
-
-# =============================================================================
-# 函数名称: _os_ver
-# 功能描述: 获取当前操作系统的主版本号。
-# 参数: 无
-# 返回值: 操作系统的主版本号 (echo 输出)
-# =============================================================================
-function _os_ver() {
-    # 调用 _os_full 函数获取完整版本信息，然后提取其中的数字和点
-    local main_ver="$(echo $(_os_full) | grep -oE "[0-9.]+")"
-    # 输出主版本号 (第一个点号前的部分)
-    printf -- "%s" "${main_ver%%.*}"
-}
+# print_info / print_warn / print_error 由 lib/log.sh 统一提供。
+# _os / _os_full / _os_ver 由 lib/system.sh 统一提供。
 
 # =============================================================================
 # 函数名称: install_docker
@@ -224,28 +87,46 @@ function _os_ver() {
 # =============================================================================
 function install_docker() {
     # 打印开始安装的信息
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.install.start')"
+    print_info "$(t '.docker.install.start')"
 
-    # 下载 Docker 官方安装脚本到工具目录
-    wget -O "${TOOL_DIR}/install-docker.sh" https://get.docker.com
+    # 下载到临时文件：固定路径的 install-docker.sh 一旦下载失败会残留上次的内容，
+    # 之后无检查地执行它等于静默运行旧脚本。
+    local installer
+    installer="$(mktemp "${TMPDIR:-/tmp}/install-docker.XXXXXX")" || return 1
+    # 立即展开路径，避免 RETURN 触发时变量已失效；顺手把 RETURN trap 清掉，
+    # 否则它会一直挂着，之后每个函数返回都要白跑一次 rm -f。
+    # shellcheck disable=SC2064
+    trap "rm -f -- '${installer}'; trap - RETURN" RETURN
+
+    if ! wget -O "${installer}" https://get.docker.com; then
+        print_error "$(t '.docker.install.download_fail')"
+    fi
 
     # 检查是否为 CentOS 8 系统
     if [[ "$(_os)" == "centos" && "$(_os_ver)" -eq 8 ]]; then
         # 打印针对 CentOS 8 的修复信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.install.centos8_fix')"
+        print_info "$(t '.docker.install.centos8_fix')"
         # 修改安装脚本，在安装命令中添加 --allowerasing 选项以解决依赖冲突
-        sed -i 's|$sh_c "$pkg_manager install -y -q $pkgs"| $sh_c "$pkg_manager install -y -q $pkgs --allowerasing"|' "${TOOL_DIR}/install-docker.sh"
+        sed -i 's|$sh_c "$pkg_manager install -y -q $pkgs"| $sh_c "$pkg_manager install -y -q $pkgs --allowerasing"|' "${installer}"
     fi
 
     # 打印运行前检查的信息
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.install.dry_run')"
-    # 执行安装脚本的 --dry-run 模式进行检查
-    sh "${TOOL_DIR}/install-docker.sh" --dry-run
+    print_info "$(t '.docker.install.dry_run')"
+    # 执行安装脚本的 --dry-run 模式进行检查；预检查失败就不要继续安装
+    if ! sh "${installer}" --dry-run; then
+        print_error "$(t '.docker.install.dry_run_fail')"
+    fi
 
     # 打印正式运行安装的信息
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.install.running')"
+    print_info "$(t '.docker.install.running')"
     # 执行安装脚本进行实际安装
-    sh "${TOOL_DIR}/install-docker.sh"
+    if ! sh "${installer}"; then
+        print_error "$(t '.docker.install.run_fail')"
+    fi
+
+    # 安装脚本返回 0 不代表 docker 真的装上了
+    cmd_exists docker ||
+        print_error "$(t '.docker.install.verify_fail')"
 }
 
 # =============================================================================
@@ -348,9 +229,9 @@ function build_warp() {
     # 检查名为 xray-script-warp 的镜像是否已存在
     if ! docker images --format "{{.Repository}}" | grep -q xray-script-warp; then
         # 打印开始构建的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.start')"
+        print_info "$(t '.docker.warp.build.start')"
         # 使用 docker build 命令构建镜像，失败则调用 print_error 退出
-        docker build -t xray-script-warp "${CONFIG_DIR}/cloudflare-warp" || print_error "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.fail')"
+        docker build -t xray-script-warp "${CONFIG_DIR}/cloudflare-warp" || print_error "$(t '.docker.warp.build.fail')"
     fi
 }
 
@@ -368,7 +249,7 @@ function enable_warp() {
     if docker inspect xray-script-warp >/dev/null 2>&1; then
         container_state="$(docker inspect --format='{{if .State.Running}}running{{else}}stopped{{end}}' xray-script-warp 2>/dev/null)" || return 1
     fi
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.enable.start')"
+    print_info "$(t '.docker.warp.enable.start')"
     case "${container_state}" in
     running) ;;
     stopped)
@@ -387,10 +268,10 @@ function enable_warp() {
         if [[ "${container_state}" != 'running' ]]; then
             docker stop xray-script-warp >/dev/null 2>&1 || true
         fi
-        print_error "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.fail')"
+        print_error "$(t '.docker.warp.build.fail')"
         return 1
     }
-    print_info "$(echo "$I18N_DATA" | jq -r ".docker.warp.enable.success" | sed "s/\${container_ip}/${container_ip}/")"
+    print_info "$(t ".docker.warp.enable.success" | sed "s/\${container_ip}/${container_ip}/")"
     printf '%s\n' "${container_ip}"
 }
 
@@ -405,10 +286,10 @@ function disable_warp() {
     docker inspect xray-script-warp >/dev/null 2>&1 || return 0
     state="$(docker inspect --format='{{.State.Running}}' xray-script-warp 2>/dev/null)" || return 1
     if [[ "${state}" == 'true' ]]; then
-        print_warn "$(echo "$I18N_DATA" | jq -r '.docker.warp.disable.stop')"
+        print_warn "$(t '.docker.warp.disable.stop')"
         docker stop xray-script-warp >/dev/null || return 1
     fi
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.disable.success')"
+    print_info "$(t '.docker.warp.disable.success')"
 }
 
 function rollback_warp_reset() {
@@ -548,7 +429,7 @@ function prepare_warp_reset() (
         local status="$1"
         local restore_status=0
 
-        trap - EXIT HUP INT TERM
+        txn_finish_enter
         if [[ "${status}" -ne 0 ]]; then
             if docker inspect "${running_backup}" >/dev/null 2>&1 ||
                 docker inspect "${stopped_backup}" >/dev/null 2>&1 ||
@@ -575,10 +456,8 @@ function prepare_warp_reset() (
         exit "${status}"
     }
 
-    trap 'finish_warp_reset_preparation "$?"' EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    # 事务调度骨架在 lib/transaction.sh；回滚体 rollback_warp_reset 留在本函数。
+    txn_begin finish_warp_reset_preparation
 
     if docker inspect "${running_backup}" >/dev/null 2>&1 ||
         docker inspect "${stopped_backup}" >/dev/null 2>&1 ||
@@ -599,7 +478,7 @@ function prepare_warp_reset() (
         docker tag xray-script-warp:latest xray-script-warp:reset-backup >/dev/null 2>&1 || return 1
     fi
 
-    print_info "$(echo "$I18N_DATA" | jq -r '.docker.warp.build.start')"
+    print_info "$(t '.docker.warp.build.start')"
     if ! docker build --no-cache -t xray-script-warp:reset-new "${CONFIG_DIR}/cloudflare-warp" >&2; then
         return 1
     fi
@@ -679,6 +558,86 @@ function commit_warp_reset() {
 }
 
 # =============================================================================
+# 函数名称: cloudreve_installed
+# 功能描述: 判断 Cloudreve 是否已经装过：容器（含已停止）或 compose 文件存在即算。
+#           只看运行态会在 stop（compose down 删掉容器）之后把已有安装误判成未安装，
+#           重新安装会覆盖 compose 文件——Aria2 RPC 密钥会被重新随机，已配置的客户端
+#           全部失联。
+# 参数:
+#   $1: 项目目录
+#   $2: 主容器名
+# 返回值: 0-已安装 1-未安装
+# =============================================================================
+function cloudreve_installed() {
+    local dir="$1"
+    local container="$2"
+    [[ -f "${dir}/docker-compose.yaml" ]] && return 0
+    docker ps -a --format "{{.Names}}" | grep -q "^${container}\$"
+}
+
+# =============================================================================
+# 函数名称: cloudreve_project_present
+# 功能描述: 判断 Cloudreve 项目是否还留有东西：容器（含已停止）或项目目录存在即算。
+#           stop 用 compose down 删掉容器后，目录、绑定挂载和 named volume 都还在磁盘
+#           上；只看容器会让 purge/update 静默什么都不做，与「彻底卸载」不符。
+# 参数:
+#   $1: 项目目录
+#   $2: 主容器名
+# 返回值: 0-存在 1-不存在
+# =============================================================================
+function cloudreve_project_present() {
+    local dir="$1"
+    local container="$2"
+    [[ -d "${dir}" ]] && return 0
+    docker ps -a --format "{{.Names}}" | grep -q "^${container}\$"
+}
+
+# =============================================================================
+# 函数名称: wait_container_running
+# 功能描述: 等待指定容器稳定处于 running 状态。
+#           `docker compose up -d` 只要容器被创建并启动就返回 0；容器随后崩溃、
+#           反复重启（compose 里写着 restart: unless-stopped）时它照样返回 0。安装流程
+#           据此打印「初始管理员账户」并上报成功，用户拿到的却是空的账号密码和一个
+#           起不来的服务。
+#           所以 up -d 之后必须再看一眼容器的真实状态，而且不能只看一瞬间：
+#           崩溃循环里的容器会有短暂的 running 窗口，因此要求**连续 stable 秒**都是
+#           running 才算就绪（用 SECONDS 计时，不是数循环次数；同时也替掉了原来盲目
+#           的 sleep 5）。
+#           容器名找不到时退回按 compose 项目查运行态容器：用户若在 compose 文件里
+#           改过 container_name，只认写死的名字会让这里空等 30 秒后误报启动失败。
+# 参数:
+#   $1: 容器名
+#   $2: 超时秒数（默认 30）
+#   $3: 需要连续 running 的秒数（默认 5）
+# 返回值: 0-已稳定运行 1-超时/容器不存在/一直在重启
+# =============================================================================
+function wait_container_running() {
+    local container="$1"
+    local timeout="${2:-30}"
+    local stable_need="${3:-5}"
+    local deadline=$((SECONDS + timeout))
+    local stable_since='' status=''
+
+    while :; do
+        status="$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null)" || status=''
+        # 容器名对不上（用户改过 container_name）：按当前目录的 compose 项目找运行态容器
+        if [[ -z "${status}" ]] && [[ -n "$(docker compose ps --status running --format '{{.Name}}' 2>/dev/null || true)" ]]; then
+            status='running'
+        fi
+        if [[ "${status}" == 'running' ]]; then
+            [[ -n "${stable_since}" ]] || stable_since="${SECONDS}"
+            if ((SECONDS - stable_since >= stable_need)); then
+                return 0
+            fi
+        else
+            stable_since=''
+        fi
+        ((SECONDS < deadline)) || return 1
+        sleep 1
+    done
+}
+
+# =============================================================================
 # 函数名称: install_cloudreve_v3
 # 功能描述: 安装并启动 Cloudreve v3 服务。
 #           创建必要的目录和文件，配置 docker-compose.yaml，
@@ -687,10 +646,10 @@ function commit_warp_reset() {
 # 返回值: 无 (执行安装和启动过程)
 # =============================================================================
 function install_cloudreve_v3() {
-    # 检查名为 cloudreve_v3 的容器是否已在运行
-    if ! docker ps --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
+    # 已装过就跳过：容器（含已停止）或 compose 文件存在都算已安装。
+    if ! cloudreve_installed "${CLOUDREVE_V3_DIR}" 'cloudreve_v3'; then
         # 打印创建目录的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.create_dir')"
+        print_info "$(t '.docker.cloudreve_v3.create_dir')"
         # 创建 Cloudreve v3 所需的目录结构和文件
         mkdir -vp ${CLOUDREVE_V3_DIR} &&
             mkdir -vp ${CLOUDREVE_V3_DIR}/{uploads,avatar} &&
@@ -712,16 +671,21 @@ function install_cloudreve_v3() {
         sed -i "s|your_aria_rpc_token|$(openssl rand -hex 32)|" "${CLOUDREVE_V3_DIR}/docker-compose.yaml"
 
         # 打印启动服务的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.start')"
-        # 切换到 Cloudreve v3 目录并启动服务
+        print_info "$(t '.docker.cloudreve_v3.start')"
+        # 切换到 Cloudreve v3 目录并启动服务；启动失败必须中止，否则会继续
+        # 打印一份并不存在的「初始管理员账户」。
         cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
-        docker compose up -d
-        # 等待服务启动
-        sleep 5
+        docker compose up -d || print_error "$(t '.docker.cloudreve_v3.up_fail')"
+        # up -d 返回 0 只说明容器被启动了，不代表服务真的起来；容器崩溃重启时它照样返回 0。
+        # 必须等容器稳定运行，否则下面会打印一份空的「初始管理员账户」并把安装当成成功。
+        wait_container_running 'cloudreve_v3' || print_error "$(t '.docker.cloudreve_v3.up_fail')"
         # 获取并显示管理员账户信息
         get_cloudreve_v3_admin
         # 获取并显示 Aria2 Token
         get_aria2_token
+    else
+        # 跳过也要说一声：否则用户选了「安装」却没有任何输出，看起来像菜单项坏了。
+        print_info "$(t '.docker.cloudreve_v3.already_installed')"
     fi
 }
 
@@ -741,7 +705,7 @@ function get_cloudreve_v3_admin() {
         # 从日志中提取密码 (通常是第二行包含 Admin 的最后一列)
         local cloudreve_password="$(echo "${cloudreve_info}" | grep Admin | awk '{print $NF}' | tail -1)"
         # 打印管理员账户信息
-        print_info "$(echo "$I18N_DATA" | jq -r ".docker.cloudreve_v3.admin_info" | sed "s/\${username}/${cloudreve_username}/;s/\${password}/${cloudreve_password}/")"
+        print_info "$(t ".docker.cloudreve_v3.admin_info" | sed "s/\${username}/${cloudreve_username}/;s/\${password}/${cloudreve_password}/")"
     fi
 }
 
@@ -755,7 +719,7 @@ function get_aria2_token() {
     # 从 docker-compose.yaml 文件中提取 RPC_SECRET 的值
     local token="$(sed -n 's/.*RPC_SECRET=//p' "${CLOUDREVE_V3_DIR}/docker-compose.yaml")"
     # 打印 Aria2 Token 信息
-    print_info "$(echo "$I18N_DATA" | jq -r ".docker.cloudreve_v3.aria2_token" | sed "s/\${token}/${token}/")"
+    print_info "$(t ".docker.cloudreve_v3.aria2_token" | sed "s/\${token}/${token}/")"
 }
 
 # =============================================================================
@@ -766,22 +730,43 @@ function get_aria2_token() {
 # 返回值: 无 (执行重置过程)
 # =============================================================================
 function reset_cloudreve_v3_admin() {
-    # 检查名为 cloudreve_v3 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
+    # 容器存在（含已停止）即可重置：用 docker ps 只看运行态会让「停止后再重置」静默无操作。
+    if docker ps -a --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
+        # Cloudreve v3 没有官方的管理员重置命令，这里只能重建整个数据库：
+        # 先把影响范围说清楚，再备份，避免用户以为只是改个密码。
+        print_warn "$(t '.docker.cloudreve_v3.reset_scope')"
+        # 整库重建不可回滚，必须显式确认。非交互环境直接拒绝——不能把 EOF 当成默认同意
+        # （与 handler_purge 的卸载确认同一套约定）。
+        local confirm=''
+        if [[ ! -t 0 ]]; then
+            print_error "$(t '.docker.cloudreve_v3.reset_tty_required')"
+            return 1
+        fi
+        read -r -p "$(t '.docker.cloudreve_v3.reset_confirm'): " confirm
+        if [[ "${confirm}" != 'yes' ]]; then
+            print_info "$(t '.docker.cloudreve_v3.reset_cancelled')"
+            return 0
+        fi
         # 打印重置账户的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.reset')"
+        print_info "$(t '.docker.cloudreve_v3.reset')"
         # 切换到 Cloudreve v3 目录
         cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
-        # 停止服务
-        docker compose down
+        # 停止服务；停不下来就不要动数据库
+        docker compose down || print_error "$(t '.docker.cloudreve_v3.down_fail')"
+        # 删除数据库前先留一份带时间戳的备份
+        if [[ -e "${CLOUDREVE_V3_DIR}/cloudreve.db" ]]; then
+            cp -a -- "${CLOUDREVE_V3_DIR}/cloudreve.db" \
+                "${CLOUDREVE_V3_DIR}/cloudreve.db.bak.$(date +%Y%m%d_%H%M%S)" ||
+                print_error "$(t '.docker.cloudreve_v3.reset_backup_fail')"
+        fi
         # 删除数据库文件
         rm -rf "${CLOUDREVE_V3_DIR}/cloudreve.db"
         # 重新创建空的数据库文件
         touch "${CLOUDREVE_V3_DIR}/cloudreve.db"
         # 重启服务
-        docker compose up -d
-        # 等待服务启动
-        sleep 5
+        docker compose up -d || print_error "$(t '.docker.cloudreve_v3.up_fail')"
+        # 同 install_cloudreve_v3：等容器稳定运行，否则会打印空的账户信息
+        wait_container_running 'cloudreve_v3' || print_error "$(t '.docker.cloudreve_v3.up_fail')"
         # 获取并显示新的管理员账户信息
         get_cloudreve_v3_admin
     fi
@@ -794,16 +779,23 @@ function reset_cloudreve_v3_admin() {
 # 返回值: 无 (执行卸载过程)
 # =============================================================================
 function purge_cloudreve_v3() {
-    # 检查名为 cloudreve_v3 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
+    # 项目还在（目录或容器）就卸载：stop 之后容器已被 compose down 删除，只看容器
+    # 会让「停止后再卸载」静默什么都不做，目录和数据全部留在磁盘上。
+    if cloudreve_project_present "${CLOUDREVE_V3_DIR}" 'cloudreve_v3'; then
         # 打印彻底卸载的警告信息
-        print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.purge')"
-        # 切换到 Cloudreve v3 目录
-        cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
-        # 停止服务
-        docker compose down
-        # 切换到用户主目录
-        cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
+        print_warn "$(t '.docker.cloudreve_v3.purge')"
+        # 只有 compose 文件还在才做 compose 操作：目录或文件被人删掉时 `docker compose
+        # down -v` 会直接报错退出，named volume 反而被留在 Docker 里。
+        if [[ -f "${CLOUDREVE_V3_DIR}/docker-compose.yaml" ]]; then
+            # 切换到 Cloudreve v3 目录
+            cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
+            # 停止服务并删除本项目声明的 named volume（temp_data，bind 到
+            # ${CLOUDREVE_V3_DIR}/data）。只删目录的话 Docker 里会留下一个指向已删除路径的
+            # 悬空卷，与「彻底卸载」不符；数据本身就在项目目录下，同样会被 rm -rf 清掉。
+            docker compose down -v
+            # 切换到用户主目录
+            cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
+        fi
         # 删除整个 Cloudreve v3 目录
         rm -rf "${CLOUDREVE_V3_DIR}"
     fi
@@ -822,13 +814,15 @@ function start_cloudreve_v3() {
         # 检查 Cloudreve v3 目录是否存在
         if [[ -d "${CLOUDREVE_V3_DIR}" ]]; then
             # 打印启动服务的信息
-            print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.start_service')"
+            print_info "$(t '.docker.cloudreve_v3.start_service')"
             # 切换到 Cloudreve v3 目录并启动服务
             cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
-            docker compose up -d
+            docker compose up -d || print_error "$(t '.docker.cloudreve_v3.up_fail')"
+            # 等容器稳定运行，别把「启动命令成功」当成「服务已就绪」
+            wait_container_running 'cloudreve_v3' || print_error "$(t '.docker.cloudreve_v3.up_fail')"
         else
             # 如果目录不存在，打印回退安装的信息
-            print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.install_fallback')"
+            print_info "$(t '.docker.cloudreve_v3.install_fallback')"
             # 调用安装函数
             install_cloudreve_v3
         fi
@@ -842,10 +836,12 @@ function start_cloudreve_v3() {
 # 返回值: 无 (执行停止过程)
 # =============================================================================
 function stop_cloudreve_v3() {
-    # 检查名为 cloudreve_v3 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
+    # 容器存在（含已停止）就执行 compose down：`docker ps` 只看运行态会漏掉两种
+    # 需要清理的情况——主容器已停止（容器与网络仍在）和主容器已退出但配套容器还在。
+    # compose down 对已停止的项目是幂等的。
+    if docker ps -a --format "{{.Names}}" | grep -q "^cloudreve_v3\$"; then
         # 打印停止服务的警告信息
-        print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v3.stop')"
+        print_warn "$(t '.docker.cloudreve_v3.stop')"
         # 切换到 Cloudreve v3 目录
         cd "${CLOUDREVE_V3_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V3_DIR}"
         # 停止服务
@@ -861,10 +857,10 @@ function stop_cloudreve_v3() {
 # 返回值: 无 (执行安装和启动过程)
 # =============================================================================
 function install_cloudreve_v4() {
-    # 检查名为 cloudreve_v4 的容器是否已在运行
-    if ! docker ps --format "{{.Names}}" | grep -q "^cloudreve_v4\$"; then
+    # 已装过就跳过：容器（含已停止）或 compose 文件存在都算已安装。
+    if ! cloudreve_installed "${CLOUDREVE_V4_DIR}" 'cloudreve_v4'; then
         # 打印创建目录的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.create_dir')"
+        print_info "$(t '.docker.cloudreve_v4.create_dir')"
         # 创建 Cloudreve v4 目录
         mkdir -vp ${CLOUDREVE_V4_DIR}
         # 将配置文件目录中的 docker-compose.yaml 复制到实际工作目录
@@ -875,10 +871,15 @@ function install_cloudreve_v4() {
         sed -i "s|container_name: cloudreve-backend|container_name: cloudreve_v4|" "${CLOUDREVE_V4_DIR}/docker-compose.yaml"
 
         # 打印启动服务的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.start')"
+        print_info "$(t '.docker.cloudreve_v4.start')"
         # 切换到 Cloudreve v4 目录并启动服务
         cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
-        docker compose up -d
+        docker compose up -d || print_error "$(t '.docker.cloudreve_v4.up_fail')"
+        # 同 install_cloudreve_v3：等容器稳定运行，别把「启动命令成功」当成「服务已就绪」
+        wait_container_running 'cloudreve_v4' || print_error "$(t '.docker.cloudreve_v4.up_fail')"
+    else
+        # 跳过也要说一声，理由同 install_cloudreve_v3。
+        print_info "$(t '.docker.cloudreve_v4.already_installed')"
     fi
 }
 
@@ -890,10 +891,10 @@ function install_cloudreve_v4() {
 # 返回值: 无 (执行更新过程)
 # =============================================================================
 function update_cloudreve_v4() {
-    # 检查名为 cloudreve_v4 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v4\$"; then
+    # 项目还在（目录或容器）就更新：拉取新镜像后 up -d 会顺带把服务拉起来。
+    if cloudreve_project_present "${CLOUDREVE_V4_DIR}" 'cloudreve_v4'; then
         # 打印更新服务的信息
-        print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.update')"
+        print_info "$(t '.docker.cloudreve_v4.update')"
         # 切换到 Cloudreve v4 目录
         cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         # 停止服务
@@ -901,7 +902,9 @@ function update_cloudreve_v4() {
         # 拉取最新的镜像
         docker compose pull
         # 重启服务
-        docker compose up -d
+        docker compose up -d || print_error "$(t '.docker.cloudreve_v4.up_fail')"
+        # 新镜像起不来（配置不兼容、卷损坏）时 up -d 仍返回 0，这里必须验证容器真的在跑
+        wait_container_running 'cloudreve_v4' || print_error "$(t '.docker.cloudreve_v4.up_fail')"
     fi
 }
 
@@ -912,16 +915,22 @@ function update_cloudreve_v4() {
 # 返回值: 无 (执行卸载过程)
 # =============================================================================
 function purge_cloudreve_v4() {
-    # 检查名为 cloudreve_v4 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v4\$"; then
+    # 项目还在（目录或容器）就卸载，理由同 purge_cloudreve_v3。
+    if cloudreve_project_present "${CLOUDREVE_V4_DIR}" 'cloudreve_v4'; then
         # 打印彻底卸载的警告信息
-        print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.purge')"
-        # 切换到 Cloudreve v4 目录
-        cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
-        # 停止服务
-        docker compose down
-        # 切换到用户主目录
-        cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
+        print_warn "$(t '.docker.cloudreve_v4.purge')"
+        # 只有 compose 文件还在才做 compose 操作，理由同 purge_cloudreve_v3。
+        if [[ -f "${CLOUDREVE_V4_DIR}/docker-compose.yaml" ]]; then
+            # 切换到 Cloudreve v4 目录
+            cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
+            # 停止服务并删除本项目的数据卷。`docker compose down` 默认保留 named volume
+            # （backend_data / database_postgres / redis_data），只删项目目录的话它们仍留在
+            # /var/lib/docker/volumes 下，同项目重装会带回旧账号与数据库——与「彻底卸载」
+            # 不符。`-v` 只删除本 compose 项目声明的卷，不会碰其它项目的 Docker 数据。
+            docker compose down -v
+            # 切换到用户主目录
+            cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
+        fi
         # 删除整个 Cloudreve v4 目录
         rm -rf "${CLOUDREVE_V4_DIR}"
     fi
@@ -940,13 +949,15 @@ function start_cloudreve_v4() {
         # 检查 Cloudreve v4 目录是否存在
         if [[ -d "${CLOUDREVE_V4_DIR}" ]]; then
             # 打印启动服务的信息
-            print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.start_service')"
+            print_info "$(t '.docker.cloudreve_v4.start_service')"
             # 切换到 Cloudreve v4 目录并启动服务
             cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
-            docker compose up -d
+            docker compose up -d || print_error "$(t '.docker.cloudreve_v4.up_fail')"
+            # 等容器稳定运行，别把「启动命令成功」当成「服务已就绪」
+            wait_container_running 'cloudreve_v4' || print_error "$(t '.docker.cloudreve_v4.up_fail')"
         else
             # 如果目录不存在，打印回退安装的信息
-            print_info "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.install_fallback')"
+            print_info "$(t '.docker.cloudreve_v4.install_fallback')"
             # 调用安装函数
             install_cloudreve_v4
         fi
@@ -960,10 +971,10 @@ function start_cloudreve_v4() {
 # 返回值: 无 (执行停止过程)
 # =============================================================================
 function stop_cloudreve_v4() {
-    # 检查名为 cloudreve_v4 的容器是否在运行
-    if docker ps --format "{{.Names}}" | grep -q "^cloudreve_v4\$"; then
+    # 容器存在（含已停止）就执行 compose down，理由同 stop_cloudreve_v3。
+    if docker ps -a --format "{{.Names}}" | grep -q "^cloudreve_v4\$"; then
         # 打印停止服务的警告信息
-        print_warn "$(echo "$I18N_DATA" | jq -r '.docker.cloudreve_v4.stop')"
+        print_warn "$(t '.docker.cloudreve_v4.stop')"
         # 切换到 Cloudreve v4 目录
         cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
         # 停止服务

@@ -40,7 +40,12 @@ if [[ -d "${INSTALL_DIR}" ]]; then
     fi
     cp -a "${INSTALL_DIR}" "${INSTALL_DIR}.bak.$(date +%Y%m%d_%H%M%S)"
 fi
-install -d -m 700 "${INSTALL_DIR}" /usr/local/libexec
+install -d -m 700 "${INSTALL_DIR}"
+# /usr/local/libexec 是发行版共享目录：install -d -m 会把已存在目录也 chmod 成 700，
+# 影响同机其它服务。只在缺失时按 0755 创建，已存在则保持原权限。
+if [[ ! -d /usr/local/libexec ]]; then
+    install -d -m 755 /usr/local/libexec
+fi
 install -m 600 "${SOURCE_DIR}/config.json" "${INSTALL_DIR}/config.json"
 install -m 600 "${SOURCE_DIR}/site.json" "${INSTALL_DIR}/site.json"
 install -m 755 "${SOURCE_DIR}/xray-lan-net.sh" "${NET_SCRIPT}"

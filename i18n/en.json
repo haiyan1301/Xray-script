@@ -11,15 +11,28 @@
     "test": "Test",
     "multiple_values": "Multiple values separated by commas"
   },
+  "firewall": {
+    "open": "Opening firewall port",
+    "ok": "Firewall port is open",
+    "skip": "No supported firewall manager was found; no local firewall rule was changed",
+    "inactive": "The installed firewall manager is inactive; no local firewall rule was changed",
+    "fail": "Failed to open firewall port"
+  },
+  "cert": {
+    "retry_debug": "First attempt failed, trying again with debug mode..."
+  },
   "main": {
     "not_support": "This feature is available only when CDN or SNI mode is currently installed",
     "rollback_fail": "The previous runtime could not be fully restored after the new configuration failed; check Xray and Nginx immediately",
     "install_busy": "Another protocol installation or reconfiguration is already running",
     "post_install_cleanup_fail": "Installation succeeded, but a recovery journal could not be cleaned up and was retained at:",
-    "share_after_install_fail": "Installation succeeded, but share-link generation failed; retry from the Share menu"
+    "share_after_install_fail": "Installation succeeded, but share-link generation failed; retry from the Share menu",
+    "tty_required": "Not an interactive terminal; the main menu cannot read a selection. Run it from an interactive terminal."
   },
   "menu": {
     "choose": "Please choose an option",
+    "invalid_choice": "Invalid option; please try again.",
+    "aborted": "No input received; the operation was cancelled.",
     "status": {
       "default": "Default",
       "not_installed": "Not Installed",
@@ -154,7 +167,7 @@
       "option4": "Update nginx",
       "option5": "Enable/Disable nginx auto-update",
       "option6": "Modify web config",
-      "option7": "Reset Cloudreve v3 admin data",
+      "option7": "Rebuild database and reset Cloudreve v3 admin",
       "info1": "Domain for REALITY",
       "info2": "Domain for CDN"
     },
@@ -166,7 +179,7 @@
       "option4": "Update Nginx",
       "option5": "Enable/Disable Nginx auto-update",
       "option6": "Change camouflage site content",
-      "option7": "Reset Cloudreve v3 admin data"
+      "option7": "Rebuild database and reset Cloudreve v3 admin"
     },
     "cdn_direct_config": {
       "title": "Low-resource CDN Management",
@@ -197,6 +210,16 @@
   "handler": {
     "script": {
       "config_update": "Updating script configuration"
+    },
+    "purge": {
+      "warning": "Purging removes the Xray server and all local configuration managed by this script, and cannot be undone.",
+      "confirm": "Type yes to continue",
+      "cancelled": "Purge cancelled; nothing was changed.",
+      "tty_required": "Not an interactive terminal; refusing to purge. Retry from an interactive terminal.",
+      "read_ledger_failed": "Failed to read the owned firewall ledger; purge aborted (local state unchanged).",
+      "close_port_failed": "Failed to release firewall ports owned by ${owned_feature}; purge aborted (local state unchanged).",
+      "legacy_sweep_removed": "Removed a legacy firewall rule",
+      "legacy_sweep_failed": "Failed to remove a legacy firewall rule"
     },
     "xray": {
       "config_update": "Updating Xray configuration"
@@ -239,6 +262,7 @@
       "install_mode_compile": "Compile from source locally (slow, requires build tools)",
       "install_mode_invalid": "Select 1 or 2",
       "path_invalid": "The configured XHTTP path is invalid; Nginx was not changed",
+      "domain_invalid": "Invalid or too-long domain (must not exceed ${DOMAIN_FILENAME_MAX_LENGTH} characters when used as a filename): ",
       "path_sync_fail": "Failed to synchronize the managed Nginx XHTTP path:",
       "config_invalid": "Nginx configuration validation failed",
       "start_fail": "Failed to start the Nginx service",
@@ -268,6 +292,9 @@
       "port_conflict": "Port {port} is reserved or already assigned to another node; generating a random port.",
       "hy2_shared_cert": "HY2 nodes share one TLS certificate in multi-node mode.",
       "no_nodes": "Multi-node configuration contains no nodes."
+    },
+    "read": {
+      "unknown_field": "Internal error: field is not registered in the lib/protocols.sh field table: "
     },
     "cert_source": {
       "prompt_cdn": "CDN site TLS certificate [1. Auto / 2. Custom certificate paths] (default 1): ",
@@ -326,11 +353,6 @@
       "ip_fetch_fail": "Could not obtain a valid public IP. Check the network and retry",
       "detected_ip": "Detected public IP:",
       "email_invalid": "The saved ACME account email is invalid; enter a valid address and retry",
-      "firewall_open": "Opening firewall port",
-      "firewall_ok": "Firewall port is open",
-      "firewall_skip": "No supported firewall manager was found; no local firewall rule was changed",
-      "firewall_inactive": "The installed firewall manager is inactive; no local firewall rule was changed",
-      "firewall_fail": "Failed to open firewall port",
       "cron_setup": "Setting up certificate auto-renewal cron job",
       "cron_fail": "Failed to configure certificate auto-renewal",
       "cron_ok": "Certificate auto-renewal configured"
@@ -341,7 +363,8 @@
       "option_existing": "Use existing certificate: ",
       "expires": "Expires",
       "reusing": "Reusing existing certificate",
-      "reuse_ok": "Certificate reused successfully"
+      "reuse_ok": "Certificate reused successfully",
+      "main_domain_missing": "Cannot reuse that certificate: no matching main domain record was found; aborting"
     },
     "mldsa": {
       "prompt": "Enable ML-DSA-65 post-quantum signature verification? (y/N, default: N)",
@@ -371,6 +394,7 @@
       "server_address_prompt": "Enter Hub public IP or domain: ",
       "host_invalid": "Invalid IP or domain",
       "keygen_failed": "Failed to generate virtual LAN keys",
+      "identity_reused": "Reused the existing virtual LAN identity (public key / Short ID unchanged)",
       "enabled": "Virtual LAN Hub enabled",
       "disabled": "Virtual LAN disabled; site data was retained",
       "site_id_prompt": "Site ID (lowercase letters/digits/-/_): ",
@@ -459,7 +483,8 @@
       "check": "Checking UUID type: ",
       "string": "Input is a plain string, will be mapped to UUID by Xray",
       "empty": "Input is empty, will auto-generate a UUID",
-      "valid": "UUID is valid: "
+      "valid": "UUID is valid: ",
+      "unsafe": "Input contains whitespace or control characters and cannot be stored safely; enter a new value: "
     },
     "password": {
       "check": "Checking password validity: ",
@@ -542,6 +567,9 @@
       "valid": "Email format is valid: ",
       "empty": "Email cannot be empty",
       "format_error": "Invalid email format: "
+    },
+    "usage": {
+      "invalid_option": "Unknown option: "
     }
   },
   "docker": {
@@ -549,7 +577,11 @@
       "start": "Installing Docker",
       "centos8_fix": "Detected CentOS 8, fixing installation script compatibility",
       "dry_run": "Performing pre-installation check (dry-run)",
-      "running": "Running Docker installation script"
+      "running": "Running Docker installation script",
+      "download_fail": "Failed to download the official Docker installation script.",
+      "dry_run_fail": "The Docker installation script's dry-run check failed; installation aborted.",
+      "run_fail": "The Docker installation script failed.",
+      "verify_fail": "The installation script finished, but the docker command is still missing; Docker was not installed."
     },
     "warp": {
       "build": {
@@ -572,18 +604,28 @@
       "admin_info": "Username: ${username}, Password: ${password}",
       "aria2_token": "aria2 token: ${token}",
       "reset": "Resetting Cloudreve v3 information",
-      "purge": "Purging Cloudreve v3 service",
+      "reset_scope": "Resetting the admin account rebuilds the entire database: all users, file records and shares will be lost (cloudreve.db is backed up first).",
+      "reset_confirm": "Type yes to rebuild the database",
+      "reset_cancelled": "Cloudreve v3 admin reset cancelled.",
+      "reset_tty_required": "Not an interactive terminal; refusing the reset that rebuilds the entire database.",
+      "reset_backup_fail": "Failed to back up cloudreve.db; reset aborted to avoid data loss.",
+      "down_fail": "Failed to stop the Cloudreve v3 service; reset aborted to avoid corrupting the database.",
+      "up_fail": "Failed to start the Cloudreve v3 service. Check the container logs.",
+      "purge": "Purging Cloudreve v3 service and its data (uploads, database, Aria2 config and downloads); this cannot be undone.",
       "start_service": "Starting Cloudreve v3 service",
-      "install_fallback": "Cloudreve v3 directory not found"
+      "install_fallback": "Cloudreve v3 directory not found",
+      "already_installed": "Cloudreve v3 is already installed; skipping."
     },
     "cloudreve_v4": {
       "create_dir": "Creating Cloudreve v4 related directories.",
       "start": "Starting Cloudreve v4 service",
+      "up_fail": "Failed to start the Cloudreve v4 service. Check the container logs.",
       "stop": "Stopping Cloudreve v4 service",
       "update": "Updating Cloudreve v4 image",
-      "purge": "Purging Cloudreve v4 service",
+      "purge": "Purging Cloudreve v4 service and its data volumes (backend data, PostgreSQL, Redis); this cannot be undone.",
       "start_service": "Starting Cloudreve v4 service",
-      "install_fallback": "Cloudreve v4 directory not found"
+      "install_fallback": "Cloudreve v4 directory not found",
+      "already_installed": "Cloudreve v4 is already installed; skipping."
     }
   },
   "ssl": {
@@ -601,7 +643,6 @@
     },
     "purge": {
       "start": "Uninstalling acme.sh...",
-      "fail_disable_autoupgrade": "Failed to disable acme.sh auto-upgrade.",
       "fail_uninstall_cmd": "acme.sh uninstall command failed.",
       "success": "acme.sh and related directories have been deleted."
     },
@@ -613,9 +654,9 @@
       "fail_backup_nginx": "Failed to backup Nginx config file: ${nginx_conf}",
       "fail_reload_nginx": "Failed to reload Nginx, please check config file.",
       "fail_start_nginx": "Failed to start Nginx, please check config file.",
-      "fail_first_attempt": "First attempt failed, trying again with debug mode...",
       "fail_ecc_issue": "ECC certificate application failed.",
-      "fail_install_cert": "Failed to install certificate."
+      "fail_install_cert": "Failed to install certificate.",
+      "fail_set_owner": "Certificate issued, but setting its owner failed (issuance is unaffected; check the xray-nginx group and user)."
     },
     "renew": {
       "start": "Forcing renewal of all SSL certificates...",
@@ -651,7 +692,8 @@
       "cmd_help": "Show this help message",
       "options_title": "Options",
       "opt_domain": "Specify domain",
-      "opt_email": "Specify acme.sh account email"
+      "opt_email": "Specify acme.sh account email",
+      "unknown_option": "Unknown option: "
     }
   },
   "nginx": {
@@ -694,9 +736,9 @@
     },
     "os": {
       "unsupported_os": "Unsupported operating system.",
-      "unsupported_ubuntu": "Unsupported operating system, please switch to Ubuntu 20+ and try again.",
-      "unsupported_debian": "Unsupported operating system, please switch to Debian 10+ and try again.",
-      "unsupported_centos": "Unsupported operating system, please switch to CentOS 7+ and try again."
+      "unsupported_ubuntu": "Unsupported operating system, please switch to Ubuntu ${MIN_UBUNTU}+ and try again.",
+      "unsupported_debian": "Unsupported operating system, please switch to Debian ${MIN_DEBIAN}+ and try again.",
+      "unsupported_centos": "Unsupported operating system, please switch to CentOS ${MIN_CENTOS}+ and try again."
     },
     "backup_files": {
       "backup": "Backup"

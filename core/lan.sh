@@ -5,7 +5,9 @@
 
 function lan_text() {
     local key="$1"
-    echo "${I18N_DATA}" | jq -r --arg key "${key}" '.handler.lan[$key] // $key'
+    local text
+    text="$(t "handler.lan.${key}")"
+    printf '%s' "${text:-${key}}"
 }
 
 function lan_trim() {
@@ -19,7 +21,9 @@ function lan_ipv4_to_int() {
     local ip="$1"
     local a b c d extra
     IFS='.' read -r a b c d extra <<<"${ip}"
-    [[ -z "${extra}" && "${a}" =~ ^[0-9]+$ && "${b}" =~ ^[0-9]+$ && "${c}" =~ ^[0-9]+$ && "${d}" =~ ^[0-9]+$ ]] || return 1
+    # 每位最多 3 个数字：超长十进制串在 Bash 的 64 位算术里会回绕成合法八位组
+    # （例如 18446744073709551617 会变成 1），必须先在字符串层拦下。
+    [[ -z "${extra}" && "${a}" =~ ^[0-9]{1,3}$ && "${b}" =~ ^[0-9]{1,3}$ && "${c}" =~ ^[0-9]{1,3}$ && "${d}" =~ ^[0-9]{1,3}$ ]] || return 1
     a=$((10#${a}))
     b=$((10#${b}))
     c=$((10#${c}))
@@ -53,7 +57,8 @@ function lan_normalize_cidr() {
     [[ "${cidr}" == */* ]] || return 1
     ip="${cidr%/*}"
     prefix="${cidr##*/}"
-    [[ "${prefix}" =~ ^[0-9]+$ ]] || return 1
+    # 前缀位数先限位再转数字，理由同 lan_ipv4_to_int：合法值只有 8~32。
+    [[ "${prefix}" =~ ^[0-9]{1,2}$ ]] || return 1
     prefix=$((10#${prefix}))
     ((prefix >= 8 && prefix <= 32)) || return 1
     ip_int="$(lan_ipv4_to_int "${ip}")" || return 1
@@ -129,7 +134,7 @@ function lan_validate_site_id() {
 
 function lan_validate_host() {
     local value="$1"
-    [[ -n "${value}" && "${value}" != *[[:space:]]* && "${value}" != *'/'* ]]
+    valid_ip_literal "${value}" || valid_hostname "${value}"
 }
 
 function lan_validate_server_name() {
@@ -139,8 +144,14 @@ function lan_validate_server_name() {
 
 function lan_port_is_available() {
     local port="$1"
-    [[ "${port}" =~ ^[1-9][0-9]*$ ]] && ((port >= 1 && port <= 65535)) || return 1
-    [[ "${port}" -ne 32768 ]] || return 1
+    # 与 core/check.sh 的 check_port 同一套：先做字符串层限位再做算术。20 位十进制串
+    # 进入 Bash 的 64 位算术会回绕（18446744073709551617 → 1），超大输入就会被当成
+    # 合法端口，随后经 firewall_owned_open 放行到别的端口上。`^[1-9][0-9]*$` 已排除
+    # 前导零，故长度闸即可覆盖。
+    [[ "${port}" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "${#port}" -le 5 ]] || return 1
+    ((port >= 1 && port <= 65535)) || return 1
+    [[ "${port}" -ne "${XRAY_API_PORT}" ]] || return 1
 
     if echo "${SCRIPT_CONFIG}" | jq -e --argjson port "${port}" '
         (.xray.port == $port) or
@@ -288,13 +299,13 @@ function handler_lan_open_firewall() {
     [[ "${enabled}" -eq 1 ]] || return 0
     port="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.port // empty')"
     [[ -n "${port}" ]] || return 0
-    open_owned_firewall_port 'lan' "${port}" tcp
+    firewall_owned_open 'lan' "${port}" tcp
 }
 
 function handler_lan_close_firewall() {
     local port="$1"
     local defer_write="${2:-0}"
-    close_owned_firewall_ports 'lan' "${port}" "${defer_write}"
+    firewall_owned_close 'lan' "${port}" "${defer_write}"
 }
 
 function handler_lan_add_site() {
@@ -309,7 +320,7 @@ function handler_lan_add_site() {
 
     while true; do
         printf "${GREEN}[LAN]${NC} %s" "$(lan_text site_id_prompt)" >&2
-        read -r site_id
+        site_id="$(read_line_or_abort)" || return 1
         site_id="${site_id,,}"
         if ! lan_validate_site_id "${site_id}"; then
             echo -e "${YELLOW}[LAN]${NC} $(lan_text site_id_invalid)" >&2
@@ -323,12 +334,12 @@ function handler_lan_add_site() {
     done
 
     printf "${GREEN}[LAN]${NC} %s" "$(lan_text site_name_prompt)" >&2
-    read -r site_name
+    site_name="$(read_line_or_abort)" || return 1
     site_name="${site_name:-${site_id}}"
 
     while true; do
         printf "${GREEN}[LAN]${NC} %s" "$(lan_text cidrs_prompt)" >&2
-        read -r cidr_input
+        cidr_input="$(read_line_or_abort)" || return 1
         cidrs_result="$(lan_parse_cidrs "${cidr_input}")"
         parse_status=$?
         if [[ "${parse_status}" -eq 0 ]]; then
@@ -341,7 +352,7 @@ function handler_lan_add_site() {
     done
 
     printf "${GREEN}[LAN]${NC} %s" "$(lan_text mode_prompt)" >&2
-    read -r mode_choice
+    mode_choice="$(read_line_or_abort)" || return 1
     mode_choice="${mode_choice:-1}"
     mode='host'
     lan_interface=''
@@ -349,7 +360,7 @@ function handler_lan_add_site() {
         mode='gateway'
         while [[ -z "${lan_interface}" || ! "${lan_interface}" =~ ^[a-zA-Z0-9_.:-]+$ ]]; do
             printf "${GREEN}[LAN]${NC} %s" "$(lan_text interface_prompt)" >&2
-            read -r lan_interface
+            lan_interface="$(read_line_or_abort)" || return 1
         done
     fi
 
@@ -392,7 +403,7 @@ function handler_lan_add_site() {
 }
 
 function handler_lan_enable() {
-    local enabled xray_version port target server_name server_address key_pair private_key public_key short_id
+    local enabled xray_version port target server_name server_address entered_server_address key_pair private_key public_key short_id
     local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config=''
     enabled="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.enabled // 0')"
     if [[ "${enabled}" -eq 1 ]]; then
@@ -407,7 +418,7 @@ function handler_lan_enable() {
 
     while true; do
         printf "${GREEN}[LAN]${NC} %s" "$(lan_text port_prompt)" >&2
-        read -r port
+        port="$(read_line_or_abort)" || return 1
         port="${port:-9443}"
         lan_port_is_available "${port}" && break
         echo -e "${YELLOW}[LAN]${NC} $(lan_text port_invalid)" >&2
@@ -417,7 +428,7 @@ function handler_lan_enable() {
     target="${target:-www.microsoft.com}"
     while true; do
         printf "${GREEN}[LAN]${NC} %s [%s]: " "$(lan_text target_prompt)" "${target}" >&2
-        read -r server_name
+        server_name="$(read_line_or_abort)" || return 1
         server_name="${server_name:-${target}}"
         lan_validate_server_name "${server_name}" && break
         echo -e "${YELLOW}[LAN]${NC} $(lan_text host_invalid)" >&2
@@ -427,15 +438,31 @@ function handler_lan_enable() {
     server_address="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.serverAddress // ""')"
     while true; do
         printf "${GREEN}[LAN]${NC} %s" "$(lan_text server_address_prompt)" >&2
-        read -r server_address
-        lan_validate_host "${server_address}" && break
+        [[ -n "${server_address}" ]] && printf " [%s]" "${server_address}" >&2
+        printf ': ' >&2
+        entered_server_address="$(read_line_or_abort)" || return 1
+        entered_server_address="${entered_server_address:-${server_address}}"
+        if lan_validate_host "${entered_server_address}"; then
+            server_address="${entered_server_address}"
+            break
+        fi
         echo -e "${YELLOW}[LAN]${NC} $(lan_text host_invalid)" >&2
     done
 
-    key_pair="$(exec_generate '--x25519')"
-    private_key="$(echo "${key_pair}" | cut -d, -f1)"
-    public_key="$(echo "${key_pair}" | cut -d, -f2)"
-    short_id="$(exec_generate '--short-id' 8)"
+    # 已存在身份时默认复用：禁用只是关掉 enabled，密钥与站点都会保留；再次启用
+    # 若静默轮换密钥，已部署客户端（配置里固定了旧公钥 / Short ID）会全部失联。
+    # 需要换身份时，先清空 .xray.lan 的 privateKey/publicKey/shortId 再启用。
+    private_key="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.privateKey // ""')"
+    public_key="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.publicKey // ""')"
+    short_id="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.lan.shortId // ""')"
+    if [[ -n "${private_key}" && -n "${public_key}" && -n "${short_id}" ]]; then
+        echo -e "${GREEN}[LAN]${NC} $(lan_text identity_reused)" >&2
+    else
+        key_pair="$(exec_generate '--x25519')"
+        private_key="$(echo "${key_pair}" | cut -d, -f1)"
+        public_key="$(echo "${key_pair}" | cut -d, -f2)"
+        short_id="$(exec_generate '--short-id' 8)"
+    fi
     if [[ -z "${private_key}" || -z "${public_key}" || -z "${short_id}" ]]; then
         echo -e "${RED}[LAN]${NC} $(lan_text keygen_failed)" >&2
         return 1
@@ -488,12 +515,12 @@ function handler_lan_disable() {
     previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
     handler_lan_close_firewall "${port}" 1 || return 1
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.lan.enabled = 0')" || {
-        restore_owned_firewall_feature_state \
+        firewall_owned_restore_feature \
             "${previous_script_config}" 'lan' "${port}" tcp || true
         return 1
     }
     if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
-        restore_owned_firewall_feature_state \
+        firewall_owned_restore_feature \
             "${previous_script_config}" 'lan' "${port}" tcp || true
         return 1
     fi
@@ -539,14 +566,14 @@ function handler_lan_remove_site() {
         if (.xray.lan.sites | length) == 0 then .xray.lan.enabled = 0 else . end
     ')" || {
         if [[ "${close_firewall}" -eq 1 ]]; then
-            restore_owned_firewall_feature_state \
+            firewall_owned_restore_feature \
                 "${previous_script_config}" 'lan' "${port}" tcp || true
         fi
         return 1
     }
     if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
         if [[ "${close_firewall}" -eq 1 ]]; then
-            restore_owned_firewall_feature_state \
+            firewall_owned_restore_feature \
                 "${previous_script_config}" 'lan' "${port}" tcp || true
         fi
         return 1
