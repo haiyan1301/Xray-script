@@ -261,6 +261,7 @@
       "install_mode_prebuilt": "Download pre-compiled binary from GitHub Releases (fast, recommended)",
       "install_mode_compile": "Compile from source locally (slow, requires build tools)",
       "install_mode_invalid": "Select 1 or 2",
+      "version_detect_fail": "Unable to read the Nginx version; the prebuilt binary may be incompatible with this system",
       "path_invalid": "The configured XHTTP path is invalid; Nginx was not changed",
       "domain_invalid": "Invalid or too-long domain (must not exceed ${DOMAIN_FILENAME_MAX_LENGTH} characters when used as a filename): ",
       "path_sync_fail": "Failed to synchronize the managed Nginx XHTTP path:",

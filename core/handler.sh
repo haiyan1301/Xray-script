@@ -5114,9 +5114,21 @@ function handler_nginx_install() {
         # 配置 Nginx
         handler_nginx_config || return 1
         # 获取 Nginx 版本
-        local NGINX_VERSION
-        NGINX_VERSION="$(nginx -V 2>&1 | awk -F/ '/^nginx version:/ { print $2; exit }')" || return 1
-        [[ -n "${NGINX_VERSION}" ]] || return 1
+        local NGINX_VERSION nginx_version_output
+        # nginx -V writes its version to stderr.  Keep the complete output so
+        # an incompatible binary (missing loader/library, unsupported glibc,
+        # etc.) cannot fail silently after the preceding directory messages.
+        if ! nginx_version_output="$(nginx -V 2>&1)"; then
+            log_error "$(t ".${CUR_FILE}.nginx.version_detect_fail")" >&2
+            [[ -n "${nginx_version_output}" ]] && printf '%s\n' "${nginx_version_output}" >&2
+            return 1
+        fi
+        NGINX_VERSION="$(printf '%s\n' "${nginx_version_output}" | sed -n 's#^nginx version: nginx/##p' | head -n 1)"
+        if [[ -z "${NGINX_VERSION}" ]]; then
+            log_error "$(t ".${CUR_FILE}.nginx.version_detect_fail")" >&2
+            printf '%s\n' "${nginx_version_output}" >&2
+            return 1
+        fi
         # 更新脚本配置中的 Nginx 版本
         SCRIPT_CONFIG=$(echo "${SCRIPT_CONFIG}" | jq --arg version "${NGINX_VERSION}" '.nginx.version = $version')
         # 将更新后的脚本配置写入文件

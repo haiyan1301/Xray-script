@@ -261,6 +261,7 @@
       "install_mode_prebuilt": "从 GitHub Releases 下载预编译二进制 (快速，推荐)",
       "install_mode_compile": "本地从源码编译 (较慢，需要编译工具)",
       "install_mode_invalid": "请选择 1 或 2",
+      "version_detect_fail": "无法读取 Nginx 版本；预编译二进制可能与当前系统不兼容",
       "path_invalid": "配置的 XHTTP 路径无效，未修改 Nginx",
       "domain_invalid": "域名无效或过长（用作文件名时不得超过 ${DOMAIN_FILENAME_MAX_LENGTH} 个字符）：",
       "path_sync_fail": "同步受管 Nginx XHTTP 路径失败：",
