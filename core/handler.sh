@@ -6071,15 +6071,11 @@ function handler_change_domain() {
             return 1
         fi
         if [[ "${CONFIG_TAG,,}" == "cdn" && ( "${target_domain}" == "cdn" || "${target_domain}" == "cdnDown" ) ]]; then
-            if ! sed -i $'s|listen .*cdn_to_nginx.sock.*|listen 443 ssl reuseport;\\\n    listen [::]:443 ssl reuseport;|g' "${site_conf}" ||
-                ! sed -i '/set_real_ip_from[[:space:]]\+unix:;/d' "${site_conf}" ||
-                ! sed -i '/real_ip_header[[:space:]]\+proxy_protocol;/d' "${site_conf}"; then
-                rollback_change_domain_transaction \
-                    "${transaction_dir}" "${restart_nginx}" || true
-                return 1
-            fi
+            # CDN sites share the Xray Unix socket. Keep that listener and add
+            # the domain name; converting both sites to listen 443 creates
+            # duplicate listen options when an optional downlink is enabled.
             if ! grep -q "server_name" "${site_conf}"; then
-                if ! sed -i "/listen \\[::\\]:443 ssl reuseport;/a\\    server_name               ${new_domain};" "${site_conf}"; then
+                if ! sed -i "/^[[:space:]]*server[[:space:]]*{/a\\    server_name               ${new_domain};" "${site_conf}"; then
                     rollback_change_domain_transaction \
                         "${transaction_dir}" "${restart_nginx}" || true
                     return 1
