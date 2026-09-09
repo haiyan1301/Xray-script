@@ -226,7 +226,9 @@ function _install() {
 function install_nginx_runtime_dependencies() {
     case "$(_os)" in
     debian | ubuntu)
-        for package_name in libgoogle-perftools2t64 libgoogle-perftools2; do
+        # Ubuntu 24.04/Noble renamed the runtime package to *4t64; older
+        # Debian/Ubuntu releases use *4 or the historical *2 name.
+        for package_name in libgoogle-perftools4t64 libgoogle-perftools4 libgoogle-perftools2; do
             if apt-cache show "${package_name}" >/dev/null 2>&1; then
                 _install "${package_name}"
                 return 0
