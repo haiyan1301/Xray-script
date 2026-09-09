@@ -5683,7 +5683,7 @@ function normalize_cdn_site_listener() {
 }
 
 function normalize_cdn_site_listeners() {
-    local uplink downlink
+    local uplink downlink site_conf domain
     uplink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
     downlink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
     if [[ -n "${uplink}" ]]; then
@@ -5694,6 +5694,23 @@ function normalize_cdn_site_listeners() {
         normalize_cdn_site_listener \
             "${NGINX_CONFIG_DIR}/sites-available/${downlink}.conf" "${downlink}" 'n' || return 1
     fi
+
+    # Also normalize stale CDN site files left by older installations. They
+    # are not present in .nginx.cdn/cdnDown anymore, but remain under
+    # sites-enabled and can still collide on the shared Unix socket. Keep the
+    # configured uplink as the sole listener carrying socket options; every
+    # other managed CDN server uses a bare listen directive.
+    local sites_dir
+    for sites_dir in "${NGINX_CONFIG_DIR}/sites-available" "${NGINX_CONFIG_DIR}/sites-enabled"; do
+        while IFS= read -r -d '' site_conf; do
+            [[ -f "${site_conf}" && ! -L "${site_conf}" ]] || continue
+            grep -q '^# xray_script' "${site_conf}" || continue
+            grep -q 'cdn_to_nginx\.sock' "${site_conf}" || continue
+            domain="$(basename "${site_conf}" .conf)"
+            [[ "${domain,,}" == "${uplink,,}" ]] && continue
+            normalize_cdn_site_listener "${site_conf}" "${domain}" 'n' || return 1
+        done < <(find "${sites_dir}" -maxdepth 1 -type f -name '*.conf' -print0 2>/dev/null)
+    done
 }
 
 function render_nginx_stream_config() {
