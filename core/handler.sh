@@ -5648,6 +5648,54 @@ function render_managed_site_domain() {
     ' "${source_file}" >"${output_file}"
 }
 
+# Normalize CDN site listeners after an existing installation is reused. Older
+# releases converted CDN sites to TCP :443 listeners, while newer releases use
+# the shared Xray Unix socket. Leaving one old site in place makes nginx reject
+# the pair with "duplicate listen options" when the second CDN domain is added.
+function normalize_cdn_site_listener() {
+    local site_conf="$1"
+    local domain="$2"
+    local primary="${3:-n}"
+    local canonical='    listen                       unix:/dev/shm/nginx/cdn_to_nginx.sock ssl backlog=2048 so_keepalive=on proxy_protocol;'
+    local bare='    listen                       unix:/dev/shm/nginx/cdn_to_nginx.sock;'
+
+    [[ -f "${site_conf}" && ! -L "${site_conf}" ]] || return 0
+    grep -q '^# xray_script' "${site_conf}" || return 0
+
+    local listener="${bare}"
+    [[ "${primary}" == 'y' ]] && listener="${canonical}"
+    sed -i -E \
+        -e '/^[[:space:]]*listen[[:space:]]+(\[::\]:)?443([[:space:]]|;)/d' \
+        -e "/^[[:space:]]*listen[[:space:]]+unix:\/dev\/shm\/nginx\/cdn_to_nginx\.sock[^;]*;/c\\${listener}" \
+        "${site_conf}" || return 1
+
+    if ! grep -q 'cdn_to_nginx\.sock' "${site_conf}"; then
+        sed -i "/^[[:space:]]*server[[:space:]]*{/a\\${listener}" "${site_conf}" || return 1
+    fi
+
+    if grep -q 'cdn_to_nginx\.sock' "${site_conf}"; then
+        if grep -q '^[[:space:]]*server_name[[:space:]]' "${site_conf}"; then
+            sed -i -E "s|^[[:space:]]*server_name[[:space:]]+[^;]+;|    server_name               ${domain};|" "${site_conf}" || return 1
+        else
+            sed -i "/^[[:space:]]*server[[:space:]]*{/a\\    server_name               ${domain};" "${site_conf}" || return 1
+        fi
+    fi
+}
+
+function normalize_cdn_site_listeners() {
+    local uplink downlink
+    uplink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
+    downlink="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
+    if [[ -n "${uplink}" ]]; then
+        normalize_cdn_site_listener \
+            "${NGINX_CONFIG_DIR}/sites-available/${uplink}.conf" "${uplink}" 'y' || return 1
+    fi
+    if [[ -n "${downlink}" && "${downlink,,}" != "${uplink,,}" ]]; then
+        normalize_cdn_site_listener \
+            "${NGINX_CONFIG_DIR}/sites-available/${downlink}.conf" "${downlink}" 'n' || return 1
+    fi
+}
+
 function render_nginx_stream_config() {
     local output_file="$1"
     local domain cdn
@@ -6074,6 +6122,21 @@ function handler_change_domain() {
             # CDN sites share the Xray Unix socket. Keep that listener and add
             # the domain name; converting both sites to listen 443 creates
             # duplicate listen options when an optional downlink is enabled.
+            # Nginx accepts the socket options (ssl/backlog/proxy_protocol)
+            # only on the first server block. A second server block that
+            # repeats the options is rejected as "duplicate listen options"
+            # for the Unix socket, even when the options are identical. Keep
+            # the full options on the uplink site and use a bare listen on the
+            # downlink site; the shared socket retains SSL/PROXY settings.
+            if [[ "${target_domain}" == "cdnDown" ]]; then
+                if ! sed -i -E \
+                    's|^([[:space:]]*listen[[:space:]]+)unix:/dev/shm/nginx/cdn_to_nginx\.sock[[:space:]]+ssl[^;]*;|\1unix:/dev/shm/nginx/cdn_to_nginx.sock;|' \
+                    "${site_conf}"; then
+                    rollback_change_domain_transaction \
+                        "${transaction_dir}" "${restart_nginx}" || true
+                    return 1
+                fi
+            fi
             if ! grep -q "server_name" "${site_conf}"; then
                 if ! sed -i "/^[[:space:]]*server[[:space:]]*{/a\\    server_name               ${new_domain};" "${site_conf}"; then
                     rollback_change_domain_transaction \
@@ -6409,6 +6472,13 @@ function handler_nginx_config() {
     fi
     # 复制项目中的 Nginx 配置文件到目标目录
     cp -af "${CONFIG_DIR}/nginx/conf/." "${NGINX_CONFIG_DIR}/" || return 1
+
+    # Migrate CDN sites created by releases that used TCP :443 listeners.
+    # This must run before the first nginx -t so an optional downlink domain
+    # cannot leave duplicate listen options behind.
+    if [[ "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""' | tr '[:upper:]' '[:lower:]')" == 'cdn' ]]; then
+        normalize_cdn_site_listeners || return 1
+    fi
 
     # 动态检测 nginx 二进制是否包含 brotli 压缩模块，如果不包含，则自动注释 general.conf 中的 brotli 配置，以防 Nginx 启动/重载报错
     if cmd_exists 'nginx' && ! nginx -V 2>&1 | grep -qi 'brotli'; then
