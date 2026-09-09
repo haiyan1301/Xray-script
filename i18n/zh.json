@@ -717,6 +717,7 @@
       "downloading": "正在从 GitHub Releases 下载预编译的 Nginx+BoringSSL 二进制文件...",
       "fetch_fail": "获取 GitHub Release 信息失败，请检查网络连接。",
       "no_release": "GitHub Releases 中未找到预编译的 Nginx 二进制文件，请改用源码编译。",
+      "runtime_dependency_fail": "无法安装预编译 Nginx 所需的 gperftools 运行时库（libprofiler.so.0）",
       "install_ok": "预编译 Nginx+BoringSSL 二进制文件安装成功。"
     },
     "update": {

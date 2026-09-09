@@ -717,6 +717,7 @@
       "downloading": "Downloading pre-compiled Nginx+BoringSSL binary from GitHub Releases...",
       "fetch_fail": "Failed to fetch release information from GitHub. Check network connectivity.",
       "no_release": "No pre-compiled Nginx binary found in GitHub Releases. Please use source compilation instead.",
+      "runtime_dependency_fail": "Unable to install the gperftools runtime library required by prebuilt Nginx (libprofiler.so.0)",
       "install_ok": "Pre-compiled Nginx+BoringSSL binary installed successfully."
     },
     "update": {

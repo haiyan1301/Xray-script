@@ -222,6 +222,24 @@ function _install() {
     esac
 }
 
+# 安装预编译 Nginx 运行时需要的 gperftools profiler 库。
+function install_nginx_runtime_dependencies() {
+    case "$(_os)" in
+    debian | ubuntu)
+        for package_name in libgoogle-perftools2t64 libgoogle-perftools2; do
+            if apt-cache show "${package_name}" >/dev/null 2>&1; then
+                _install "${package_name}"
+                return 0
+            fi
+        done
+        print_error "$(t '.nginx.prebuilt.runtime_dependency_fail')"
+        ;;
+    centos)
+        _install gperftools-libs
+        ;;
+    esac
+}
+
 # =============================================================================
 # 函数名称: check_os
 # 功能描述: 检查操作系统是否受支持。
@@ -559,6 +577,7 @@ function install_nginx_update_transaction() (
 )
 
 function prebuilt_install() {
+    install_nginx_runtime_dependencies
     print_info "$(t '.nginx.prebuilt.downloading')"
     # 获取当前仓库的 GitHub Releases，并按当前 CPU 架构选择最新的可用产物。
     local repo_owner="haiyan1301"
