@@ -1109,14 +1109,20 @@ function build_multi_node_json() {
 function read_multi_node_protocol_fields() {
     local config_tag="$1"
     local fields field
+    local -a field_list=()
 
     # 字段清单与顺序来自 lib/protocols.sh 的 PROTOCOL_FIELDS；未定义的协议直接失败，
     # 不再像旧实现那样静默跳过（新增协议忘记补字段时会被立刻发现）。
     fields="$(protocol_fields "${config_tag}")" || return 1
-    while IFS= read -r field; do
+    # Parse the generated field list before prompting.  A `while ... done
+    # <<<"${fields}"` loop would redirect fd 0 for its whole body; nested
+    # exec_read/read.sh calls would then consume protocol field names as the
+    # user's answers (e.g. `target`, `path`, `xhttp-mode`).
+    mapfile -t field_list <<<"${fields}"
+    for field in "${field_list[@]}"; do
         [[ -n "${field}" ]] || continue
         exec_read "${field}" || return 1
-    done <<<"${fields}"
+    done
 }
 
 function read_hy2_certificate_config() {
@@ -2749,11 +2755,16 @@ function handler_read_xray_config() {
     # 协议专属字段：清单与顺序来自 lib/protocols.sh 的 PROTOCOL_FIELDS，
     # 与 multi 节点读取共用同一份定义（未登记的协议跳过，由 exec_check --tag 兜底）。
     local config_fields field
+    local -a field_list=()
     config_fields="$(protocol_fields "${CONFIG_TAG}")" || config_fields=''
-    while IFS= read -r field; do
+    # Keep stdin available for each nested prompt; see the corresponding
+    # multi-node reader above for why this is an array loop rather than a
+    # here-string-fed while loop.
+    mapfile -t field_list <<<"${config_fields}"
+    for field in "${field_list[@]}"; do
         [[ -n "${field}" ]] || continue
         exec_read "${field}" || return 1
-    done <<<"${config_fields}"
+    done
     if protocol_uses_vless_enc "${CONFIG_TAG}"; then
         run_vlessenc_choice || return 1
     fi
