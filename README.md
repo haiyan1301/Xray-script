@@ -87,6 +87,7 @@
 15. v2026.09.09 修复协议字段读取时标准输入被嵌套读取消耗导致的 XHTTP/shortId 输入错位；改进 Nginx 版本检测失败时的错误输出；预编译 Nginx 安装自动补齐 gperftools 运行时依赖；修复 CDN 上行/下行双域名生成重复 `listen 443` 选项的问题。
 16. v2026.09.10 修复已有 CDN 配置从旧版 TCP `:443` 监听迁移到共享 Unix Socket 时的兼容性问题；为 CDN 下行站点使用无重复选项的 socket 监听，避免 Nginx 因 `duplicate listen options` 校验失败。
 17. v2026.09.11 继续清理失败回滚或旧版本遗留的 CDN 站点配置，扫描 `sites-available` 和 `sites-enabled` 中所有受脚本管理的 CDN Socket 配置，避免残留域名再次触发重复监听选项。
+18. v2026.09.12 修复 CDN 使用 Nginx 回源时误删 `stream.conf` 导致公网 443 未监听的问题；该模式现在会正确生成并加载 TCP 443 分流配置，CDN 直连 Xray 模式仍由 Xray 负责监听 443。
 
 ## 分享链接
 

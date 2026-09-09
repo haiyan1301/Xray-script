@@ -6347,7 +6347,10 @@ function handler_change_domain() {
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${old_domain}" 'if $key == "domain" then del(.target[$key]) else . end')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${new_domain}" 'if $key == "domain" then .xray.target = $domain else . end')"
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${target_domain}" --arg domain "${new_domain}" 'if $key == "domain" then .xray.serverNames = [$domain] else . end')"
-    if [[ "${CONFIG_TAG,,}" == "sni" ]]; then
+    # SNI and CDN-with-Nginx both need the stream proxy to own public TCP 443.
+    # CDN direct-to-Xray deliberately omits it because Xray owns 443 itself.
+    if [[ "${CONFIG_TAG,,}" == "sni" ||
+        ( "${CONFIG_TAG,,}" == "cdn" && "$(get_cdn_backend)" == "nginx" ) ]]; then
         local stream_temp
         stream_temp="$(mktemp "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf.tmp.XXXXXX")" || {
             rollback_change_domain_transaction \
