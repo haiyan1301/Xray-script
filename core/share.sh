@@ -569,7 +569,7 @@ function get_xhttp_share_link() {
 # 返回值: 无 (直接修改全局变量 CLIENT_CONFIG 和 SHARE_LINK)
 # =============================================================================
 function get_cdn_share_link() {
-    local cdn_down xhttp_mode
+    local cdn_down xhttp_mode down_obfs_json
     CLIENT_CONFIG[security]="tls"
     CLIENT_CONFIG[server_name]="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
     CLIENT_CONFIG[remote_host]="${CLIENT_CONFIG[server_name]}"
@@ -581,10 +581,16 @@ function get_cdn_share_link() {
     if [[ -n "${cdn_down}" ]]; then
         xhttp_mode="${CLIENT_CONFIG[mode]:-auto}"
         CLIENT_CONFIG[mode]="${xhttp_mode}"
+        # A split-CDN download connection is built as an independent XHTTP
+        # transport.  Carry the same padding/session metadata into its
+        # nested xhttpSettings.extra; the top-level extra is still populated
+        # below for the uplink, so single-CDN links keep their existing shape.
+        down_obfs_json="$(build_xhttp_obfs_extra 1)" || return 1
         XHTTP_EXTRA="$(jq -n \
             --arg address "${cdn_down}" \
             --arg path "${CLIENT_CONFIG[path]}" \
-            --arg mode "${xhttp_mode}" '
+            --arg mode "${xhttp_mode}" \
+            --argjson obfs "${down_obfs_json:-{}}" '
             {
                 downloadSettings: {
                     address: $address,
@@ -599,7 +605,8 @@ function get_cdn_share_link() {
                     xhttpSettings: {
                         host: $address,
                         path: $path,
-                        mode: $mode
+                        mode: $mode,
+                        extra: $obfs
                     }
                 }
             }
