@@ -1650,7 +1650,7 @@ function handler_script_config() {
     # 打印绿色的配置更新提示
     log_config "$(t ".${CUR_FILE}.script.config_update")" >&2
     # 重置脚本配置 (默认重置 xray 部分)
-    handler_reset_script_config
+    handler_reset_script_config 'xray' || return 1
     # 从 CONFIG_DATA 或生成器获取配置值
     # 获取配置标签
     local CONFIG_TAG="${1:-${CONFIG_DATA['tag']}}"
