@@ -481,13 +481,46 @@ function rollback_protocol_install() {
     local runtime_snapshot_restored=1
     local cron_snapshot_restored=1
     local attempted_cdn_down='' previous_cdn_down=''
+    local previous_config='' attempted_config='' new_firewall_rules='[]'
+    local failed_firewall_rules='[]' firewall_rule rollback_config=''
 
     if [[ -r "${SCRIPT_CONFIG_PATH}" ]]; then
         attempted_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${SCRIPT_CONFIG_PATH}" 2>/dev/null || true)"
     fi
     previous_cdn_down="$(jq -r '.nginx.cdnDown // ""' "${script_snapshot}" 2>/dev/null || true)"
 
-    if ! restore_protocol_snapshot "${script_snapshot}" "${SCRIPT_CONFIG_PATH}"; then
+    # Config generation opens and records ports before the service is restarted.
+    # Reconcile that candidate ledger before restoring the old JSON; otherwise a
+    # failed install leaves its new ports open with no remaining ownership record.
+    if previous_config="$(jq -e 'select(type == "object")' "${script_snapshot}")" &&
+        attempted_config="$(jq -e 'select(type == "object")' "${SCRIPT_CONFIG_PATH}")"; then
+        new_firewall_rules="$(firewall_ledger_delta "${previous_config}" "${attempted_config}")"
+        while IFS= read -r firewall_rule; do
+            [[ -n "${firewall_rule}" ]] || continue
+            if ! firewall_rule_remove "${firewall_rule}"; then
+                firewall_rule_restore "${firewall_rule}" ||
+                    echo 'Firewall rollback failed while restoring an unremoved installation rule.' >&2
+                failed_firewall_rules="$(jq --argjson rule "${firewall_rule}" '. + [$rule]' <<<"${failed_firewall_rules}")" || return 1
+                rollback_status=1
+            fi
+        done < <(jq -c '.[]' <<<"${new_firewall_rules}")
+        if [[ "${failed_firewall_rules}" != '[]' ]]; then
+            rollback_config="$(jq --argjson failed "${failed_firewall_rules}" '
+                .xray.firewallRules = (((.xray.firewallRules // []) + $failed) |
+                    unique_by([.feature,.backend,.port,.protocol]))
+            ' <<<"${previous_config}")" || return 1
+            if ! write_config "${rollback_config}" "${SCRIPT_CONFIG_PATH}"; then
+                script_snapshot_restored=0
+                rollback_status=1
+            fi
+            echo 'Some installation firewall rules could not be removed; ownership records were retained.' >&2
+        elif ! restore_protocol_snapshot "${script_snapshot}" "${SCRIPT_CONFIG_PATH}"; then
+            script_snapshot_restored=0
+            rollback_status=1
+        fi
+    else
+        # Without both ledgers we cannot safely discard the candidate ownership
+        # records. Keep the original snapshot for manual recovery.
         rollback_status=1
         script_snapshot_restored=0
     fi

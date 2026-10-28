@@ -107,6 +107,9 @@ function cert_backup_pair() {
     local had_privkey=0
 
     [[ -d "${backup_dir}" ]] || return 1
+    # -e is false for dangling links; reject those before a later deployment
+    # can write through them to an unintended destination.
+    [[ ! -L "${cert_dir}/fullchain.pem" && ! -L "${cert_dir}/privkey.pem" ]] || return 1
     if [[ -e "${cert_dir}/fullchain.pem" ]]; then
         [[ -f "${cert_dir}/fullchain.pem" && ! -L "${cert_dir}/fullchain.pem" ]] ||
             return 1

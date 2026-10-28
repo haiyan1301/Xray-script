@@ -600,8 +600,8 @@ function cloudreve_project_present() {
 #           崩溃循环里的容器会有短暂的 running 窗口，因此要求**连续 stable 秒**都是
 #           running 才算就绪（用 SECONDS 计时，不是数循环次数；同时也替掉了原来盲目
 #           的 sleep 5）。
-#           容器名找不到时退回按 compose 项目查运行态容器：用户若在 compose 文件里
-#           改过 container_name，只认写死的名字会让这里空等 30 秒后误报启动失败。
+#           容器名找不到时按同名 compose 服务查容器 ID；不能把仍在运行的
+#           PostgreSQL、Redis 或 Aria2 当作 Cloudreve 已就绪。
 # 参数:
 #   $1: 容器名
 #   $2: 超时秒数（默认 30）
@@ -613,13 +613,16 @@ function wait_container_running() {
     local timeout="${2:-30}"
     local stable_need="${3:-5}"
     local deadline=$((SECONDS + timeout))
-    local stable_since='' status=''
+    local stable_since='' status='' service_container=''
 
     while :; do
         status="$(docker inspect --format='{{.State.Status}}' "${container}" 2>/dev/null)" || status=''
-        # 容器名对不上（用户改过 container_name）：按当前目录的 compose 项目找运行态容器
-        if [[ -z "${status}" ]] && [[ -n "$(docker compose ps --status running --format '{{.Name}}' 2>/dev/null || true)" ]]; then
-            status='running'
+        # 查询指定服务而不是整个项目，否则辅助容器还在运行也会误报成功。
+        if [[ -z "${status}" ]]; then
+            service_container="$(docker compose ps --all --quiet "${container}" 2>/dev/null)" || service_container=''
+            if [[ -n "${service_container}" && "${service_container}" != *$'\n'* ]]; then
+                status="$(docker inspect --format='{{.State.Status}}' "${service_container}" 2>/dev/null)" || status=''
+            fi
         fi
         if [[ "${status}" == 'running' ]]; then
             [[ -n "${stable_since}" ]] || stable_since="${SECONDS}"
@@ -789,7 +792,7 @@ function purge_cloudreve_v3() {
             # 停止服务并删除本项目声明的 named volume（temp_data，bind 到
             # ${CLOUDREVE_V3_DIR}/data）。只删目录的话 Docker 里会留下一个指向已删除路径的
             # 悬空卷，与「彻底卸载」不符；数据本身就在项目目录下，同样会被 rm -rf 清掉。
-            docker compose down -v
+            docker compose down -v || print_error 'Failed to remove Cloudreve v3 containers and volumes; project files were retained.'
             # 切换到用户主目录
             cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
         fi
@@ -894,11 +897,10 @@ function update_cloudreve_v4() {
         print_info "$(t '.docker.cloudreve_v4.update')"
         # 切换到 Cloudreve v4 目录
         cd "${CLOUDREVE_V4_DIR}" || print_error "Failed to enter directory: ${CLOUDREVE_V4_DIR}"
-        # 停止服务
-        docker compose down
-        # 拉取最新的镜像
-        docker compose pull
-        # 重启服务
+        # 先下载镜像，失败时保留正在运行的服务。up 会替换需要更新的容器，
+        # 不需要提前 down；忽略 pull 的失败会把继续运行旧镜像误报为更新成功。
+        docker compose pull || print_error 'Failed to pull Cloudreve v4 images; the current service was retained.'
+        # 应用已下载的新镜像
         docker compose up -d || print_error "$(t '.docker.cloudreve_v4.up_fail')"
         # 新镜像起不来（配置不兼容、卷损坏）时 up -d 仍返回 0，这里必须验证容器真的在跑
         wait_container_running 'cloudreve_v4' || print_error "$(t '.docker.cloudreve_v4.up_fail')"
@@ -924,7 +926,7 @@ function purge_cloudreve_v4() {
             # （backend_data / database_postgres / redis_data），只删项目目录的话它们仍留在
             # /var/lib/docker/volumes 下，同项目重装会带回旧账号与数据库——与「彻底卸载」
             # 不符。`-v` 只删除本 compose 项目声明的卷，不会碰其它项目的 Docker 数据。
-            docker compose down -v
+            docker compose down -v || print_error 'Failed to remove Cloudreve v4 containers and volumes; project files were retained.'
             # 切换到用户主目录
             cd "${HOME}" || print_error "Failed to enter directory: ${HOME}"
         fi

@@ -813,12 +813,13 @@ function source_install() {
     print_info "$(t '.nginx.install.start_install')"
     # 确保 nginx 用户和组存在
     if ! id -u nginx &>/dev/null; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin nginx
+        _error_detect useradd --system --no-create-home --shell /usr/sbin/nologin nginx
     fi
-    make install                                      # 执行安装 (将文件复制到 --prefix 指定的目录)
-    mkdir -p /var/log/nginx                           # 创建日志目录
-    chown -R nginx:nginx /var/log/nginx               # 设置日志目录归属 nginx 用户
-    ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx # 创建软链接以便全局使用 nginx 命令
+    # 安装失败后不得继续生成服务或上报成功；与编译阶段使用同一错误出口。
+    _error_detect make install
+    _error_detect mkdir -p /var/log/nginx
+    _error_detect chown -R nginx:nginx /var/log/nginx
+    _error_detect ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx
 }
 
 # =============================================================================

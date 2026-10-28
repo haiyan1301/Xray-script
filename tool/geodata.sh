@@ -8,6 +8,14 @@ GEOIP_URL="${GEOIP_URL_OVERRIDE:-https://github.com/Loyalsoldier/v2ray-rules-dat
 GEOSITE_URL="${GEOSITE_URL_OVERRIDE:-https://github.com/Loyalsoldier/v2ray-rules-dat/raw/release/geosite.dat}"
 
 mkdir -p -- "${XRAY_DIR}"
+command -v flock >/dev/null 2>&1 || { echo "flock is required for GeoData updates." >&2; exit 1; }
+# Cron and manual updates share one transaction. Keep the lock inode in place;
+# unlinking it would let a third updater lock a different inode concurrently.
+exec {geodata_lock_fd}>"${XRAY_DIR}/.geodata.lock"
+if ! flock -n "${geodata_lock_fd}"; then
+    echo "Another GeoData update is in progress." >&2
+    exit 1
+fi
 temp_dir="$(mktemp -d "${XRAY_DIR}/.geodata.XXXXXX")"
 geoip_existed=0
 geosite_existed=0
@@ -54,8 +62,8 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-curl -fsSL --retry 3 -o "${temp_dir}/geoip.dat.new" "${GEOIP_URL}"
-curl -fsSL --retry 3 -o "${temp_dir}/geosite.dat.new" "${GEOSITE_URL}"
+curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 -o "${temp_dir}/geoip.dat.new" "${GEOIP_URL}"
+curl -fsSL --connect-timeout 15 --max-time 300 --retry 3 -o "${temp_dir}/geosite.dat.new" "${GEOSITE_URL}"
 [[ -s "${temp_dir}/geoip.dat.new" && -s "${temp_dir}/geosite.dat.new" ]]
 
 if [[ -f "${XRAY_DIR}/geoip.dat" ]]; then

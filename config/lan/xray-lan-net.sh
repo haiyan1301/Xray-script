@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly CONFIG_DIR="${XRAY_LAN_DIR:-/usr/local/etc/xray-lan}"
 readonly META_FILE="${CONFIG_DIR}/site.json"
-readonly STATE_FILE="/run/xray-lan-network.state"
+readonly STATE_FILE="${XRAY_LAN_STATE_FILE:-/run/xray-lan-network.state}"
 readonly ROUTE_STATE_FILE="${XRAY_LAN_ROUTE_STATE_FILE:-/run/xray-lan-routes.state}"
 # 本次放行的 FORWARD 规则（每行一条 iptables 参数串）。与 STATE_FILE 分开存放，
 # 因为 STATE_FILE 会被 source 成 shell 变量，不能混入规则文本。
@@ -109,6 +109,24 @@ function remove_forward_rules() {
     done
 }
 
+# Match the complete device token on every route. A substring check for
+# " dev xray0" also accepts xray01 and can silently adopt a foreign route.
+function route_uses_tun() {
+    awk -v tun="${TUN_NAME}" '
+        NF {
+            seen=1; found=0
+            for (i=1; i<NF; i++) {
+                if ($i == "dev") {
+                    if ($(i+1) == tun) found=1
+                    else invalid=1
+                }
+            }
+            if (!found) invalid=1
+        }
+        END { exit (!seen || invalid) }
+    ' <<<"$1"
+}
+
 function start_network() (
     local route_state_temp=''
     local network_committed=0
@@ -194,18 +212,18 @@ function start_network() (
             fi
         done
         if [[ "${route_is_current}" -eq 0 ]]; then
-            existing="$(ip -4 route show exact "${cidr}" 2>/dev/null || true)"
+            existing="$(ip -4 route show exact "${cidr}")" || return 1
             # 只回收本脚本建在 TUN 上的路由，并记录完整属性以便回滚时原样恢复；
             # 已被管理员改到其它设备的路由保持不动，也不写入新的状态文件。
-            if [[ -n "${existing}" && "${existing}" == *" dev ${TUN_NAME}"* ]] &&
-                ip -4 route del "${cidr}" dev "${TUN_NAME}" 2>/dev/null; then
+            if route_uses_tun "${existing}"; then
+                ip -4 route del "${cidr}" dev "${TUN_NAME}" || return 1
                 removed_route_specs+=("${existing}")
             fi
         fi
     done
     for cidr in "${REMOTE_CIDRS[@]}"; do
-        existing="$(ip -4 route show exact "${cidr}" 2>/dev/null || true)"
-        if [[ -n "${existing}" && "${existing}" != *" dev ${TUN_NAME}"* ]]; then
+        existing="$(ip -4 route show exact "${cidr}")" || return 1
+        if [[ -n "${existing}" ]] && ! route_uses_tun "${existing}"; then
             echo "Refusing to replace existing route: ${existing}" >&2
             return 1
         fi
@@ -236,7 +254,9 @@ function start_network() (
 )
 
 function stop_network() {
-    local cidr ip_forward='' rp_filter=''
+    local cidr existing route_state_temp ip_forward='' rp_filter=''
+    local cleanup_status=0
+    local -a remaining_routes=()
     remove_forward_rules
     local routes_to_remove=("${REMOTE_CIDRS[@]}")
     if [[ -r "${ROUTE_STATE_FILE}" ]]; then
@@ -244,9 +264,27 @@ function stop_network() {
     fi
     for cidr in "${routes_to_remove[@]}"; do
         [[ -n "${cidr}" ]] || continue
-        ip -4 route del "${cidr}" dev "${TUN_NAME}" 2>/dev/null || true
+        if ! existing="$(ip -4 route show exact "${cidr}")"; then
+            remaining_routes+=("${cidr}")
+            cleanup_status=1
+        elif route_uses_tun "${existing}" && ! ip -4 route del "${cidr}" dev "${TUN_NAME}"; then
+            remaining_routes+=("${cidr}")
+            cleanup_status=1
+        fi
     done
-    rm -f -- "${ROUTE_STATE_FILE}"
+    if ((${#remaining_routes[@]})); then
+        # Keep failed entries for the next stop rather than forgetting routes
+        # after a transient netlink failure. Preserve the old ledger on IO error.
+        if route_state_temp="$(mktemp "${ROUTE_STATE_FILE}.tmp.XXXXXX")"; then
+            if ! { printf '%s\n' "${remaining_routes[@]}" >"${route_state_temp}" &&
+                mv -fT -- "${route_state_temp}" "${ROUTE_STATE_FILE}"; }; then
+                rm -f -- "${route_state_temp}"
+            fi
+        fi
+        echo "Failed to remove LAN routes; keeping ${ROUTE_STATE_FILE} for retry." >&2
+    else
+        rm -f -- "${ROUTE_STATE_FILE}" || cleanup_status=1
+    fi
 
     if [[ -f "${STATE_FILE}" ]]; then
         local restore_status=0
@@ -264,8 +302,9 @@ function stop_network() {
         else
             echo "Failed to restore gateway sysctl values; keeping ${STATE_FILE} for retry." >&2
         fi
-        return "${restore_status}"
+        [[ "${restore_status}" -eq 0 ]] || cleanup_status=1
     fi
+    return "${cleanup_status}"
 }
 
 case "${1:-}" in
