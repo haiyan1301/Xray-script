@@ -95,26 +95,32 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
 
 ## Usage
 
+v2026.10.28 fixes `bash: unknown option -- -`: the current upstream Xray installer no longer accepts `-u`. The installer is pinned to a commit and checked with SHA-256. Failed installs and version mismatches preserve the saved version and restore the binary backup. Update the management script and select “Install or reinstall nodes” again.
+
+mKCP and multi-node configurations containing mKCP now use the `mkcp-legacy` / `settings.value` format accepted by Xray v26.10.21. Share links read seeds from both current and historical configurations.
+
+This release also stops on failed downloads, removes shell re-evaluation from Nginx commands, restricts Xray configuration permissions, and preserves compiler security protections. New Cloudreve Web ports bind to `127.0.0.1:5212` for access through Nginx; existing container configurations require a manual port-binding change.
+
 * Download:
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
+  wget -O "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
   ```
   
 * Usage
   * Launch interface
 
     ```sh
-    bash ${HOME}/Xray-script.sh
+    bash "${HOME}/Xray-script.sh"
     ```
 
   * Install a specific mode directly
 
     ```sh
-    bash ${HOME}/Xray-script.sh --vision
-    bash ${HOME}/Xray-script.sh --hy2
-    bash ${HOME}/Xray-script.sh --cdn
-    bash ${HOME}/Xray-script.sh --sni
-    bash ${HOME}/Xray-script.sh --multi
+    bash "${HOME}/Xray-script.sh" --vision
+    bash "${HOME}/Xray-script.sh" --hy2
+    bash "${HOME}/Xray-script.sh" --cdn
+    bash "${HOME}/Xray-script.sh" --sni
+    bash "${HOME}/Xray-script.sh" --multi
     ```
 
     Other flags: `--xhttp`, `--trojan`, `--fallback`, `--ss2022`, and `--mkcp`.
@@ -122,15 +128,19 @@ In SNI configurations, CDN share links default Alpn to H2. For H3 requirements, 
   * Manage site-to-site LAN
 
     ```sh
-    bash ${HOME}/Xray-script.sh --lan
+    bash "${HOME}/Xray-script.sh" --lan
     ```
 
     Initialize the Hub, add at least two sites, and export each edge package. An edge requires Xray-core with TUN support, `jq`, and `iproute2`; gateway mode also requires `iptables`. Only declared remote private CIDRs are routed. Layer-2 broadcast, mDNS, and network-neighborhood discovery are not supported.
 
 * Quick start (with interface)
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  wget -O "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash "${HOME}/Xray-script.sh"
   ```
+
+Developer checks: `python3 -m unittest discover -s tests -v`. Regression tests use temporary directories and a simulated installer; no root, network, or system service changes are required.
+
+Real-core checks: `python3 tests/check_core_configs.py --xray /path/to/xray`, with the official archive's `geoip.dat` and `geosite.dat` beside the binary. It generates and validates 11 configurations with `xray run -test` without starting a service.
 
 ## Script Interface
 

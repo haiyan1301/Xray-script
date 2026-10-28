@@ -161,9 +161,17 @@ function cert_restore_pair() {
 # =============================================================================
 
 # 参数: $1-账户邮箱
-function acme_client_download() {
-    curl https://get.acme.sh | sh -s email="$1"
-}
+function acme_client_download() (
+    local installer
+
+    installer="$(mktemp "${TMPDIR:-/tmp}/install-acme.XXXXXX")" || return 1
+    trap 'rm -f -- "${installer}"' EXIT
+    # Never execute a partial HTTP response or hide curl's exit status in a pipe.
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 \
+        -o "${installer}" https://get.acme.sh || return 1
+    [[ -s "${installer}" ]] && sh -n "${installer}" || return 1
+    sh "${installer}" email="$1"
+)
 
 function acme_client_enable_autoupgrade() {
     "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade

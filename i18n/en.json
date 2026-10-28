@@ -274,6 +274,7 @@
     "gh_proxy": {
       "prompt": "In mainland China, use GitHub proxy for download [y/N]: ",
       "fetch_fail": "Failed to download Xray install script, check network or retry later",
+      "digest_mismatch": "Xray installer SHA-256 verification failed; refusing to execute. Change the download source or update Xray-script.",
       "invalid_script": "The downloaded Xray install script is empty or invalid",
       "install_fail": "Xray installation failed",
       "xray_missing": "The installer finished, but the xray command is still unavailable",

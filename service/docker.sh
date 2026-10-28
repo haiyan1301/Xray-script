@@ -85,7 +85,7 @@ declare LANG_PARAM='' # (未在脚本中实际使用，可能是预留)
 # 参数: 无
 # 返回值: 无 (执行安装过程，失败时会调用 print_error 退出)
 # =============================================================================
-function install_docker() {
+function install_docker() (
     # 打印开始安装的信息
     print_info "$(t '.docker.install.start')"
 
@@ -93,10 +93,7 @@ function install_docker() {
     # 之后无检查地执行它等于静默运行旧脚本。
     local installer
     installer="$(mktemp "${TMPDIR:-/tmp}/install-docker.XXXXXX")" || return 1
-    # 立即展开路径，避免 RETURN 触发时变量已失效；顺手把 RETURN trap 清掉，
-    # 否则它会一直挂着，之后每个函数返回都要白跑一次 rm -f。
-    # shellcheck disable=SC2064
-    trap "rm -f -- '${installer}'; trap - RETURN" RETURN
+    trap 'rm -f -- "${installer}"' EXIT
 
     if ! wget -O "${installer}" https://get.docker.com; then
         print_error "$(t '.docker.install.download_fail')"
@@ -127,7 +124,7 @@ function install_docker() {
     # 安装脚本返回 0 不代表 docker 真的装上了
     cmd_exists docker ||
         print_error "$(t '.docker.install.verify_fail')"
-}
+)
 
 # =============================================================================
 # 函数名称: list_container_ips

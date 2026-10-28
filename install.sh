@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.09.13"
+readonly SCRIPT_VERSION="v2026.10.28"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -431,9 +431,13 @@ function install_dependencies() {
 #   $2: GitHub API 项目 URL
 # 返回值: 无 (执行文件下载和解压过程)
 # =============================================================================
-function download_github_files() {
+function download_github_files() (
     local target_dir="$1"     # 本地目标目录
     local github_api_url="$2" # GitHub API 项目 URL
+    local archive
+
+    archive="$(mktemp "${TMPDIR:-/tmp}/xray-script.XXXXXX.tar.gz")" || return 1
+    trap 'rm -f -- "${archive}"' EXIT
 
     # 创建目标目录
     mkdir -p -- "${target_dir}" ||
@@ -445,11 +449,14 @@ function download_github_files() {
     # 打印开始下载的信息
     echo -e "${GREEN}[${I18N_DATA['download']}]${NC} ${github_api_url}"
     # 使用 curl 从 GitHub API 下载 tar.gz 格式的文件，并解压
-    if ! curl -sL "${github_api_url}" | tar xz --strip-components=1; then
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 \
+        -o "${archive}" "${github_api_url}" ||
+        ! tar -tzf "${archive}" >/dev/null ||
+        ! tar -xzf "${archive}" --strip-components=1 --no-same-owner --no-same-permissions; then
         # 如果下载失败，则调用 _error 退出
         _error "${I18N_DATA['failed']}: ${github_api_url}"
     fi
-}
+)
 
 # =============================================================================
 # 函数名称: download_xray_script_files

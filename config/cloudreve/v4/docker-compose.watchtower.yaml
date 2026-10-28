@@ -9,7 +9,7 @@ services:
     networks:
       - share_net
     ports:
-      - 5212:5212
+      - "127.0.0.1:5212:5212"
     environment:
       - CR_CONF_Database.Type=postgres
       - CR_CONF_Database.Host=postgresql
