@@ -285,7 +285,8 @@ function write_config() {
     local content="$1"
     local target="$2"
     # 防止写入空内容导致配置文件损坏
-    if [[ -z "${content}" ]] || ! echo "${content}" | jq empty 2>/dev/null; then
+    if [[ -z "${content}" ]] || ! printf '%s\n' "${content}" |
+        jq -se 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
         echo -e "${RED}[错误]${NC} 拒绝写入空或无效的 JSON 内容到 ${target}" >&2
         return 1
     fi
@@ -295,7 +296,10 @@ function write_config() {
         rm -f -- "${temp_file}"
         return 1
     fi
-    chmod 600 "${temp_file}"
+    if ! chmod 600 "${temp_file}"; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
     if ! mv -f -- "${temp_file}" "${target}"; then
         rm -f -- "${temp_file}"
         return 1

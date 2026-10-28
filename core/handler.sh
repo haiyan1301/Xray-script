@@ -259,6 +259,51 @@ function set_xray_config_permissions() {
     fi
 }
 
+function validate_xray_runtime_config() (
+    local config_path="$1" validation_file=''
+
+    cmd_exists xray && [[ "${XRAY_CONFIG_VALIDATE:-1}" != '0' ]] || return 0
+    # Xray's test mode opens configured log files. A privileged validation must
+    # not create root-owned logs that the User=xray service cannot reopen.
+    # Keep the copy beside the candidate so relative configuration paths retain
+    # the same base, and leave the configuration being committed unchanged.
+    validation_file="$(mktemp "${config_path}.validate.XXXXXX.json")" || return 1
+    trap 'rm -f -- "${validation_file}"' EXIT
+    jq '.log.access = "none" | .log.error = "none"' "${config_path}" >"${validation_file}" || return 1
+    xray run -test -c "${validation_file}"
+)
+
+function prepare_xray_managed_logs() {
+    local config_path="$1" managed_logs='' log_path
+    local log_dir='/var/log/xray'
+
+    [[ "${EUID}" -eq 0 ]] && id -u xray >/dev/null 2>&1 || return 0
+    managed_logs="$(jq -r '
+        [.log.access, .log.error] | unique[] |
+        select(. == "/var/log/xray/access.log" or . == "/var/log/xray/error.log")
+    ' "${config_path}")" || return 1
+    [[ -n "${managed_logs}" ]] || return 0
+    # Repair only this project's exact default paths. Never follow a managed
+    # path into a custom logging location or change a linked file's ownership.
+    if [[ -L "${log_dir}" || ( -e "${log_dir}" && ! -d "${log_dir}" ) ]]; then
+        echo "Refusing to change an unsafe managed Xray log directory: ${log_dir}" >&2
+        return 1
+    fi
+    if [[ ! -d "${log_dir}" ]]; then
+        install -d -m 700 -o xray -g xray -- "${log_dir}" || return 1
+    fi
+    chown --no-dereference xray:xray -- "${log_dir}" && chmod 700 "${log_dir}" || return 1
+    while IFS= read -r log_path; do
+        if [[ -L "${log_path}" || ( -e "${log_path}" && ! -f "${log_path}" ) ]]; then
+            echo "Refusing to change an unsafe managed Xray log file: ${log_path}" >&2
+            return 1
+        fi
+        [[ -f "${log_path}" ]] || continue
+        [[ "$(stat -c '%h' -- "${log_path}")" == 1 ]] || return 1
+        chown --no-dereference xray:xray -- "${log_path}" && chmod 600 "${log_path}" || return 1
+    done <<<"${managed_logs}"
+}
+
 function write_xray_runtime_config() {
     local content="$1"
     local target="${XRAY_CONFIG_PATH}"
@@ -275,15 +320,17 @@ function write_xray_runtime_config() {
         return 1
     }
 
-    if cmd_exists xray && [[ "${XRAY_CONFIG_VALIDATE:-1}" != '0' ]]; then
-        if ! validation_output="$(xray run -test -c "${temp_file}" 2>&1)"; then
-            echo -e "${RED}[Xray]${NC} Configuration validation failed:" >&2
-            printf '%s\n' "${validation_output}" >&2
-            rm -f -- "${temp_file}"
-            return 1
-        fi
+    if ! validation_output="$(validate_xray_runtime_config "${temp_file}" 2>&1)"; then
+        echo -e "${RED}[Xray]${NC} Configuration validation failed:" >&2
+        printf '%s\n' "${validation_output}" >&2
+        rm -f -- "${temp_file}"
+        return 1
     fi
 
+    prepare_xray_managed_logs "${temp_file}" || {
+        rm -f -- "${temp_file}"
+        return 1
+    }
     set_xray_config_permissions "${temp_file}" || {
         rm -f -- "${temp_file}"
         return 1
@@ -320,15 +367,17 @@ function commit_xray_and_script_config() {
         return 1
     fi
 
-    if cmd_exists xray && [[ "${XRAY_CONFIG_VALIDATE:-1}" != '0' ]]; then
-        if ! validation_output="$(xray run -test -c "${runtime_temp}" 2>&1)"; then
-            echo -e "${RED}[Xray]${NC} Configuration validation failed:" >&2
-            printf '%s\n' "${validation_output}" >&2
-            rm -f -- "${runtime_temp}" "${script_temp}"
-            return 1
-        fi
+    if ! validation_output="$(validate_xray_runtime_config "${runtime_temp}" 2>&1)"; then
+        echo -e "${RED}[Xray]${NC} Configuration validation failed:" >&2
+        printf '%s\n' "${validation_output}" >&2
+        rm -f -- "${runtime_temp}" "${script_temp}"
+        return 1
     fi
 
+    prepare_xray_managed_logs "${runtime_temp}" || {
+        rm -f -- "${runtime_temp}" "${script_temp}"
+        return 1
+    }
     if [[ -e "${XRAY_CONFIG_PATH}" ]]; then
         runtime_existed=1
         runtime_backup="$(mktemp "${XRAY_CONFIG_PATH}.rollback.XXXXXX")" || {
@@ -1037,21 +1086,28 @@ function generate_unique_multi_port() {
     shift 2
     local used_ports=("$@")
     local port="${requested}"
+    local attempts=0
     local multi_label="$(t ".${CUR_FILE}.multi.label")"
 
     if [[ -z "${port}" ]]; then
         if [[ "${config_tag,,}" == 'mkcp' || ${#used_ports[@]} -gt 0 ]]; then
-            port="$(exec_generate '--port')"
+            port="$(exec_generate '--port')" || return 1
         else
             port=443
         fi
     fi
 
     while [[ "${port}" == "${XRAY_API_PORT}" ]] || port_in_list "${port}" "${used_ports[@]}"; do
+        attempts=$((attempts + 1))
+        if ((attempts >= 128)); then
+            log_error 'Unable to generate an unused Xray port.' >&2
+            return 1
+        fi
         echo -e "${YELLOW}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_conflict" | sed "s/{port}/${port}/g")" >&2
-        port="$(exec_generate '--port')"
+        port="$(exec_generate '--port')" || return 1
     done
 
+    [[ "${port}" =~ ^[0-9]{1,5}$ ]] && ((10#${port} >= 1 && 10#${port} <= 65535)) || return 1
     echo "${port}"
 }
 
@@ -1065,19 +1121,22 @@ function build_multi_node_json() {
         --arg tag "${config_tag}" \
         --arg name "${config_tag}-${node_index}" \
         --argjson port "${xray_port}" \
-        '{tag:$tag,name:$name,port:$port}')"
+        '{tag:$tag,name:$name,port:$port}')" || return 1
 
     case "${config_tag,,}" in
     trojan)
-        local trojan_password="${CONFIG_DATA['password']:-$(exec_generate '--password')}"
+        local trojan_password
+        trojan_password="${CONFIG_DATA['password']:-$(exec_generate '--password')}" || return 1
         node="$(echo "${node}" | jq --arg password "${trojan_password}" '.trojan = $password')"
         ;;
     hy2)
-        local hy2_auth="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}"
+        local hy2_auth
+        hy2_auth="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}" || return 1
         node="$(echo "${node}" | jq --arg auth "${hy2_auth}" '.hy2auth = $auth')"
         ;;
     ss2022)
-        local ss2022_key="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}"
+        local ss2022_key
+        ss2022_key="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}" || return 1
         node="$(echo "${node}" | jq --arg key "${ss2022_key}" '.ss2022Key = $key')"
         ;;
     mkcp | vision | xhttp | fallback)
@@ -1094,16 +1153,18 @@ function build_multi_node_json() {
         node="$(echo "${node}" | jq --arg uuid "${fallback_uuid}" '.fallback = $uuid')"
         ;;
     mkcp)
-        local kcp_seed="${CONFIG_DATA['seed']:-$(exec_generate '--password')}"
+        local kcp_seed
+        kcp_seed="${CONFIG_DATA['seed']:-$(exec_generate '--password')}" || return 1
         node="$(echo "${node}" | jq --arg seed "${kcp_seed}" '.kcp = $seed')"
         ;;
     esac
 
     case "${config_tag,,}" in
     vision | xhttp | trojan | fallback)
-        local target_domain="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
-        local server_names="$(exec_generate '--server-names' "${target_domain}")"
-        local short_ids="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-${CONFIG_DATA['short']:-'8 8'}})"
+        local target_domain server_names short_ids
+        target_domain="${CONFIG_DATA['target']:-$(exec_generate '--target')}" || return 1
+        server_names="$(exec_generate '--server-names' "${target_domain}")" || return 1
+        short_ids="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-${CONFIG_DATA['short']:-'8 8'}})" || return 1
         node="$(echo "${node}" | jq \
             --arg target "${target_domain}" \
             --argjson serverNames "${server_names}" \
@@ -1114,7 +1175,8 @@ function build_multi_node_json() {
 
     case "${config_tag,,}" in
     xhttp | trojan | fallback)
-        local xhttp_path="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
+        local xhttp_path
+        xhttp_path="${CONFIG_DATA['path']:-$(exec_generate '--path')}" || return 1
         local xhttp_mode="${CONFIG_DATA['xhttp-mode']:-auto}"
         node="$(echo "${node}" | jq --arg path "${xhttp_path}" --arg mode "${xhttp_mode}" '.path = $path | .xhttpMode = $mode')"
         ;;
@@ -1377,7 +1439,7 @@ function handler_read_multi_xray_config() {
         echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_prompt")" >&2
         exec_read 'port' || return 1
         local xray_port
-        xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")"
+        xray_port="$(generate_unique_multi_port "${CONFIG_DATA['port']}" "${config_tag}" "${used_ports[@]}")" || return 1
         used_ports+=("${xray_port}")
         echo -e "${GREEN}[${multi_label}]${NC} $(t ".${CUR_FILE}.multi.port_assigned" | sed "s/{port}/${xray_port}/g")" >&2
 
@@ -1399,8 +1461,8 @@ function handler_read_multi_xray_config() {
         fi
 
         local node
-        node="$(build_multi_node_json "${config_tag}" "${i}" "${xray_port}")"
-        nodes="$(echo "${nodes}" | jq --argjson node "${node}" '. + [$node]')"
+        node="$(build_multi_node_json "${config_tag}" "${i}" "${xray_port}")" || return 1
+        nodes="$(echo "${nodes}" | jq --argjson node "${node}" '. + [$node]')" || return 1
     done
 
     if ! cmd_exists 'xray'; then
@@ -1717,19 +1779,25 @@ function handler_script_config() {
     if [[ "${CONFIG_TAG,,}" == 'fallback' || "${CONFIG_TAG,,}" == 'sni' ]]; then
         FALLBACK_UUID="$(exec_generate '--uuid' "${CONFIG_DATA['fallback']:-}")" || return 1
     fi
-    [[ "${CONFIG_TAG,,}" == 'trojan' ]] && TROJAN_PASSWORD="${CONFIG_DATA['password']:-$(exec_generate '--password')}"
-    [[ "${CONFIG_TAG,,}" == 'mkcp' ]] && KCP_SEED="${CONFIG_DATA['seed']:-$(exec_generate '--password')}"
-    protocol_uses_xhttp "${CONFIG_TAG}" && XHTTP_PATH="${CONFIG_DATA['path']:-$(exec_generate '--path')}"
+    if [[ "${CONFIG_TAG,,}" == 'trojan' ]]; then
+        TROJAN_PASSWORD="${CONFIG_DATA['password']:-$(exec_generate '--password')}" || return 1
+    fi
+    if [[ "${CONFIG_TAG,,}" == 'mkcp' ]]; then
+        KCP_SEED="${CONFIG_DATA['seed']:-$(exec_generate '--password')}" || return 1
+    fi
+    if protocol_uses_xhttp "${CONFIG_TAG}"; then
+        XHTTP_PATH="${CONFIG_DATA['path']:-$(exec_generate '--path')}" || return 1
+    fi
 
     local TARGET_DOMAIN=''
     local NGINX_DOMAIN=''
     local SERVER_NAMES='[]'
     local SHORT_IDS='[]'
     if protocol_uses_reality "${CONFIG_TAG}"; then
-        TARGET_DOMAIN="${CONFIG_DATA['target']:-$(exec_generate '--target')}"
+        TARGET_DOMAIN="${CONFIG_DATA['target']:-$(exec_generate '--target')}" || return 1
         NGINX_DOMAIN="${CONFIG_DATA['domain']:-${TARGET_DOMAIN}}"
-        SERVER_NAMES="$(exec_generate '--server-names' "${TARGET_DOMAIN}")"
-        SHORT_IDS="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-'8 8'})"
+        SERVER_NAMES="$(exec_generate '--server-names' "${TARGET_DOMAIN}")" || return 1
+        SHORT_IDS="$(exec_generate '--short-ids' ${CONFIG_DATA['short_ids']:-'8 8'})" || return 1
     fi
 
     local CDN_DOMAIN="${CONFIG_DATA['cdn']:-}"
@@ -1751,13 +1819,15 @@ function handler_script_config() {
         ;;
     hy2)
         # 获取或生成 HY2 auth 密码
-        local HY2_AUTH="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}"
+        local HY2_AUTH
+        HY2_AUTH="${CONFIG_DATA['hy2-auth']:-$(exec_generate '--hy2-auth')}" || return 1
         # 更新 HY2 auth 密码
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg auth "${HY2_AUTH}" '.xray.hy2auth = $auth')"
         ;;
     ss2022)
         # 获取或生成 SS2022 pre-shared key (32字节Base64格式)
-        local SS2022_KEY="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}"
+        local SS2022_KEY
+        SS2022_KEY="${CONFIG_DATA['ss2022-password']:-$(exec_generate '--ss2022-key')}" || return 1
         # 更新 SS2022 pre-shared key
         SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg key "${SS2022_KEY}" '.xray.ss2022Key = $key')"
         ;;
@@ -1775,7 +1845,7 @@ function handler_script_config() {
     mkcp)
         # 为 mKCP 生成随机端口并更新 Seed，若用户指定了端口则使用指定的
         if [[ -z "${CONFIG_DATA['port']}" ]]; then
-            XRAY_PORT="$(exec_generate '--port')"
+            XRAY_PORT="$(generate_unique_multi_port '' 'mKCP')" || return 1
         else
             XRAY_PORT="${CONFIG_DATA['port']}"
         fi
@@ -4387,7 +4457,7 @@ function handler_change_xray_port() {
     case "${CONFIG_TAG,,}" in
     mkcp)
         # 输入为空，则默认为 mKCP 生成随机端口
-        XRAY_PORT="${CONFIG_DATA['port']:-$(exec_generate '--port')}"
+        XRAY_PORT="$(generate_unique_multi_port "${CONFIG_DATA['port']:-}" 'mKCP')" || return 1
         ;;
     *)
         # 输入为空，则使用默认端口
@@ -4427,6 +4497,54 @@ function restore_xray_binary_snapshot() {
         rm -f -- "${XRAY_BIN_PATH}" || return 1
     fi
     rmdir -- "${snapshot_dir}" 2>/dev/null || true
+}
+
+function restore_xray_install_snapshot() {
+    local snapshot_dir="$1" binary_existed="$2"
+    local was_active="$3" was_enabled="$4"
+    local restore_status=0 service_query_status=0
+
+    # The upstream installer can stop the old daemon or start the replacement
+    # before it reports failure. Stop that process before putting the old binary
+    # back, then restore the service's previous active/enabled state explicitly.
+    if systemctl -q is-active xray; then
+        if ! systemctl -q stop xray; then
+            echo "Xray install rollback could not stop the replacement service; binary recovery data retained at: ${snapshot_dir}" >&2
+            return 1
+        fi
+    else
+        service_query_status=$?
+        # is-active: 3 = inactive/failed, 4 = unknown/missing unit. A missing
+        # unit is expected after an interrupted first installation, while it
+        # cannot establish that an existing daemon was safely stopped.
+        if [[ "${service_query_status}" -ne 3 ]] &&
+            ! { [[ "${service_query_status}" -eq 4 && "${binary_existed}" -eq 0 &&
+                "${was_active}" -eq 0 && "${was_enabled}" -eq 0 ]]; }; then
+            echo "Xray install rollback could not determine the service state; binary recovery data retained at: ${snapshot_dir}" >&2
+            return 1
+        fi
+    fi
+    if ! restore_xray_binary_snapshot "${snapshot_dir}" "${binary_existed}"; then
+        log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${snapshot_dir}" >&2
+        return 1
+    fi
+    if [[ "${was_enabled}" -eq 1 ]]; then
+        if ! systemctl -q is-enabled xray && ! systemctl -q enable xray; then
+            restore_status=1
+        fi
+    elif systemctl -q is-enabled xray && ! systemctl -q disable xray; then
+        restore_status=1
+    fi
+    if [[ "${was_active}" -eq 1 ]]; then
+        systemctl reset-failed xray 2>/dev/null || true
+        if ! systemctl -q start xray || ! systemctl -q is-active xray; then
+            restore_status=1
+        fi
+    fi
+    if [[ "${restore_status}" -ne 0 ]]; then
+        echo 'Xray binary was restored, but its previous service state could not be fully recovered.' >&2
+    fi
+    return "${restore_status}"
 }
 
 function discard_xray_binary_snapshot() {
@@ -4481,6 +4599,7 @@ function handler_install() {
     local resolved_version="${3:-n}"
     local staged_config='' staged_script_config=''
     local binary_snapshot_dir='' binary_parent='' binary_existed=0
+    local service_was_active=0 service_was_enabled=0 service_query_status=0
 
     force_install="${force_install,,}"
     resolved_version="${resolved_version,,}"
@@ -4553,12 +4672,25 @@ function handler_install() {
             fi
             binary_existed=1
         fi
+        if systemctl -q is-active xray; then
+            service_was_active=1
+        else
+            service_query_status=$?
+            if [[ "${service_query_status}" -ne 3 && "${service_query_status}" -ne 4 ]]; then
+                rm -f -- "${staged_config}"
+                discard_xray_binary_snapshot "${binary_snapshot_dir}" || true
+                log_error 'Unable to determine the Xray service state; installation was not started.' >&2
+                return 1
+            fi
+        fi
+        systemctl -q is-enabled xray && service_was_enabled=1
         if ! bash -s -- install --version "${CONFIG_DATA['version']}" <<<"${script_content}"; then
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
             log_error "$(t ".${CUR_FILE}.gh_proxy.install_fail")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
-                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                ! restore_xray_install_snapshot "${binary_snapshot_dir}" "${binary_existed}" \
+                    "${service_was_active}" "${service_was_enabled}"; then
+                log_error 'Xray installation rollback failed.' >&2
             fi
             return 1
         fi
@@ -4566,8 +4698,9 @@ function handler_install() {
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
             log_error "$(t ".${CUR_FILE}.gh_proxy.version_mismatch" ".${CUR_FILE}.gh_proxy.xray_missing")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
-                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                ! restore_xray_install_snapshot "${binary_snapshot_dir}" "${binary_existed}" \
+                    "${service_was_active}" "${service_was_enabled}"; then
+                log_error 'Xray installation rollback failed.' >&2
             fi
             return 1
         fi
@@ -4575,8 +4708,9 @@ function handler_install() {
             rm -f -- "${staged_config}"
             staged_config=''
             if [[ -n "${binary_snapshot_dir}" ]] &&
-                ! restore_xray_binary_snapshot "${binary_snapshot_dir}" "${binary_existed}"; then
-                log_error "$(t ".${CUR_FILE}.gh_proxy.binary_restore_fail") ${binary_snapshot_dir}" >&2
+                ! restore_xray_install_snapshot "${binary_snapshot_dir}" "${binary_existed}" \
+                    "${service_was_active}" "${service_was_enabled}"; then
+                log_error 'Xray installation rollback failed.' >&2
             fi
             log_error "$(t ".${CUR_FILE}.gh_proxy.config_commit_fail")" >&2
             return 1

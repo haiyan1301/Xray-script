@@ -325,42 +325,28 @@ function reset_share_state() {
 # 返回值: 无 (直接修改全局变量 XHTTP_EXTRA 和 XHTTP_EXTRA_ENCODED)
 # =============================================================================
 function get_tls_down_json() {
-    # 从脚本配置中获取 CDN 域名作为服务器名称
-    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-    # 从脚本配置中获取 Xray 的路径
-    local sni_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
-
+    local server_name sni_path xhttp_mode obfs_json
+    server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')" || return 1
+    sni_path="${CLIENT_CONFIG[path]:-}"
+    xhttp_mode="${CLIENT_CONFIG[mode]:-auto}"
     [[ -n "${server_name}" && -n "${sni_path}" ]] || return 1
+    obfs_json="$(build_xhttp_obfs_extra 2)" || return 1
 
-    # 使用 Here Document 构造 XHTTP 下行设置的 JSON 字符串
-    XHTTP_EXTRA=$(
-        cat <<EOF
-{
-    "downloadSettings": {
-        "address": "${server_name}",
-        "port": 443,
-        "network": "xhttp",
-        "security": "tls",
-        "tlsSettings": {
-            "serverName": "${server_name}",
-            "allowInsecure": false,
-            "alpn": [
-                "h2"
-            ],
-            "fingerprint": "chrome"
-        },
-        "xhttpSettings": {
-            "host": "${server_name}",
-            "path": "${sni_path}",
-            "mode": "auto"
-        }
-    }
-}
-EOF
-    )
-
-    # 将生成的 JSON 字符串通过管道传递给 jq 格式化，再传递给 urlencode 进行编码
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode) || return 1
+    # 下行连接是独立的 XHTTP transport，必须携带与服务端一致的会话/
+    # 填充字段及模式。只在上行 extra 写这些字段会使下行请求无法匹配。
+    XHTTP_EXTRA="$(jq -n \
+        --arg host "${server_name}" --arg path "${sni_path}" \
+        --arg mode "${xhttp_mode}" --argjson obfs "${obfs_json}" '
+        {downloadSettings: {
+            address: $host, port: 443, network: "xhttp", security: "tls",
+            tlsSettings: {
+                serverName: $host, allowInsecure: false,
+                alpn: ["h2"], fingerprint: "chrome"
+            },
+            xhttpSettings: {host: $host, path: $path, mode: $mode, extra: $obfs}
+        }}
+    ')" || return 1
+    XHTTP_EXTRA_ENCODED="$(urlencode "${XHTTP_EXTRA}")" || return 1
 }
 
 # =============================================================================
@@ -372,52 +358,34 @@ EOF
 # 返回值: 无 (直接修改全局变量 XHTTP_EXTRA 和 XHTTP_EXTRA_ENCODED)
 # =============================================================================
 function get_reality_down_json() {
-    local inbound_index=1 # 指定要读取的 inbound 索引 (通常为 fallback inbound)
-
-    # 从脚本配置中获取主域名作为服务器名称
-    local server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
-    # 从脚本配置中获取 Reality 公钥
-    local public_key="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.publicKey // ""')"
-    # 从脚本配置中获取 Xray 路径
-    local sni_path="$(normalize_xhttp_path "$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.path // ""')")"
-    # 从 Xray 配置中随机获取一个 Reality 的 Short ID
-    local short_id="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
-        (.inbounds[$i].streamSettings.realitySettings.shortIds // []) as $ids |
+    local server_name public_key short_id sni_path xhttp_mode verify obfs_json
+    server_name="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')" || return 1
+    public_key="${CLIENT_CONFIG[public_key]:-}"
+    sni_path="${CLIENT_CONFIG[path]:-}"
+    xhttp_mode="${CLIENT_CONFIG[mode]:-auto}"
+    verify="${CLIENT_CONFIG[mldsa65_verify]:-}"
+    short_id="$(echo "${XRAY_CONFIG}" | jq -r --argjson random "$(bash "${GENERATE_PATH}" '--random')" '
+        (.inbounds[1].streamSettings.realitySettings.shortIds // []) as $ids |
         if ($ids | length) > 0 then $ids[$random % ($ids | length)] else "" end
-    ')"
+    ')" || return 1
+    [[ -n "${server_name}" && -n "${public_key}" && -n "${sni_path}" ]] || return 1
+    obfs_json="$(build_xhttp_obfs_extra 2)" || return 1
 
-    [[ -n "${server_name}" && -n "${public_key}" &&
-        -n "${sni_path}" ]] || return 1
-
-    # 使用 Here Document 构造 Reality 下行设置的 JSON 字符串
-    XHTTP_EXTRA=$(
-        cat <<EOF
-{
-    "downloadSettings": {
-        "address": "${server_name}",
-        "port": 443,
-        "network": "xhttp",
-        "security": "reality",
-        "realitySettings": {
-            "show": false,
-            "serverName": "${server_name}",
-            "fingerprint": "chrome",
-            "publicKey": "${public_key}",
-            "shortId": "${short_id}",
-            "spiderX": "/"
-        },
-        "xhttpSettings": {
-            "host": "",
-            "path": "${sni_path}",
-            "mode": "auto"
-        }
-    }
-}
-EOF
-    )
-
-    # 将生成的 JSON 字符串通过管道传递给 jq 格式化，再传递给 urlencode 进行编码
-    XHTTP_EXTRA_ENCODED=$(echo "${XHTTP_EXTRA}" | jq -r '.' | urlencode) || return 1
+    XHTTP_EXTRA="$(jq -n \
+        --arg host "${server_name}" --arg path "${sni_path}" \
+        --arg key "${public_key}" --arg short_id "${short_id}" \
+        --arg mode "${xhttp_mode}" --arg verify "${verify}" \
+        --argjson obfs "${obfs_json}" '
+        {downloadSettings: {
+            address: $host, port: 443, network: "xhttp", security: "reality",
+            realitySettings: ({
+                show: false, serverName: $host, fingerprint: "chrome",
+                publicKey: $key, shortId: $short_id, spiderX: "/"
+            } + if $verify != "" then {mldsa65Verify: $verify} else {} end),
+            xhttpSettings: {host: "", path: $path, mode: $mode, extra: $obfs}
+        }}
+    ')" || return 1
+    XHTTP_EXTRA_ENCODED="$(urlencode "${XHTTP_EXTRA}")" || return 1
 }
 
 # =============================================================================
@@ -854,9 +822,8 @@ function get_sni_tls_down_share_link() {
 # 返回值: 无 (直接修改全局变量 SHARE_LINK)
 # =============================================================================
 function get_sni_reality_down_share_link() {
-    # Reality remains the uplink security; XHTTP_EXTRA already contains the
-    # Reality download settings prepared by get_reality_down_json.
-    get_fallback_xhttp_share_link || return 1
+    # CDN/TLS carries the uplink; the independent download transport uses REALITY.
+    get_sni_tls_share_link || return 1
 }
 
 # =============================================================================

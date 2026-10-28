@@ -21,4 +21,35 @@ jobs:
         run: >-
           shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034,SC2155
           install.sh core/*.sh lib/*.sh service/*.sh tool/*.sh
-          config/lan/*.sh config/cloudflare-warp/*.sh
+          config/lan/*.sh config/cloudflare-warp/*.sh tests/run_isolated.sh
+
+  isolated-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12-slim
+            name: debian-12
+          - image: ubuntu:24.04
+            name: ubuntu-24
+    name: Real core lifecycle (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify two official releases
+        run: |
+          python3 tests/download_core.py --version v26.10.21 --output "${RUNNER_TEMP}/core-new"
+          python3 tests/download_core.py --version v26.9.30 --output "${RUNNER_TEMP}/core-old"
+      - name: Run isolated regressions, core startup matrix, and installer lifecycle
+        run: |
+          set -o pipefail
+          bash tests/run_isolated.sh '${{ matrix.image }}' "${RUNNER_TEMP}/core-new" "${RUNNER_TEMP}/core-old" \
+            2>&1 | tee "integration-${{ matrix.name }}.log"
+      - name: Preserve integration results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-${{ matrix.name }}
+          path: integration-${{ matrix.name }}.log
+          if-no-files-found: ignore

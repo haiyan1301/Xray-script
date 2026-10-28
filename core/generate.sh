@@ -46,11 +46,14 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json" # 脚本主要配
 # 返回值: 生成的随机数 (echo 输出)
 # =============================================================================
 function generate_random() {
-    local custom_min=${1} # 获取第一个参数作为自定义最小值
-    local custom_max=${2} # 获取第二个参数作为自定义最大值
+    local custom_min=${1:-} # 获取第一个参数作为自定义最小值
+    local custom_max=${2:-} # 获取第二个参数作为自定义最大值
 
     # 使用 /dev/urandom 生成一个无符号32位随机整数
-    local random=$(od -An -N4 -tu4 </dev/urandom)
+    local random
+    random="$(od -An -N4 -tu4 </dev/urandom)" || return 1
+    random="${random//[[:space:]]/}"
+    [[ "${random}" =~ ^[0-9]+$ ]] || return 1
 
     # 检查自定义的最小值和最大值是否为有效正整数，并且最小值小于最大值
     if [[ ${custom_min} =~ ^[0-9]+$ && ${custom_max} =~ ^[0-9]+$ ]] && ((custom_min < custom_max)); then
@@ -73,7 +76,7 @@ function generate_random() {
 # =============================================================================
 function generate_port() {
     # 调用 generate_random 函数，指定范围为 1025 到 65535
-    echo "$(generate_random 1025 65535)"
+    generate_random 1025 65535
 }
 
 # =============================================================================
@@ -85,7 +88,7 @@ function generate_port() {
 # 返回值: 生成的 UUID 字符串 (echo 输出)
 # =============================================================================
 function generate_uuid() {
-    local input="${1}" # 获取可选的输入参数
+    local input="${1:-}" # 获取可选的输入参数
     local uuid         # 声明用于存储 UUID 的局部变量
 
     # 标准格式的 UUID 无需 xray 派生，直接采用
@@ -99,10 +102,10 @@ function generate_uuid() {
         # 如果没有提供输入参数
         if [[ -z "${input}" ]]; then
             # 直接生成一个新的 UUID
-            uuid=$(xray uuid)
+            uuid=$(xray uuid) || return 1
         else
             # 否则，使用提供的输入字符串生成一个基于该输入的 UUID
-            uuid=$(xray uuid -i "${input}")
+            uuid=$(xray uuid -i "${input}") || return 1
         fi
     else
         # 没有 xray 就无法把自定义输入派生为 UUID。静默返回随机 UUID 会让用户
@@ -112,10 +115,10 @@ function generate_uuid() {
             return 1
         fi
         # 如果没有安装 xray，则使用系统方法生成 UUID
-        uuid=$(cat /proc/sys/kernel/random/uuid)
+        uuid=$(cat /proc/sys/kernel/random/uuid) || return 1
     fi
     # 生成失败时输出空串会写出非法配置，因此一并拦截
-    if [[ -z "${uuid}" ]]; then
+    if [[ ! "${uuid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
         echo "Failed to generate a UUID" >&2
         return 1
     fi
@@ -130,13 +133,24 @@ function generate_uuid() {
 # 参数: 无
 # 返回值: 生成的随机密码 (echo 输出)
 # =============================================================================
-function generate_password() {
-    # 首先生成一个 16 到 64 之间的随机数作为密码长度
-    local length=$(generate_random 16 64)
+function generate_random_string() {
+    local length="$1" alphabet="$2"
+    local value='' chunk
+    # 使用有限长度的输入，避免 urandom | ... | head 的 SIGPIPE 在
+    # pipefail 下把成功生成密码误报为失败，并显式传播熵源读取错误。
+    while ((${#value} < length)); do
+        chunk="$(openssl rand -base64 "${length}")" || return 1
+        chunk="$(printf '%s' "${chunk}" | tr '+/' '!@' | LC_ALL=C tr -cd "${alphabet}")" || return 1
+        [[ -n "${chunk}" ]] || return 1
+        value+="${chunk}"
+    done
+    printf '%s\n' "${value:0:length}"
+}
 
-    # 从 /dev/urandom 读取随机字节，通过 tr 过滤出指定字符集，
-    # 再用 fold 按指定长度换行，最后用 head 取第一行作为密码
-    cat /dev/urandom | tr -cd '0-9a-zA-Z!@$%*' | fold -w $length | head -n 1
+function generate_password() {
+    local length
+    length="$(generate_random 16 64)" || return 1
+    generate_random_string "${length}" '0-9a-zA-Z!@$%*'
 }
 
 # =============================================================================
@@ -147,9 +161,9 @@ function generate_password() {
 # 返回值: 生成的 HY2 auth 密码 (echo 输出)
 # =============================================================================
 function generate_hy2_auth() {
-    local length=$(generate_random 16 64)
-
-    cat /dev/urandom | tr -cd '0-9a-zA-Z' | fold -w $length | head -n 1
+    local length
+    length="$(generate_random 16 64)" || return 1
+    generate_random_string "${length}" '0-9a-zA-Z'
 }
 
 # =============================================================================
@@ -162,7 +176,8 @@ function generate_hy2_auth() {
 # =============================================================================
 function generate_target() {
     # 生成一个随机数作为索引
-    local random=$(generate_random)
+    local random
+    random="$(generate_random)" || return 1
 
     # 使用 jq 读取配置文件，获取 .target 对象的所有键名(keys)，
     # 然后计算随机索引对键名数组长度取模，从而随机选择一个键名
@@ -316,7 +331,7 @@ function generate_mldsa65() {
 # 注意: 需要 openssl 命令支持
 # =============================================================================
 function generate_short_id() {
-    local input=$1 # 获取输入参数
+    local input=${1:-} # 获取输入参数
 
     # 使用 sed 去除输入参数首尾的空白字符
     local trimmed_input=$(echo "$input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -328,12 +343,16 @@ function generate_short_id() {
         length=$trimmed_input
     else
         # 如果不是，则生成一个 0-8 之间的随机长度
-        length=$(generate_random 0 8)
+        length=$(generate_random 0 8) || return 1
     fi
 
     # 如果长度为 0，则输出空字符串
     # 否则，使用 openssl 生成指定长度的十六进制随机字符串
-    [[ ${length} -eq 0 ]] && echo "" || echo "$(openssl rand -hex ${length})"
+    if [[ "${length}" -eq 0 ]]; then
+        printf '\n'
+    else
+        openssl rand -hex "${length}"
+    fi
 }
 
 # =============================================================================
@@ -350,6 +369,7 @@ function generate_short_id() {
 function generate_short_ids() {
     local -a ids=()  # 声明一个数组用于存储生成的 ID
     local -a args=() # 声明一个数组用于存储输入参数
+    local arg generated encoded
 
     # 将所有输入参数按空格分割并存入 args 数组
     IFS=' ' read -r -a args <<<"$@"
@@ -358,14 +378,14 @@ function generate_short_ids() {
     for arg in "${args[@]}"; do
         # 如果参数是 0-8 的数字
         if [[ $arg =~ ^[0-8]$ ]]; then
-            # 调用 generate_short_id 生成对应长度的 ID，
-            # 并使用 jq -R 将其转换为 JSON 字符串格式后添加到 ids 数组
-            ids+=("$(generate_short_id "${arg}" | jq -R)")
+            # 调用 generate_short_id 生成对应长度的 ID。
+            generated="$(generate_short_id "${arg}")" || return 1
         else
-            # 如果不是数字，则直接将参数作为 ID 值，
-            # 同样使用 jq -R 转换为 JSON 字符串格式后添加到 ids 数组
-            ids+=("$(echo "${arg}" | jq -R)")
+            # 如果不是数字，则直接将参数作为 ID 值。
+            generated="${arg}"
         fi
+        encoded="$(jq -n --arg id "${generated}" '$id')" || return 1
+        ids+=("${encoded}")
     done
 
     # 将 ids 数组中的所有元素作为独立参数传递给 echo，
@@ -385,11 +405,11 @@ function generate_short_ids() {
 # =============================================================================
 function generate_path() {
     # 生成一个 16 到 64 之间的随机数作为路径长度
-    local length=$(generate_random 16 64)
+    local length domain_path
+    length="$(generate_random 16 64)" || return 1
 
-    # 从 /dev/urandom 读取随机字节，通过 tr 过滤出字母和数字，
-    # 再用 fold 按指定长度换行，最后用 head 取第一行作为路径主体
-    local domain_path=$(cat /dev/urandom | tr -cd 'a-zA-Z0-9' | fold -w $length | head -n 1)
+    # 路径与密码共用有限长度的安全随机字符串生成器。
+    domain_path="$(generate_random_string "${length}" 'a-zA-Z0-9')" || return 1
 
     # 在路径主体前后加上 '/' 并输出
     echo "/${domain_path}/"

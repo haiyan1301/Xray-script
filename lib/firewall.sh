@@ -244,7 +244,13 @@ function firewall_rule_exists() {
     firewalld)
         command -v firewall-cmd &>/dev/null || return 2
         [[ "$(firewall-cmd --state 2>/dev/null)" == 'running' ]] || return 2
-        firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1
+        if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
+            return 0
+        else
+            status=$?
+            [[ "${status}" -eq 1 ]] && return 1
+            return 2
+        fi
         ;;
     iptables)
         if [[ "${ipv4}" == 'true' ]]; then
@@ -282,12 +288,13 @@ function firewall_rule_remove_fields() {
     local protocol="$3"
     local ipv4="$4"
     local ipv6="$5"
+    local status='' query_status=0
 
     case "${backend}" in
     ufw)
         command -v ufw &>/dev/null || return 1
-        if ufw show added 2>/dev/null |
-            grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)"; then
+        status="$(ufw show added 2>/dev/null)" || return 1
+        if grep -Eq "^ufw allow ${port}/${protocol}([[:space:]]|$)" <<<"${status}"; then
             ufw delete allow "${port}"/"${protocol}" >/dev/null 2>&1
         fi
         ;;
@@ -297,6 +304,9 @@ function firewall_rule_remove_fields() {
         if firewall-cmd --permanent --query-port="${port}"/"${protocol}" >/dev/null 2>&1; then
             firewall-cmd --permanent --remove-port="${port}"/"${protocol}" >/dev/null 2>&1 &&
                 firewall-cmd --reload >/dev/null 2>&1
+        else
+            query_status=$?
+            [[ "${query_status}" -eq 1 ]] || return 1
         fi
         ;;
     iptables)
@@ -304,12 +314,16 @@ function firewall_rule_remove_fields() {
             command -v iptables &>/dev/null || return 1
             if iptables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
                 iptables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
+            else
+                iptables -S INPUT >/dev/null 2>&1 || return 1
             fi
         fi
         if [[ "${ipv6}" == 'true' ]]; then
             command -v ip6tables &>/dev/null || return 1
             if ip6tables -C INPUT -p "${protocol}" --dport "${port}" -j ACCEPT 2>/dev/null; then
                 ip6tables -D INPUT -p "${protocol}" --dport "${port}" -j ACCEPT >/dev/null 2>&1 || return 1
+            else
+                ip6tables -S INPUT >/dev/null 2>&1 || return 1
             fi
         fi
         ;;

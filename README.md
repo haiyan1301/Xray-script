@@ -167,7 +167,16 @@ mKCP 与包含 mKCP 的多节点配置同步适配 Xray v26.10.21 的 `mkcp-lega
 
 开发验证：`python3 -m unittest discover -s tests -v`。回归测试使用临时目录和模拟安装器，不修改系统服务，也不需要 root 或网络。
 
-实际内核配置验证：`python3 tests/check_core_configs.py --xray /path/to/xray`，需在内核旁放置官方压缩包中的 `geoip.dat` 和 `geosite.dat`。该检查生成 11 组配置，通过 `xray run -test` 验证，不启动服务。
+实际内核验证（需要网络下载官方内核和校验摘要）：
+
+```sh
+python3 tests/download_core.py --version v26.10.21 --output /tmp/xray-audit-core
+python3 tests/check_core_configs.py --xray /tmp/xray-audit-core/xray
+```
+
+该检查覆盖所有单节点模式、CDN 两种后端、多节点和可选加密参数，使用 `xray run -test` 校验。加上 `--smoke` 会在临时目录启动真实内核、检查监听并清理进程；需要本机端口资源，不修改系统服务。
+
+云端隔离安装、升级、失败回滚与卸载验证及本轮审查范围见 [AUDIT.md](AUDIT.md)。真实证书签发、CDN 回源和跨主机组网仍需在自己的域名及网络环境中验收。
 
 ## 脚本界面
 

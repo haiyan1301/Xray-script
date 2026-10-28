@@ -89,7 +89,8 @@ else
         local content="$1"
         local target="$2"
         local temp_file
-        if [[ -z "${content}" ]] || ! printf '%s\n' "${content}" | jq empty 2>/dev/null; then
+        if [[ -z "${content}" ]] || ! printf '%s\n' "${content}" |
+            jq -se 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
             echo -e "${RED}[错误]${NC} 拒绝写入空内容到 $2" >&2
             return 1
         fi
@@ -473,6 +474,25 @@ function download_xray_script_files() {
     # 调用 download_github_files 下载项目
     download_github_files "${target_dir}" "${script_github_api}"
 }
+
+# Download defaults separately from persistent state. A failed/truncated response
+# must never replace an existing configuration (including a recoverable backup).
+function download_default_script_config() (
+    local config_temp=''
+    config_temp="$(mktemp "${SCRIPT_CONFIG_PATH}.download.XXXXXX")" || return 1
+    trap 'rm -f -- "${config_temp}"' EXIT
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 \
+        -o "${config_temp}" \
+        "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json" || return 1
+    jq -se 'length == 1 and (.[0] | type == "object" and
+        (.xray | type == "object") and (.nginx | type == "object"))' \
+        "${config_temp}" >/dev/null || return 1
+    if [[ -e "${SCRIPT_CONFIG_PATH}" ]]; then
+        backup_config "${SCRIPT_CONFIG_PATH}" || return 1
+    fi
+    chmod 600 "${config_temp}" || return 1
+    mv -f -- "${config_temp}" "${SCRIPT_CONFIG_PATH}"
+)
 
 function valid_script_version() {
     [[ "$1" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]
@@ -928,14 +948,11 @@ function main() {
             _error "${I18N_DATA['failed']}: ${SCRIPT_CONFIG_DIR}"
     fi
     # 如果配置文件不存在，或内容为空/不是有效 JSON，则重新下载
-    if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]] || [[ ! -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then
-        if ! wget -O "${SCRIPT_CONFIG_PATH}" "https://raw.githubusercontent.com/${SCRIPT_REPO_OWNER}/${SCRIPT_REPO_NAME}/main/config.json"; then
+    if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]] || ! jq -se 'length == 1 and
+        (.[0] | type == "object" and (.xray | type == "object") and (.nginx | type == "object"))' \
+        "${SCRIPT_CONFIG_PATH}" >/dev/null 2>&1; then
+        if ! download_default_script_config; then
             _error "${I18N_DATA['failed']}: config.json"
-        fi
-        chmod 600 "${SCRIPT_CONFIG_PATH}"
-        # 校验下载结果非空且为有效 JSON，避免后续流程使用损坏的配置文件
-        if ! [[ -s "${SCRIPT_CONFIG_PATH}" ]] || ! jq empty "${SCRIPT_CONFIG_PATH}" 2>/dev/null; then
-            _error "${I18N_DATA['failed']}: config.json (invalid)"
         fi
     fi
 
@@ -972,7 +989,7 @@ function main() {
         check_xray_script_version || _error "${I18N_DATA['failed']}: version state"
     else
         # 目录不存在或安装不完整时重新下载缺失文件。
-        download_xray_script_files "${PROJECT_ROOT}"
+        download_xray_script_files "${PROJECT_ROOT}" || _error "${I18N_DATA['failed']}: ${PROJECT_ROOT}"
         project_installation_complete "${PROJECT_ROOT}" || _error "${I18N_DATA['failed']}: invalid Xray-script archive"
     fi
 

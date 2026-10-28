@@ -63,7 +63,7 @@ class RegressionTests(unittest.TestCase):
         if handler:
             prefix = (
                 f"source {shlex.quote(str(ROOT / 'core/handler.sh'))}\n"
-                "sync() { :; }\nload_i18n\n"
+                "sync() { :; }\nsystemctl() { [[ \"$*\" != *is-active* ]] || return 3; return 1; }\nload_i18n\n"
             )
         result = subprocess.run(
             ["bash", "-c", prefix + body],
