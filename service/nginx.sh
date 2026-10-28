@@ -106,16 +106,18 @@ function egress() {
 # 函数名称: _error_detect
 # 功能描述: 执行命令并检查其退出状态，如果失败则打印错误并退出。
 # 参数:
-#   $1: 要执行的命令字符串
+#   $@: 命令及其参数（保持参数边界，不经过 shell 二次解析）
 # 返回值: 无 (执行成功或失败后退出)
 # =============================================================================
 function _error_detect() {
-    local cmd="$1"                                                                                 # 获取要执行的命令
-    print_info "$(t '.nginx.compile.executing' | sed "s|\${cmd}|${cmd}|")" # 打印将要执行的命令
-    eval "${cmd}"                                                                                  # 执行命令
-    # 检查命令执行的退出状态
-    if [[ $? -ne 0 ]]; then
-        print_error "$(t '.nginx.compile.fail_exec_cmd' | sed "s|\${cmd}|${cmd}|")" # 如果失败则打印错误并退出
+    local cmd message
+    printf -v cmd '%q ' "$@"
+    cmd="${cmd% }"
+    message="$(t '.nginx.compile.executing')"
+    print_info "${message//'${cmd}'/"${cmd}"}"
+    if ! "$@"; then
+        message="$(t '.nginx.compile.fail_exec_cmd')"
+        print_error "${message//'${cmd}'/"${cmd}"}"
     fi
 }
 
@@ -160,52 +162,53 @@ function fetch_latest_nginx_version() {
 # 返回值: 无 (执行包管理器命令安装软件)
 # =============================================================================
 function _install() {
-    local packages_name="$@"
+    local -a packages_name=("$@")
+    local package_name
 
     case "$(_os)" in # 根据操作系统类型进行分支处理
     centos)
         # 检查是否使用 dnf 包管理器 (较新版本 CentOS/Fedora)
         if cmd_exists "dnf"; then
             # 添加必要的 dnf 插件和 EPEL 源
-            packages_name="dnf-plugins-core epel-release epel-next-release ${packages_name}"
+            packages_name=(dnf-plugins-core epel-release epel-next-release "${packages_name[@]}")
             # 针对 CentOS 9 的特殊处理
             if [[ -n "$(_os_ver)" && "$(_os_ver)" -eq 9 ]]; then
                 # 启用 EPEL 和 Remi 仓库
-                if [[ "${packages_name}" =~ geoip\-devel ]] && ! rpm_package_installed GeoIP-devel; then
+                if [[ "${packages_name[*],,}" == *geoip-devel* ]] && ! rpm_package_installed GeoIP-devel; then
                     dnf update -y
                     # 安装 EPEL 和 EPEL-Next 源
-                    _error_detect "dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
-                    _error_detect "dnf install -y https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm"
-                    _error_detect "dnf install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm"
+                    _error_detect dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+                    _error_detect dnf install -y https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm
+                    _error_detect dnf install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm
                     # 启用 Remi 模块化仓库
-                    _error_detect "dnf config-manager --set-enabled remi-modular"
+                    _error_detect dnf config-manager --set-enabled remi-modular
                     # 刷新包信息
-                    _error_detect "dnf update --refresh"
+                    _error_detect dnf update --refresh
                     # 安装 GeoIP-devel，指定使用 Remi 仓库
                     dnf update -y
-                    _error_detect "dnf --enablerepo=remi install -y GeoIP-devel"
+                    _error_detect dnf --enablerepo=remi install -y GeoIP-devel
                 fi
             # 针对 CentOS 8 的特殊处理
             elif [[ -n "$(_os_ver)" && "$(_os_ver)" -eq 8 ]]; then
                 # 禁用可能冲突的 container-tools 模块流
                 if ! dnf module list 2>/dev/null | grep container-tools | grep -iwq "\[x\]"; then
-                    _error_detect "dnf module disable -y container-tools"
+                    _error_detect dnf module disable -y container-tools
                 fi
             fi
             dnf update -y # 更新包列表
             # 遍历并安装每个包（如果尚未安装）
-            for package_name in ${packages_name}; do
+            for package_name in "${packages_name[@]}"; do
                 if ! rpm_package_installed "${package_name}"; then
-                    _error_detect "dnf install -y '${package_name}'"
+                    _error_detect dnf install -y "${package_name}"
                 fi
             done
         else
             # 使用 yum 包管理器 (较旧版本 CentOS)
-            packages_name="epel-release yum-utils ${packages_name}"
+            packages_name=(epel-release yum-utils "${packages_name[@]}")
             yum update -y
-            for package_name in ${packages_name}; do
+            for package_name in "${packages_name[@]}"; do
                 if ! rpm_package_installed "${package_name}"; then
-                    _error_detect "yum install -y '${package_name}'"
+                    _error_detect yum install -y "${package_name}"
                 fi
             done
         fi
@@ -213,9 +216,9 @@ function _install() {
     # 处理 Debian 和 Ubuntu 系统
     ubuntu | debian)
         apt update -y                                            # 更新包列表
-        for package_name in ${packages_name}; do
+        for package_name in "${packages_name[@]}"; do
             if ! dpkg -s "${package_name}" >/dev/null 2>&1; then
-                _error_detect "apt install -y '${package_name}'"
+                _error_detect apt install -y "${package_name}"
             fi
         done
         ;;
@@ -337,65 +340,14 @@ function compile_dependencies() {
 # 返回值: 无 (直接修改全局数组 cflags)
 # =============================================================================
 function gen_cflags() {
-    # 初始化 cflags 数组，包含基本优化
-    cflags=('-g0' '-O3') # -g0: 不生成调试信息; -O3: 最高级别优化
-    # 检查 GCC 是否支持特定标志，如果支持则添加到 cflags 数组中
-    # 这些检查旨在移除可能导致性能下降或不必要的安全特性
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-reuse"; then
-        cflags+=('-fstack-reuse=all')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fdwarf2\\-cfi\\-asm"; then
-        cflags+=('-fdwarf2-cfi-asm')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fplt"; then
-        cflags+=('-fplt')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-ftrapv"; then
-        cflags+=('-fno-trapv')
-    fi
-    # 异常处理相关
-    if gcc -v --help 2>&1 | grep -qw "\\-fexceptions"; then
-        cflags+=('-fno-exceptions')
-    elif gcc -v --help 2>&1 | grep -qw "\\-fhandle\\-exceptions"; then
-        cflags+=('-fno-handle-exceptions')
-    fi
-    # unwind 表相关
-    if gcc -v --help 2>&1 | grep -qw "\\-funwind\\-tables"; then
-        cflags+=('-fno-unwind-tables')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fasynchronous\\-unwind\\-tables"; then
-        cflags+=('-fno-asynchronous-unwind-tables')
-    fi
-    # 栈检查相关
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-check"; then
-        cflags+=('-fno-stack-check')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-clash\\-protection"; then
-        cflags+=('-fno-stack-clash-protection')
-    fi
-    if gcc -v --help 2>&1 | grep -qw "\\-fstack\\-protector"; then
-        cflags+=('-fno-stack-protector')
-    fi
-    # 控制流保护相关
-    if gcc -v --help 2>&1 | grep -qw "\\-fcf\\-protection="; then
-        cflags+=('-fcf-protection=none')
-    fi
-    # 分割栈相关
-    if gcc -v --help 2>&1 | grep -qw "\\-fsplit\\-stack"; then
-        cflags+=('-fno-split-stack')
-    fi
-    # sanitizer 相关
-    if gcc -v --help 2>&1 | grep -qw "\\-fsanitize"; then
-        >"${TMPFILE_DIR}/temp.c" # 创建一个空的 C 文件用于测试
-        if gcc -E -fno-sanitize=all "${TMPFILE_DIR}/temp.c" >/dev/null 2>&1; then
-            cflags+=('-fno-sanitize=all')
+    # Keep compiler hardening enabled for this public-facing TLS service.
+    local flag
+    cflags=('-g0' '-O2' '-D_FORTIFY_SOURCE=2')
+    for flag in -fstack-protector-strong -fstack-clash-protection -fcf-protection=full; do
+        if gcc -Werror "${flag}" -x c -c /dev/null -o /dev/null >/dev/null 2>&1; then
+            cflags+=("${flag}")
         fi
-        rm -f "${TMPFILE_DIR}/temp.c" # 删除临时文件
-    fi
-    # instrumentation 相关
-    if gcc -v --help 2>&1 | grep -qw "\\-finstrument\\-functions"; then
-        cflags+=('-fno-instrument-functions')
-    fi
+    done
 }
 
 # =============================================================================
@@ -632,8 +584,8 @@ function prebuilt_install() {
 
     cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
     print_info "$(t '.nginx.prebuilt.downloading') ${archive_name}"
-    _error_detect "curl -fsSL -o ${archive_name} ${download_url}"
-    _error_detect "tar -zxf ${archive_name}"
+    _error_detect curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "${archive_name}" "${download_url}"
+    _error_detect tar -zxf "${archive_name}" --no-same-owner --no-same-permissions
 
     # 确保 nginx 用户和组存在
     if ! id -u nginx &>/dev/null; then
@@ -724,18 +676,18 @@ function source_compile() {
 
     print_info "$(t '.nginx.compile.download_nginx')"
     # 下载 Nginx 源码包
-    _error_detect "curl -fsSL -o ${nginx_version}.tar.gz https://nginx.org/download/${nginx_version}.tar.gz"
+    _error_detect curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "${nginx_version}.tar.gz" "https://nginx.org/download/${nginx_version}.tar.gz"
     # 解压 Nginx 源码
-    _error_detect "tar -zxf ${nginx_version}.tar.gz"
+    _error_detect tar -zxf "${nginx_version}.tar.gz" --no-same-owner --no-same-permissions
 
     print_info "$(t '.nginx.compile.download_boringssl')"
     # 下载并编译 BoringSSL。Nginx 直接通过 include/lib 链接到已构建的 BoringSSL，
     # 不使用 --with-openssl，因为该参数要求 OpenSSL 源码树并会尝试执行 Configure/make。
-    _error_detect "git clone --depth=1 https://github.com/google/boringssl"
+    _error_detect git clone --depth=1 https://github.com/google/boringssl
     mkdir -p boringssl/build || print_error "Failed to create directory: boringssl/build"
     cd boringssl/build || print_error "Failed to enter directory: boringssl/build"
-    _error_detect "cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 .."
-    _error_detect "ninja -j$(nproc)"
+    _error_detect cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 ..
+    _error_detect ninja "-j$(nproc)"
     cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
 
     # 查找 BoringSSL 静态库（兼容不同版本/生成器的输出路径）。
@@ -761,7 +713,7 @@ function source_compile() {
     # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
     if [[ "${IS_ENABLE_BROTLI}" =~ ^[Yy]$ ]]; then
         print_info "$(t '.nginx.compile.fetch_brotli')"
-        _error_detect "git clone --recursive https://github.com/google/ngx_brotli"
+        _error_detect git clone --recursive https://github.com/google/ngx_brotli
         cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}" # 返回临时目录
     fi
 
@@ -847,7 +799,7 @@ function source_compile() {
 
     print_info "$(t '.nginx.compile.start_compile')"
     # 使用所有 CPU 核心并行编译
-    _error_detect "make -j$(nproc)"
+    _error_detect make "-j$(nproc)"
 }
 
 # =============================================================================

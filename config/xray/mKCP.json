@@ -83,9 +83,9 @@
         "finalmask": {
           "udp": [
             {
-              "type": "mkcp-aes128gcm",
+              "type": "mkcp-legacy",
               "settings": {
-                "password": "{{ seed }}"
+                "value": "{{ seed }}"
               }
             }
           ]

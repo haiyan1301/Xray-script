@@ -209,7 +209,11 @@ function get_common_config() {
     # 从 Xray 配置中获取 mKCP 的种子 (seed)
     CLIENT_CONFIG[seed]="$(echo "${XRAY_CONFIG}" | jq -r --argjson i "${inbound_index}" '
         .inbounds[$i].streamSettings as $stream |
-        ($stream.finalmask.udp[]? | select(.type == "mkcp-aes128gcm") | .settings.password) //
+        ([$stream.finalmask.udp[]? |
+            if .type == "mkcp-legacy" and (.settings.header // "") == "" then .settings.value
+            elif .type == "mkcp-aes128gcm" then .settings.password
+            else empty end
+        ][0]) //
         $stream.kcpSettings.seed // empty
     ')"
     # 从 Xray 配置中获取网络传输类型 (如 tcp, kcp, xhttp)

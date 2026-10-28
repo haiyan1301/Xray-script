@@ -60,6 +60,9 @@ readonly LAN_PATH="${CUR_DIR}/lan.sh"
 readonly XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH_OVERRIDE:-/usr/local/etc/xray/config.json}"
 readonly XRAY_BIN_PATH="${XRAY_BIN_PATH_OVERRIDE:-/usr/local/bin/xray}"
 readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_PATH_OVERRIDE:-${SCRIPT_CONFIG_DIR}/config.json}"
+# Keep the installer API and its contents stable, including when using a mirror.
+readonly XRAY_INSTALL_COMMIT='e42df6a772e60dd7b058f852262c4dbeb0bc231d'
+readonly XRAY_INSTALL_SHA256='954666bb028ba8561b2218372b7db76ba051f8252b2db9195321e672263aab94'
 readonly ACME_PATH="${HOME}/.acme.sh/acme.sh"
 readonly CDN_XRAY_CERT_ROOT="${CDN_XRAY_CERT_DIR_OVERRIDE:-/usr/local/etc/xray/certs/cdn}"
 # Keep the old variable as a root-path compatibility alias for callers that
@@ -244,6 +247,18 @@ function reject_nginx_action_in_cdn_direct_mode() {
     return 1
 }
 
+function set_xray_config_permissions() {
+    local target="$1"
+
+    # Runtime JSON contains client passwords and REALITY private keys.
+    if id -u xray >/dev/null 2>&1; then
+        chown root:xray "${target}" || return 1
+        chmod 640 "${target}" || return 1
+    else
+        chmod 600 "${target}" || return 1
+    fi
+}
+
 function write_xray_runtime_config() {
     local content="$1"
     local target="${XRAY_CONFIG_PATH}"
@@ -269,15 +284,10 @@ function write_xray_runtime_config() {
         fi
     fi
 
-    if [[ -e "${target}" ]]; then
-        chmod --reference="${target}" "${temp_file}" 2>/dev/null || chmod 644 "${temp_file}"
-        chown --reference="${target}" "${temp_file}" 2>/dev/null || true
-    elif id -u xray >/dev/null 2>&1; then
-        chown root:xray "${temp_file}" 2>/dev/null || true
-        chmod 640 "${temp_file}"
-    else
-        chmod 644 "${temp_file}"
-    fi
+    set_xray_config_permissions "${temp_file}" || {
+        rm -f -- "${temp_file}"
+        return 1
+    }
 
     mv -f -- "${temp_file}" "${target}" || {
         rm -f -- "${temp_file}"
@@ -321,8 +331,6 @@ function commit_xray_and_script_config() {
 
     if [[ -e "${XRAY_CONFIG_PATH}" ]]; then
         runtime_existed=1
-        chmod --reference="${XRAY_CONFIG_PATH}" "${runtime_temp}" 2>/dev/null || chmod 644 "${runtime_temp}"
-        chown --reference="${XRAY_CONFIG_PATH}" "${runtime_temp}" 2>/dev/null || true
         runtime_backup="$(mktemp "${XRAY_CONFIG_PATH}.rollback.XXXXXX")" || {
             rm -f -- "${runtime_temp}" "${script_temp}"
             return 1
@@ -331,14 +339,16 @@ function commit_xray_and_script_config() {
             rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}"
             return 1
         }
-    elif id -u xray >/dev/null 2>&1; then
-        chown root:xray "${runtime_temp}" 2>/dev/null || true
-        chmod 640 "${runtime_temp}"
-    else
-        chmod 644 "${runtime_temp}"
     fi
+    set_xray_config_permissions "${runtime_temp}" || {
+        rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}"
+        return 1
+    }
 
-    chmod 600 "${script_temp}"
+    chmod 600 "${script_temp}" || {
+        rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}"
+        return 1
+    }
     if [[ -e "${SCRIPT_CONFIG_PATH}" ]]; then
         script_existed=1
         script_backup="$(mktemp "${SCRIPT_CONFIG_PATH}.rollback.XXXXXX")" || {
@@ -778,19 +788,26 @@ function prompt_cert_reuse() {
 function ensure_service_users() {
     # 创建共享组 xray-nginx（如不存在）
     if ! getent group xray-nginx >/dev/null 2>&1; then
-        groupadd -r xray-nginx
+        groupadd -r xray-nginx || return 1
     fi
+    # Do not depend on the distribution's USERGROUPS_ENAB default.
+    local service_user
+    for service_user in nginx xray; do
+        if ! getent group "${service_user}" >/dev/null 2>&1; then
+            groupadd -r "${service_user}" || return 1
+        fi
+    done
     # 创建 nginx 系统用户（如不存在）
     if ! id -u nginx >/dev/null 2>&1; then
-        useradd -r -s /usr/sbin/nologin -d /var/cache/nginx -M nginx
+        useradd -r -g nginx -s /usr/sbin/nologin -d /var/cache/nginx -M nginx || return 1
     fi
     # 创建 xray 系统用户（如不存在）
     if ! id -u xray >/dev/null 2>&1; then
-        useradd -r -s /usr/sbin/nologin -d /var/lib/xray -M xray
+        useradd -r -g xray -s /usr/sbin/nologin -d /var/lib/xray -M xray || return 1
     fi
     # 将 nginx 和 xray 加入 xray-nginx 共享组
-    usermod -aG xray-nginx nginx 2>/dev/null || true
-    usermod -aG xray-nginx xray 2>/dev/null || true
+    usermod -aG xray-nginx nginx || return 1
+    usermod -aG xray-nginx xray || return 1
 }
 
 
@@ -1633,7 +1650,7 @@ function handler_script_config() {
     # 打印绿色的配置更新提示
     log_config "$(t ".${CUR_FILE}.script.config_update")" >&2
     # 重置脚本配置 (默认重置 xray 部分)
-    handler_reset_script_config
+    handler_reset_script_config 'xray' || return 1
     # 从 CONFIG_DATA 或生成器获取配置值
     # 获取配置标签
     local CONFIG_TAG="${1:-${CONFIG_DATA['tag']}}"
@@ -2126,7 +2143,7 @@ function handler_multi_xray_config() {
             local kcp_seed="$(echo "${node}" | jq -r '.kcp')"
             node_inbounds="$(echo "${node_inbounds}" | jq --arg uuid "${node_uuid}" --arg seed "${kcp_seed}" '
                 .[0].settings.clients[0].id = $uuid |
-                .[0].streamSettings.finalmask.udp[0].settings.password = $seed
+                .[0].streamSettings.finalmask.udp[0].settings.value = $seed
             ')"
             ;;
         vision)
@@ -2524,7 +2541,7 @@ function handler_xray_config() {
     case "${CONFIG_TAG,,}" in
     mkcp)
         # 更新 mKCP Seed
-        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.finalmask.udp[0].settings.password = $seed')"
+        XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --arg seed "${KCP_SEED}" '.inbounds[1].streamSettings.finalmask.udp[0].settings.value = $seed')"
         ;;
     vision)
         # 更新 Reality 服务器名称、私钥和 Short IDs
@@ -4296,16 +4313,24 @@ function handler_prepare_protocol_services() {
 #   $2: persist - 是否写入脚本配置，默认为 y；传入 n 时只输出具体版本
 # 返回值: persist=n 时输出具体版本；否则将版本写入脚本配置
 # =============================================================================
+function normalize_xray_version() {
+    local version="${1:-}"
+
+    [[ "${version}" =~ ^[vV]?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || return 1
+    version="${version#[vV]}"
+    printf 'v%s\n' "${version}"
+}
+
 function handler_xray_version() {
-    local xray_version="$1" # 获取版本指定参数
+    local xray_version="${1:-release}"
     local persist="${2:-y}"
     local release_data=''
     # 根据版本指定参数确定具体版本
     case "${xray_version,,}" in
     latest)
         # 获取最新的 Xray 版本
-        if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases)" ||
-            ! CONFIG_DATA['version']="$(jq -r '.[0].tag_name' <<<"${release_data}")"; then
+        if ! release_data="$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 https://api.github.com/repos/XTLS/Xray-core/releases)" ||
+            ! CONFIG_DATA['version']="$(jq -er '[.[] | select(.draft != true)][0].tag_name | strings' <<<"${release_data}")"; then
             _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
         fi
         ;;
@@ -4313,15 +4338,18 @@ function handler_xray_version() {
         # 读取用户自定义的版本
         exec_read 'version' || return 1
         ;;
-    *)
+    release | '')
         # 获取最新的 release 版本
-        if ! release_data="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)" ||
-            ! CONFIG_DATA['version']="$(jq -r '.tag_name' <<<"${release_data}")"; then
+        if ! release_data="$(curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 https://api.github.com/repos/XTLS/Xray-core/releases/latest)" ||
+            ! CONFIG_DATA['version']="$(jq -er '.tag_name | strings' <<<"${release_data}")"; then
             _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
         fi
         ;;
+    *)
+        CONFIG_DATA['version']="${xray_version}"
+        ;;
     esac
-    if [[ -z "${CONFIG_DATA['version']:-}" || "${CONFIG_DATA['version']}" == 'null' ]]; then
+    if ! CONFIG_DATA['version']="$(normalize_xray_version "${CONFIG_DATA['version']:-}")"; then
         _error "$(t ".${CUR_FILE}.xray_version.fetch_fail")"
     fi
     if [[ "${persist,,}" == 'n' ]]; then
@@ -4409,6 +4437,32 @@ function discard_xray_binary_snapshot() {
     rmdir -- "${snapshot_dir}"
 }
 
+function fetch_xray_install_script() {
+    local use_proxy="${1:-n}"
+    local url="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALL_COMMIT}/install-release.sh"
+    local content digest
+
+    [[ "${use_proxy}" != 'y' ]] || url="https://gh-proxy.com/${url}"
+    if ! content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${url}")"; then
+        log_error "$(t ".${CUR_FILE}.gh_proxy.fetch_fail")"
+        return 1
+    fi
+    digest="$(printf '%s\n' "${content}" | sha256sum)" || return 1
+    if [[ "${digest%% *}" != "${XRAY_INSTALL_SHA256}" ]]; then
+        log_error "$(t ".${CUR_FILE}.gh_proxy.digest_mismatch")"
+        return 1
+    fi
+    if [[ -z "${content}" ]] || ! bash -n <<<"${content}"; then
+        log_error "$(t ".${CUR_FILE}.gh_proxy.invalid_script")"
+        return 1
+    fi
+    # Verify the original bytes before applying the mirror URL substitutions.
+    if [[ "${use_proxy}" == 'y' ]]; then
+        content="$(printf '%s\n' "${content}" | sed 's|https://api\.github\.com|https://gh-proxy.com/https://api.github.com|g; s|https://github\.com|https://gh-proxy.com/https://github.com|g')" || return 1
+    fi
+    printf '%s\n' "${content}"
+}
+
 # =============================================================================
 # 函数名称: handler_install
 # 功能描述: 安装 Xray 核心。
@@ -4422,12 +4476,10 @@ function discard_xray_binary_snapshot() {
 # 返回值: 无 (通过调用外部脚本执行安装)
 # =============================================================================
 function handler_install() {
-    # 确保服务用户和共享组存在（Xray-install 的 -u xray 依赖用户已创建）
-    ensure_service_users || return 1
     local xray_version="${1:-}"   # 获取版本参数
     local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
     local resolved_version="${3:-n}"
-    local install_required=0 staged_config='' staged_script_config=''
+    local staged_config='' staged_script_config=''
     local binary_snapshot_dir='' binary_parent='' binary_existed=0
 
     force_install="${force_install,,}"
@@ -4438,20 +4490,21 @@ function handler_install() {
 
     # 如果提供了版本参数，则处理版本配置
     if [[ "${resolved_version}" == 'y' ]]; then
-        [[ -n "${xray_version}" && "${xray_version}" != 'null' ]] || return 1
-        CONFIG_DATA['version']="${xray_version}"
+        CONFIG_DATA['version']="$(normalize_xray_version "${xray_version}")" || return 1
     elif [[ -n "${xray_version}" ]]; then
-        handler_xray_version "${xray_version}" || return 1
+        CONFIG_DATA['version']="$(handler_xray_version "${xray_version}" 'n')" || return 1
     else
         # 否则从脚本配置中读取版本
         CONFIG_DATA['version']="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version')"
         if [[ -z "${CONFIG_DATA['version']}" || "${CONFIG_DATA['version']}" == 'null' ]]; then
-            handler_xray_version 'release' || return 1
+            CONFIG_DATA['version']="$(handler_xray_version 'release' 'n')" || return 1
         fi
+        CONFIG_DATA['version']="$(normalize_xray_version "${CONFIG_DATA['version']}")" || return 1
     fi
     # 检查 Xray 命令是否存在，或是否强制安装
-    if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
-        install_required=1
+    if [[ ! -x "${XRAY_BIN_PATH}" || "${force_install}" != n ]]; then
+        # The pinned upstream installer already runs its units as User=xray.
+        ensure_service_users || return 1
         local use_gh_proxy_reply
         use_gh_proxy_reply="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.githubProxy // ""')"
         case "${use_gh_proxy_reply,,}" in
@@ -4462,64 +4515,45 @@ function handler_install() {
             # 独立运行安装命令时，配置问卷可能没有先执行，保留交互兜底。
             run_github_proxy_choice 'n' || return 1
             use_gh_proxy_reply="${CONFIG_DATA['github_proxy']}"
-            SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --arg githubProxy "${use_gh_proxy_reply}" '.xray.githubProxy = $githubProxy')"
-            if [[ "${resolved_version}" != 'y' ]]; then
-                write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" || return 1
-            fi
             ;;
         esac
-        local install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
         local script_content
-        if [[ "${use_gh_proxy_reply,,}" == "y" ]]; then
-            # 使用 gh-proxy.com：格式为 https://gh-proxy.com/ + 完整 GitHub 原始链接(含 https://)
-            local gh_proxy_prefix="https://gh-proxy.com/"
-            install_script_url="${gh_proxy_prefix}${install_script_url}"
-        fi
+        script_content="$(fetch_xray_install_script "${use_gh_proxy_reply}")" || return 1
 
-        if ! script_content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${install_script_url}")"; then
-            log_error "$(t ".${CUR_FILE}.gh_proxy.fetch_fail")" >&2
-            return 1
-        fi
-        if [[ "${use_gh_proxy_reply,,}" == "y" ]]; then
-            # 将脚本内 GitHub 地址改为经 gh-proxy 加速
-            script_content="$(printf '%s\n' "${script_content}" | sed 's|https://api\.github\.com|https://gh-proxy.com/https://api.github.com|g; s|https://github\.com|https://gh-proxy.com/https://github.com|g')"
-        fi
-        if [[ -z "${script_content}" ]] || ! bash -n <<<"${script_content}"; then
-            log_error "$(t ".${CUR_FILE}.gh_proxy.invalid_script")" >&2
+        # All entry points stage metadata and retain the binary until verified.
+        staged_script_config="$(echo "${SCRIPT_CONFIG}" | jq \
+            --arg xray "${CONFIG_DATA['version']}" \
+            --arg githubProxy "${use_gh_proxy_reply}" \
+            '.xray.version = $xray | .xray.githubProxy = $githubProxy')" || return 1
+        staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.version.XXXXXX")" || return 1
+        if ! write_config "${staged_script_config}" "${staged_config}"; then
+            rm -f -- "${staged_config}"
+            staged_config=''
             return 1
         fi
 
-        if [[ "${resolved_version}" == 'y' ]]; then
-            staged_script_config="$(echo "${SCRIPT_CONFIG}" | jq \
-                --arg xray "${CONFIG_DATA['version']}" \
-                --arg githubProxy "${use_gh_proxy_reply}" \
-                '.xray.version = $xray | .xray.githubProxy = $githubProxy')" || return 1
-            staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.version.XXXXXX")" || return 1
-            if ! write_config "${staged_script_config}" "${staged_config}"; then
+        binary_parent="$(dirname -- "${XRAY_BIN_PATH}")"
+        mkdir -p -- "${binary_parent}" || {
+            rm -f -- "${staged_config}"
+            return 1
+        }
+        binary_snapshot_dir="$(mktemp -d "${binary_parent}/.xray-install.XXXXXX")" || {
+            rm -f -- "${staged_config}"
+            staged_config=''
+            return 1
+        }
+        if [[ -e "${XRAY_BIN_PATH}" || -L "${XRAY_BIN_PATH}" ]]; then
+            if [[ -d "${XRAY_BIN_PATH}" ]] ||
+                ! cp -a -- "${XRAY_BIN_PATH}" "${binary_snapshot_dir}/xray"; then
                 rm -f -- "${staged_config}"
+                rmdir -- "${binary_snapshot_dir}" 2>/dev/null || true
                 staged_config=''
+                binary_snapshot_dir=''
                 return 1
             fi
-
-            binary_parent="$(dirname -- "${XRAY_BIN_PATH}")"
-            binary_snapshot_dir="$(mktemp -d "${binary_parent}/.xray-install.XXXXXX")" || {
-                rm -f -- "${staged_config}"
-                staged_config=''
-                return 1
-            }
-            if [[ -e "${XRAY_BIN_PATH}" || -L "${XRAY_BIN_PATH}" ]]; then
-                if [[ -d "${XRAY_BIN_PATH}" ]] ||
-                    ! cp -a -- "${XRAY_BIN_PATH}" "${binary_snapshot_dir}/xray"; then
-                    rm -f -- "${staged_config}"
-                    rmdir -- "${binary_snapshot_dir}" 2>/dev/null || true
-                    staged_config=''
-                    binary_snapshot_dir=''
-                    return 1
-                fi
-                binary_existed=1
-            fi
+            binary_existed=1
         fi
-        if ! printf '%s\n' "${script_content}" | bash -s -- install -u xray --version "${CONFIG_DATA['version']}"; then
+        if ! bash -s -- install --version "${CONFIG_DATA['version']}" <<<"${script_content}"; then
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
             log_error "$(t ".${CUR_FILE}.gh_proxy.install_fail")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
@@ -4537,8 +4571,6 @@ function handler_install() {
             fi
             return 1
         fi
-    fi
-    if [[ "${resolved_version}" == 'y' && "${install_required}" -eq 1 ]]; then
         if ! mv -fT -- "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
             rm -f -- "${staged_config}"
             staged_config=''
@@ -4628,7 +4660,6 @@ function handler_legacy_firewall_sweep() {
 # 返回值: 无 (通过调用外部脚本执行卸载)
 # =============================================================================
 function handler_purge() {
-    local install_script_url='https://github.com/XTLS/Xray-install/raw/main/install-release.sh'
     local script_content=''
     local updated_config=''
     local staged_config=''
@@ -4648,6 +4679,9 @@ function handler_purge() {
         return 0
     fi
 
+    # A download/checksum failure must leave the running service's ports intact.
+    script_content="$(fetch_xray_install_script "$(jq -r '.xray.githubProxy // "n"' <<<"${SCRIPT_CONFIG}")")" || return 1
+
     # 防火墙放行记录随后的 reset_json_fields 会一并清空，归属信息一旦丢失便无法再回收端口，
     # 因此必须先从账本读出 feature 并逐个关闭放行规则。feature 由账本自身派生，新增 feature 无需改这里。
     if ! owned_features="$(firewall_ledger_features)"; then
@@ -4664,15 +4698,6 @@ function handler_purge() {
     # 升级前的放行规则没有账本记录，按已知端口形态补一次回收；失败不阻断卸载。
     handler_legacy_firewall_sweep ||
         log_warn "$(t ".${CUR_FILE}.purge.legacy_sweep_failed")" >&2
-
-    if ! script_content="$(curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 300 "${install_script_url}")"; then
-        log_error "Failed to download the Xray uninstall script." >&2
-        return 1
-    fi
-    if [[ -z "${script_content}" ]] || ! bash -n <<<"${script_content}"; then
-        log_error "Refusing to run an invalid Xray uninstall script." >&2
-        return 1
-    fi
 
     updated_config="$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')" || return 1
     staged_config="$(mktemp "${SCRIPT_CONFIG_PATH}.purge.XXXXXX")" || return 1

@@ -274,6 +274,7 @@
     "gh_proxy": {
       "prompt": "是否在中国大陆，使用 GitHub 加速下载 [y/N]: ",
       "fetch_fail": "下载 Xray 安装脚本失败，请检查网络或稍后重试",
+      "digest_mismatch": "Xray 安装脚本的 SHA-256 校验失败，已拒绝执行；请更换下载源或更新管理脚本",
       "invalid_script": "下载到的 Xray 安装脚本为空或格式无效",
       "install_fail": "Xray 安装失败",
       "xray_missing": "安装器已结束，但系统中仍找不到 xray 命令",

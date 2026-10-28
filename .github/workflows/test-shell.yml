@@ -1,0 +1,24 @@
+name: Shell regression tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run offline regression checks
+        run: python3 -m unittest discover -s tests -v
+      - name: Check shell code
+        # Existing dynamic-source, shared-global and declaration diagnostics are
+        # excluded; syntax, quoting, array and command errors remain enabled.
+        run: >-
+          shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034,SC2155
+          install.sh core/*.sh lib/*.sh service/*.sh tool/*.sh
+          config/lan/*.sh config/cloudflare-warp/*.sh

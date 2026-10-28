@@ -6,7 +6,7 @@ services:
     networks:
       - share_net
     ports:
-      - "5212:5212"
+      - "127.0.0.1:5212:5212"
     volumes:
       - temp_data:/data
       - /usr/local/cloudreve/uploads:/cloudreve/uploads

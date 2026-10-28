@@ -7,7 +7,7 @@ services:
       - redis
     restart: unless-stopped
     ports:
-      - 5212:5212
+      - "127.0.0.1:5212:5212"
       - 6888:6888
       - 6888:6888/udp
     environment:

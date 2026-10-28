@@ -120,27 +120,33 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 
 ## 如何使用
 
+v2026.10.28 修复 `bash: unknown option -- -`：当前 Xray 官方安装器已移除 `-u` 参数。安装器固定到提交并校验 SHA-256，安装失败或版本不符时保留原版本记录并恢复内核备份。更新管理脚本后，重新选择“安装或重装节点”即可。
+
+mKCP 与包含 mKCP 的多节点配置同步适配 Xray v26.10.21 的 `mkcp-legacy` / `settings.value` 格式，分享链接继续读取新旧配置的 seed。
+
+此版本还修复了下载失败未正确中止、Nginx 命令字符串被二次解释的问题，收紧 Xray 配置文件权限，并保留 Nginx 编译器安全保护。新建 Cloudreve 的 Web 端口仅绑定本机 `127.0.0.1:5212`，通过 Nginx 提供访问；已有容器配置需自行调整才会改变端口绑定。
+
 * 获取
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
+  wget -O "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh
   ```
 
 * 使用
   * 启动界面
 
     ```sh
-    bash ${HOME}/Xray-script.sh
+    bash "${HOME}/Xray-script.sh"
     ```
 
   * 直接安装指定模式
 
     ```sh
-    bash ${HOME}/Xray-script.sh --vision
-    bash ${HOME}/Xray-script.sh --hy2
-    bash ${HOME}/Xray-script.sh --cdn
-    bash ${HOME}/Xray-script.sh --sni
-    bash ${HOME}/Xray-script.sh --multi
+    bash "${HOME}/Xray-script.sh" --vision
+    bash "${HOME}/Xray-script.sh" --hy2
+    bash "${HOME}/Xray-script.sh" --cdn
+    bash "${HOME}/Xray-script.sh" --sni
+    bash "${HOME}/Xray-script.sh" --multi
     ```
 
     其余可用参数：`--xhttp`、`--trojan`、`--fallback`、`--ss2022`、`--mkcp`。
@@ -148,7 +154,7 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
   * 管理异地组网
 
     ```sh
-    bash ${HOME}/Xray-script.sh --lan
+    bash "${HOME}/Xray-script.sh" --lan
     ```
 
     Hub 初始化后至少添加两个地点，再分别导出地点端部署包。地点端需要支持 TUN 的 Xray-core、`jq`、`iproute2`；网关模式还需要 `iptables`。该功能只添加远端私网路由，不修改默认路由，不支持二层广播、mDNS 或网上邻居发现。
@@ -156,8 +162,12 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 * 快速启动(界面)
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  wget -O "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/haiyan1301/Xray-script/main/install.sh && bash "${HOME}/Xray-script.sh"
   ```
+
+开发验证：`python3 -m unittest discover -s tests -v`。回归测试使用临时目录和模拟安装器，不修改系统服务，也不需要 root 或网络。
+
+实际内核配置验证：`python3 tests/check_core_configs.py --xray /path/to/xray`，需在内核旁放置官方压缩包中的 `geoip.dat` 和 `geosite.dat`。该检查生成 11 组配置，通过 `xray run -test` 验证，不启动服务。
 
 ## 脚本界面
 
