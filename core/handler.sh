@@ -451,7 +451,13 @@ function user_route_rules() {
             $tag == "private-ip" or
             $tag == "reverse-portal" or
             ($tag | startswith("anti-steal-")) or
-            ($tag | startswith("lan-"));
+            ($tag | startswith("lan-")) or
+            # 可选默认拦截规则（bt/cn-ip/ad-domain）由各自的开关在每次生成时重建，
+            # 不属于用户持久化意图；旧版本曾把它们写进 .rules，这里一并过滤，
+            # 避免用户关闭开关后旧规则仍从 .rules 被重新合并生效。
+            $tag == "bt" or
+            $tag == "cn-ip" or
+            $tag == "ad-domain";
         if type == "array" then map(select(is_derived_rule | not)) else [] end
     '
 }
@@ -1609,36 +1615,74 @@ function add_rule() {
 # =============================================================================
 # 函数名称: handler_routing
 # 功能描述: 处理路由规则配置的处理器。
-#           1. 检查 WARP 状态是否满足配置要求。
+#           1. WARP 规则：.xray.warp=1 时在读取输入成功后做健康预检（失败先尝试
+#              --repair-warp，仍失败给出修复提示并退出）；WARP 未开启时只提示
+#              「规则会保存、开启后生效」，允许继续添加。
 #           2. 调用 exec_read 读取用户输入的规则值。
 #           3. 调用 add_rule 将规则添加到 Xray 配置中。
+#           4. 只把本条规则 upsert 到 SCRIPT_CONFIG.rules（不再用运行时全量规则
+#              覆盖，避免 WARP 关闭时运行时过滤掉 warp 规则后持久化规则一并丢失）。
+#           5. 通过 apply_xray_state_transaction 重建配置并重启。
 # 参数:
 #   $1: rule_type - 规则类型 ("block" 或 "warp")
 #   $2: rule_target - 规则目标 ("ip" 或 "domain")
-# 返回值: 无 (通过调用其他函数执行操作)
-# 退出码: 如果 WARP 状态不满足要求，则调用 _error 退出脚本 (exit 1)
+# 返回值: 0-成功 1-失败
 # =============================================================================
 function handler_routing() {
-    # 从脚本配置中读取 WARP 状态
-    local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')"
     local rule_type="$1"                         # 获取规则类型 (block/warp)
     local rule_target="$2"                       # 获取规则目标 (ip/domain)
     local rule_tag="${rule_type}-${rule_target}" # 构造规则标签
-    local previous_script_config="${SCRIPT_CONFIG}" previous_xray_config
-    # 检查 WARP 状态是否满足配置要求
-    # 如果是 warp 规则但 WARP 未启用，则报错
-    if [[ "${rule_type}" == 'warp' && ${WARP_STATUS} -ne 1 ]]; then
-        _error "$(t ".${CUR_FILE}.warp.status")"
+    local warp_status='' previous_script_config='' previous_xray_config=''
+    local persisted_user_rules='' script_rule=''
+
+    # 从脚本配置中读取 WARP 状态（缺失/空串/字符串数字都按 0 处理）
+    warp_status="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
+
+    # WARP 未开启时仍允许保存规则（生成侧只在 WARP 开启时输出该规则）。
+    if [[ "${rule_type}" == 'warp' && "${warp_status}" -ne 1 ]]; then
+        log_tip "$(t ".${CUR_FILE}.warp.rules_pending")" >&2
     fi
+
     # 调用 exec_read 读取用户输入的规则值
     exec_read "${rule_tag}" || return 1
-    # 调用 add_rule 将规则添加到 Xray 配置中
+
+    # 输入成功后才做健康预检/自动修复：--repair-warp 可能重建容器，如果用户在
+    # 输入阶段取消（Ctrl-C/EOF），运行配置仍指向旧容器，此时不能先动容器。
+    if [[ "${rule_type}" == 'warp' && "${warp_status}" -eq 1 ]]; then
+        if ! exec_docker '--warp-health'; then
+            if ! cmd_exists 'docker' || ! exec_docker '--repair-warp'; then
+                log_error "$(t ".${CUR_FILE}.warp.unavailable")" >&2
+                log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    previous_script_config="${SCRIPT_CONFIG}"
     previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
     XRAY_CONFIG="${previous_xray_config}"
+    # 磁盘上的运行配置在 WARP 关闭时不含 warp 规则；先合并已保存的用户规则，
+    # 让 add_rule 对同 tag 规则做并集时保留之前保存的值。
+    persisted_user_rules="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
+    merge_user_route_rules "${persisted_user_rules}" || return 1
     add_rule "${rule_tag}" "${rule_target}" "${CONFIG_DATA[${rule_tag}]}" "${rule_type}" || return 1
-    local persisted_rules
-    persisted_rules="$(printf '%s\n' "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
-    SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq --argjson rules "${persisted_rules}" '.rules = $rules')" || return 1
+
+    # 只持久化本条规则：从合并后的配置中取同 tag 的完整规则并 upsert 到 .rules。
+    script_rule="$(printf '%s\n' "${XRAY_CONFIG}" | jq -c --arg tag "${rule_tag}" '
+        [.routing.rules[]? | select((.ruleTag // "") == $tag)] | first // empty
+    ')" || return 1
+    [[ -n "${script_rule}" ]] || return 1
+    SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq --arg tag "${rule_tag}" --argjson rule "${script_rule}" '
+        .rules = (
+            (.rules // []) as $rules |
+            if any($rules[]; (.ruleTag // "") == $tag) then
+                ($rules | map(if (.ruleTag // "") == $tag then $rule else . end))
+            else
+                $rules + [$rule]
+            end
+        )
+    ')" || return 1
+
     apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"
 }
 
@@ -2127,7 +2171,7 @@ function handler_multi_xray_config() {
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"
-    local XRAY_RULES
+    local XRAY_RULES XRAY_RUNTIME_RULES
     XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
     # reset 是一次性动作，且只认当前脚本版本写入的标志（见
     # xray_rules_reset_is_current）：本次重建丢弃已保存的用户规则，生成结束时把标志
@@ -2137,6 +2181,12 @@ function handler_multi_xray_config() {
         XRAY_RULES='[]'
     fi
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"
+    # 运行时规则：WARP 未开启时只过滤 outboundTag=warp 的规则（持久化 .rules
+    # 保留过滤前的完整用户规则，重新开启 WARP 后分流自动生效）。
+    XRAY_RUNTIME_RULES="${XRAY_RULES}"
+    if [[ "${WARP_STATUS:-0}" -ne 1 ]]; then
+        XRAY_RUNTIME_RULES="$(printf '%s\n' "${XRAY_RULES}" | jq -c '[.[] | select((.outboundTag // "") != "warp")]')" || return 1
+    fi
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
@@ -2170,8 +2220,9 @@ function handler_multi_xray_config() {
     fi
 
     XRAY_CONFIG="$(jq '.inbounds = [.inbounds[0]]' "${SCRIPT_XRAY_DIR}/XHTTP.json")" || return 1
-    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）。
-    merge_user_route_rules "${XRAY_RULES}" || return 1
+    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）；
+    # WARP 未开启时合并的是过滤掉 warp 规则的运行时副本。
+    merge_user_route_rules "${XRAY_RUNTIME_RULES}" || return 1
 
     local used_listen_ports=("${XRAY_API_PORT}")
     local i
@@ -2383,11 +2434,17 @@ function handler_multi_xray_config() {
     multi_add_optional_block_rules "${XRAY_RULES_BT}" "${XRAY_RULES_CN}" "${XRAY_RULES_AD}" || return 1
 
     if [[ "${WARP_STATUS:-0}" -eq 1 ]]; then
-        local container_ip=''
-        container_ip="$(exec_docker '--obtain-container-ip')" || return 1
-        [[ -n "${container_ip}" ]] || return 1
+        local warp_host=''
+        # 升级后旧容器没有 127.0.0.1:40001 回环端点，--obtain-container-ip 会拒绝；
+        # 先健康检查并尽力 --repair-warp 完成容器迁移，再取端点（否则所有配置重建
+        # 都会被旧容器卡死）。
+        if ! warp_host="$(obtain_warp_endpoint)" || [[ -z "${warp_host}" ]]; then
+            log_error "$(t ".${CUR_FILE}.warp.unavailable")" >&2
+            log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+            return 1
+        fi
         local socks_config
-        socks_config="$(jq -n --arg address "${container_ip}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
+        socks_config="$(jq -n --arg address "${warp_host}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
         XRAY_CONFIG="$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')"
     fi
 
@@ -2397,7 +2454,8 @@ function handler_multi_xray_config() {
     fi
     handler_apply_lan_config || return 1
 
-    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
+    # 持久化过滤前的用户规则：WARP 未开启时运行时被过滤的 warp 规则必须保留，
+    # 模板和功能派生规则在每次构建时重建。
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${nodes}" --argjson rules "${XRAY_RULES}" '.xray.nodes = $nodes | .rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
@@ -2446,7 +2504,7 @@ function handler_xray_config() {
     local XRAY_RULES_BT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.bt')"        # 获取 bt 规则状态
     local XRAY_RULES_CN="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.cn')"        # 获取 cn 规则状态
     local XRAY_RULES_AD="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.rules.ad')"        # 获取 ad 规则状态
-    local XRAY_RULES
+    local XRAY_RULES XRAY_RUNTIME_RULES
     XRAY_RULES="$(echo "${SCRIPT_CONFIG}" | jq '.rules // []' | user_route_rules)" || return 1
     # reset 是一次性动作，且只认当前脚本版本写入的标志（见
     # xray_rules_reset_is_current）：本次重建丢弃已保存的用户规则，生成结束时把标志复位。
@@ -2454,6 +2512,12 @@ function handler_xray_config() {
         XRAY_RULES='[]'
     fi
     local WARP_STATUS="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.warp')"              # 获取 WARP 状态
+    # 运行时规则：WARP 未开启时只过滤 outboundTag=warp 的规则（持久化 .rules
+    # 保留过滤前的完整用户规则，重新开启 WARP 后分流自动生效）。
+    XRAY_RUNTIME_RULES="${XRAY_RULES}"
+    if [[ "${WARP_STATUS:-0}" -ne 1 ]]; then
+        XRAY_RUNTIME_RULES="$(printf '%s\n' "${XRAY_RULES}" | jq -c '[.[] | select((.outboundTag // "") != "warp")]')" || return 1
+    fi
     local VLESS_ENC_DECRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncDecryption // ""')"
     local VLESS_ENC_ENCRYPTION="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEncryption // ""')"
     local VLESS_ENC_ENABLE="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.vlessEncEnable // ""')"
@@ -2497,8 +2561,9 @@ function handler_xray_config() {
     fi
     # 加载对应配置标签的 Xray 配置模板
     XRAY_CONFIG="$(jq '.' "${SCRIPT_XRAY_DIR}/${CONFIG_TAG}.json")" || return 1
-    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）。
-    merge_user_route_rules "${XRAY_RULES}" || return 1
+    # 用户规则始终合并：重置只体现在上面的 XRAY_RULES='[]'（一次性）；
+    # WARP 未开启时合并的是过滤掉 warp 规则的运行时副本。
+    merge_user_route_rules "${XRAY_RUNTIME_RULES}" || return 1
     if [[ "${CONFIG_TAG,,}" == 'cdn' && "${CDN_BACKEND}" == 'xray' ]]; then
         local CDN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
         local CDN_DOWN_DOMAIN="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdnDown // ""')"
@@ -2676,14 +2741,19 @@ function handler_xray_config() {
         ')"
     fi
     # 处理 WARP 状态
-    if [[ ${WARP_STATUS} -eq 1 ]]; then
-        # 获取 WARP 容器 IP
-        local container_ip=''
-        container_ip="$(exec_docker '--obtain-container-ip')" || return 1
-        [[ -n "${container_ip}" ]] || return 1
+    if [[ "${WARP_STATUS:-0}" -eq 1 ]]; then
+        # 升级后旧容器没有 127.0.0.1:40001 回环端点，--obtain-container-ip 会拒绝；
+        # 先健康检查并尽力 --repair-warp 完成容器迁移，再取端点（否则所有配置重建
+        # 都会被旧容器卡死）。
+        local warp_host=''
+        if ! warp_host="$(obtain_warp_endpoint)" || [[ -z "${warp_host}" ]]; then
+            log_error "$(t ".${CUR_FILE}.warp.unavailable")" >&2
+            log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+            return 1
+        fi
         # 构造 WARP Socks 出站配置 JSON
         local socks_config
-        socks_config="$(jq -n --arg address "${container_ip}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
+        socks_config="$(jq -n --arg address "${warp_host}" '[{tag:"warp",protocol:"socks",settings:{servers:[{address:$address,port:40001}]}}]')" || return 1
         # 将 WARP 出站配置添加到 Xray 配置中
         XRAY_CONFIG=$(echo "${XRAY_CONFIG}" | jq --argjson socks_config "${socks_config}" '.outbounds += $socks_config')
     fi
@@ -2694,9 +2764,9 @@ function handler_xray_config() {
     fi
     handler_apply_lan_config || return 1
 
-    # 只持久化用户管理的规则，模板和功能派生规则在每次构建时重建。
+    # 持久化过滤前的用户规则：WARP 未开启时运行时被过滤的 warp 规则必须保留，
+    # 模板和功能派生规则在每次构建时重建。
     # reset 在本次生成后复位：它描述的是「这一次要不要丢弃旧规则」，不是长期状态。
-    XRAY_RULES="$(echo "${XRAY_CONFIG}" | jq '.routing.rules' | user_route_rules)" || return 1
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
 
@@ -4789,7 +4859,8 @@ function handler_legacy_firewall_sweep() {
 
 # =============================================================================
 # 函数名称: handler_purge
-# 功能描述: 卸载 Xray 核心及其配置。
+# 功能描述: 卸载 Xray 核心及其配置；Xray 卸载成功后顺带清理 WARP 容器/镜像/
+#           注册数据（WARP 清理失败只告警，不阻断卸载）。
 # 参数: 无
 # 返回值: 无 (通过调用外部脚本执行卸载)
 # =============================================================================
@@ -4852,6 +4923,17 @@ function handler_purge() {
     fi
     sync
     SCRIPT_CONFIG="${updated_config}"
+
+    # Xray 已卸载成功：顺带清理 WARP 容器、镜像与注册数据。WARP 清理失败只告警，
+    # 不改变本次卸载的结论（否则用户会误以为整个卸载失败而重试）。
+    if cmd_exists 'docker'; then
+        log_config "$(t ".${CUR_FILE}.purge.warp_start")" >&2
+        if exec_docker '--purge-warp'; then
+            log_config "$(t ".${CUR_FILE}.purge.warp_success")" >&2
+        else
+            log_warn "$(t ".${CUR_FILE}.purge.warp_fail")" >&2
+        fi
+    fi
 }
 
 # =============================================================================
@@ -5099,141 +5181,377 @@ function handler_geodata_cron() {
 }
 
 # =============================================================================
-# 函数名称: handler_docker
-# 功能描述: 确保 Docker 已安装。
-#           1. 检查系统中是否存在 docker 命令。
-#           2. 如果不存在，则调用 exec_docker 安装 Docker。
+# 函数名称: obtain_warp_endpoint
+# 功能描述: 取 WARP 的固定宿主端点，并处理「升级后旧容器未迁移」的场景。
+#           旧容器的容器内隧道可能仍是 Connected，但没有发布 127.0.0.1:40001
+#           回环端口，service/docker.sh 的 --obtain-container-ip 会拒绝它；若直接
+#           取端点，升级用户改端口/域名/重装/加分流等所有配置重建都会失败。
+#           因此先做 --warp-health；不健康且 docker 存在时尽力 --repair-warp
+#           完成保留 WARP_DIR 的容器迁移，然后再取端点。
+#           注意: 本函数 stdout 只输出端点地址，日志全部走 docker.sh 的 stderr。
 # 参数: 无
-# 返回值: 无 (通过调用其他函数执行操作)
+# 返回值: 0-成功（stdout 127.0.0.1）；1-容器不可用（无输出，文案由调用方输出）
+# =============================================================================
+function obtain_warp_endpoint() {
+    local warp_host=''
+
+    if ! exec_docker '--warp-health'; then
+        if cmd_exists 'docker'; then
+            # best effort：迁移失败时由下面的 --obtain-container-ip 给出最终结论。
+            exec_docker '--repair-warp' || true
+        fi
+    fi
+    warp_host="$(exec_docker '--obtain-container-ip')" || return 1
+    [[ -n "${warp_host}" ]] || return 1
+    printf '%s\n' "${warp_host}"
+}
+
+# =============================================================================
+# 函数名称: handler_docker
+# 功能描述: 确保 Docker 已安装且 daemon 可用（WARP 相关操作的前置检查）。
+#           1. 检查系统中是否存在 docker 命令，不存在则调用 --install；
+#           2. 调用 --docker-ready 确认 daemon 可用（必要时由 service/docker.sh
+#              尝试 systemctl start docker）。
+# 参数: 无
+# 返回值: 0-可用 1-安装或启动失败（错误文案在此统一输出）
 # =============================================================================
 function handler_docker() {
-    # 检查 docker 命令是否存在
+    # 检查 docker 命令是否存在，不存在则安装
     if ! cmd_exists 'docker'; then
-        # 如果不存在，则调用 docker.sh 安装 Docker
         exec_docker '--install' || return 1
+    fi
+    # 已安装也可能处于停止状态：必须等 daemon 就绪，不能只看命令是否存在。
+    if ! exec_docker '--docker-ready'; then
+        log_error "$(t ".${CUR_FILE}.docker_unavailable")" >&2
+        return 1
     fi
 }
 
 # =============================================================================
 # 函数名称: handler_warp
-# 功能描述: 管理 WARP (WireGuard) 配置。
-#           1. 确保 Docker 已安装。
-#           2. 检查当前 WARP 状态。
-#           3. 如果已启用，则禁用并从 Xray 配置中移除相关规则。
-#           4. 如果未启用，则启用并添加 WARP 出站和路由规则到 Xray 配置。
-#           5. 更新脚本配置中的 WARP 状态。
+# 功能描述: 开启/关闭 WARP Proxy。
+#           1. 读取 .xray.warp 并快照当前脚本配置与运行配置。
+#           2. 关闭：只把 .xray.warp 置 0，不删除 .rules 中的 WARP 分流规则；
+#              事务重建运行配置（生成侧按 bit 过滤 warp 规则）后停止容器。
+#              Docker 不可用时只告警，不影响配置层关闭。
+#           3. 开启：仅在开启分支确保 Docker/镜像/容器可用，成功后写
+#              .xray.warp=1 并事务重建配置；任一步失败都输出结论日志，
+#              并在配置事务失败时清理本次新启动的容器。
 # 参数: 无
-# 返回值: 无 (通过调用其他函数和脚本执行操作，修改配置文件)
+# 返回值: 0-成功 1-失败（失败路径均有 log_error/log_tip 结论）
 # =============================================================================
 function handler_warp() {
-    handler_docker || return 1
-    local warp_status previous_script_config previous_xray_config
-    local container_was_running=0
-    warp_status="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
+    local warp_status='' previous_script_config='' previous_xray_config=''
+    local container_was_running=0 container_ip=''
+
+    warp_status="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
     previous_script_config="${SCRIPT_CONFIG}"
-    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    if ! previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")"; then
+        log_error "$(t ".${CUR_FILE}.warp.config_unavailable")" >&2
+        return 1
+    fi
+
+    if [[ "${warp_status}" -eq 1 ]]; then
+        # 关闭：用户的分流意图与当前生效状态分离——只改状态位，.rules 原样保留；
+        # 生成侧在 WARP 关闭时过滤运行时 warp 规则，重新开启后规则继续生效。
+        SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '.xray.warp = 0')" || return 1
+        if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+            log_error "$(t ".${CUR_FILE}.warp.disable_config_fail")" >&2
+            return 1
+        fi
+        if cmd_exists 'docker'; then
+            if ! exec_docker '--disable-warp'; then
+                log_error "$(t ".${CUR_FILE}.warp.disable_container_fail")" >&2
+                return 1
+            fi
+        else
+            # 没有 Docker 时容器状态无从判定；配置层已关闭，只告警不失败。
+            log_warn "$(t ".${CUR_FILE}.warp.disable_no_docker")" >&2
+        fi
+        log_config "$(t ".${CUR_FILE}.warp.disabled_keep_rules")" >&2
+        return 0
+    fi
+
+    # 开启分支：只有这里才安装/启动 Docker 与构建镜像。
+    handler_docker || return 1
+    if ! exec_docker '--build-warp'; then
+        log_error "$(t ".${CUR_FILE}.warp.enable_fail")" >&2
+        log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+        return 1
+    fi
+    # 记录本次调用前容器是否已在运行：配置事务失败时只清理「本次新开启」的容器，
+    # 不误停原本就在运行的容器（例如 config bit 漂移的场景）。
     if docker inspect xray-script-warp >/dev/null 2>&1 &&
         [[ "$(docker inspect --format='{{.State.Running}}' xray-script-warp 2>/dev/null)" == 'true' ]]; then
         container_was_running=1
     fi
+    if ! container_ip="$(exec_docker '--enable-warp')" || [[ -z "${container_ip}" ]]; then
+        # docker 层按契约保留容器便于重试，这里只输出结论与修复提示。
+        log_error "$(t ".${CUR_FILE}.warp.enable_fail")" >&2
+        log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+        return 1
+    fi
+    SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '.xray.warp = 1')" || {
+        SCRIPT_CONFIG="${previous_script_config}"
+        log_error "$(t ".${CUR_FILE}.warp.enable_fail")" >&2
+        return 1
+    }
+    if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
+        SCRIPT_CONFIG="${previous_script_config}"
+        if [[ "${container_was_running}" -eq 0 ]]; then
+            exec_docker '--disable-warp' >/dev/null 2>&1 || true
+        fi
+        log_error "$(t ".${CUR_FILE}.warp.enable_fail")" >&2
+        log_tip "$(t ".${CUR_FILE}.warp.repair_hint")" >&2
+        return 1
+    fi
+    log_config "$(t ".${CUR_FILE}.warp.enabled")" >&2
+    return 0
+}
 
-    if [[ "${warp_status}" -eq 1 ]]; then
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '
-            .xray.warp = 0 |
-            .rules = [(.rules // [])[] | select((.outboundTag // "") != "warp")]
-        ')" || return 1
-        apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}" || return 1
-        if ! exec_docker '--disable-warp'; then
-            exec_docker '--enable-warp' >/dev/null 2>&1 || true
-            local disabled_script_config="${SCRIPT_CONFIG}"
-            local disabled_xray_config
-            disabled_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}" 2>/dev/null || echo "${previous_xray_config}")"
-            SCRIPT_CONFIG="${previous_script_config}"
-            if ! apply_xray_state_transaction "${disabled_script_config}" "${disabled_xray_config}"; then
-                # The state transaction restores the disabled files on failure;
-                # keep the container aligned with that recovered runtime.
-                exec_docker '--disable-warp' >/dev/null 2>&1 || true
-            fi
-            return 1
-        fi
-    else
-        exec_docker '--build-warp' || return 1
-        local container_ip=''
-        if ! container_ip="$(exec_docker '--enable-warp')" || [[ -z "${container_ip}" ]]; then
-            if [[ "${container_was_running}" -eq 0 ]]; then
-                exec_docker '--disable-warp' >/dev/null 2>&1 || true
-            fi
-            return 1
-        fi
-        SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq '.xray.warp = 1')" || {
-            if [[ "${container_was_running}" -eq 0 ]]; then
-                exec_docker '--disable-warp' >/dev/null 2>&1 || true
-            fi
-            return 1
-        }
-        if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
-            if [[ "${container_was_running}" -eq 0 ]]; then
-                exec_docker '--disable-warp' || true
-            fi
-            return 1
+# =============================================================================
+# WARP 重置事务状态（仅 handler_reset_warp 及其 trap 出口使用）。
+#   _WARP_RESET_ACTIVE          1-重置事务进行中（EXIT 兜底需要回滚）
+#   _WARP_RESET_COMMITTED       1-已 commit，失败不再回滚
+#   _WARP_RESET_XRAY_WAS_ACTIVE 1-Xray 本来在运行（回滚后需要重启它）
+#                               0-本来未运行（只恢复配置文件，不得启动服务）
+# 说明: handler.sh 是 main.sh 拉起的单次子进程，主流程不注册 trap，因此
+#       结束时把 trap 解除到默认即可，不会覆盖调用方的全局 trap。
+# =============================================================================
+declare _WARP_RESET_ACTIVE=0
+declare _WARP_RESET_COMMITTED=0
+declare _WARP_RESET_XRAY_WAS_ACTIVE=1
+declare _WARP_RESET_PREVIOUS_SCRIPT_CONFIG=''
+declare _WARP_RESET_PREVIOUS_XRAY_CONFIG=''
+
+# =============================================================================
+# 函数名称: _warp_reset_disarm_traps
+# 功能描述: 解除重置事务注册的 EXIT/HUP/INT/TERM trap 并清理事务状态。
+# 参数: 无
+# 返回值: 0
+# =============================================================================
+function _warp_reset_disarm_traps() {
+    trap - EXIT HUP INT TERM
+    _WARP_RESET_ACTIVE=0
+    _WARP_RESET_COMMITTED=0
+    _WARP_RESET_XRAY_WAS_ACTIVE=1
+    _WARP_RESET_PREVIOUS_SCRIPT_CONFIG=''
+    _WARP_RESET_PREVIOUS_XRAY_CONFIG=''
+}
+
+# =============================================================================
+# 函数名称: _warp_reset_rollback
+# 功能描述: 取消未完成的 WARP 重置事务并恢复重置前的落盘状态。
+#           1. 调用 docker.sh --rollback-reset-warp 恢复旧容器/镜像/数据；
+#           2. 回滚成功后提交 previous_xray_config + previous_script_config；仅当
+#              Xray 原本在运行（_WARP_RESET_XRAY_WAS_ACTIVE=1）时才 handler_restart，
+#              用户刻意停止的服务不得因为一次失败的重置被启动（失败按「回滚不完整」
+#              降级处理）；
+#           3. 回滚不完整时把 .xray.warp=0 落盘并用关闭 WARP 的配置重建运行态，
+#              避免运行配置继续引用不可用的 WARP 出站（分流黑洞），最后输出
+#              reset_rollback_fail 提示再次执行重置修复。
+# 参数:
+#   $1: previous_script_config - 重置前的脚本配置
+#   $2: previous_xray_config   - 重置前的运行配置
+# 返回值: 0-已恢复到重置前状态 1-回滚不完整（已按关闭 WARP 降级并提示修复）
+# =============================================================================
+function _warp_reset_rollback() {
+    local previous_script_config="$1"
+    local previous_xray_config="$2"
+    local rollback_status=0
+
+    # 回滚期间的清理动作不得再次触发本事务的 trap。
+    _WARP_RESET_ACTIVE=0
+    trap - EXIT HUP INT TERM
+
+    SCRIPT_CONFIG="${previous_script_config}"
+    if ! exec_docker '--rollback-reset-warp'; then
+        rollback_status=1
+    elif ! commit_xray_and_script_config "${previous_xray_config}" "${previous_script_config}"; then
+        rollback_status=1
+    elif [[ "${_WARP_RESET_XRAY_WAS_ACTIVE:-1}" -eq 1 ]] && ! handler_restart; then
+        rollback_status=1
+    fi
+
+    if [[ "${rollback_status}" -eq 0 ]]; then
+        log_config "$(t ".${CUR_FILE}.warp.reset_recovered")" >&2
+        return 0
+    fi
+
+    # 容器回滚不完整：关闭 WARP 位并重建运行配置，保证不会有规则继续指向
+    # 可能已消失的 WARP 出站；持久化 .rules 仍保留，修复后重新开启即可恢复。
+    SCRIPT_CONFIG="$(printf '%s\n' "${previous_script_config}" | jq '.xray.warp = 0')" ||
+        SCRIPT_CONFIG="${previous_script_config}"
+    write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}" >/dev/null 2>&1 || true
+    if handler_xray_config 1; then
+        # 原本未运行时只落盘关闭 WARP 的配置，不启动服务。
+        if [[ "${_WARP_RESET_XRAY_WAS_ACTIVE:-1}" -eq 1 ]]; then
+            handler_restart || true
         fi
     fi
+    log_error "$(t ".${CUR_FILE}.warp.reset_rollback_fail")" >&2
+    return 1
+}
+
+# =============================================================================
+# 函数名称: _warp_reset_exit_handler
+# 功能描述: 重置事务的 EXIT 兜底：未提交事务被意外退出（含函数内部 exit）时
+#           回滚并恢复旧配置，避免残留事务目录与配置漂移。
+# 参数: 无（退出码取自 $?）
+# 返回值: 不返回（保持原退出码 exit）
+# =============================================================================
+function _warp_reset_exit_handler() {
+    local exit_status=$?
+    trap - EXIT HUP INT TERM
+    if [[ "${_WARP_RESET_ACTIVE:-0}" -eq 1 && "${_WARP_RESET_COMMITTED:-0}" -eq 0 ]]; then
+        _warp_reset_rollback "${_WARP_RESET_PREVIOUS_SCRIPT_CONFIG}" "${_WARP_RESET_PREVIOUS_XRAY_CONFIG}" || true
+    fi
+    _WARP_RESET_ACTIVE=0
+    _WARP_RESET_XRAY_WAS_ACTIVE=1
+    exit "${exit_status}"
+}
+
+# =============================================================================
+# 函数名称: _warp_reset_signal_exit
+# 功能描述: 重置事务收到 HUP/INT/TERM 时的出口：回滚事务、恢复旧配置并给出
+#           结论提示，最后按信号约定退出（HUP=129 / INT=130 / TERM=143）。
+# 参数:
+#   $1: 退出码
+# 返回值: 不返回（exit）
+# =============================================================================
+function _warp_reset_signal_exit() {
+    local exit_status="$1"
+    trap - EXIT HUP INT TERM
+    _warp_reset_rollback "${_WARP_RESET_PREVIOUS_SCRIPT_CONFIG}" "${_WARP_RESET_PREVIOUS_XRAY_CONFIG}" || true
+    _WARP_RESET_ACTIVE=0
+    _WARP_RESET_XRAY_WAS_ACTIVE=1
+    exit "${exit_status}"
 }
 
 # =============================================================================
 # 函数名称: handler_reset_warp
-# 功能描述: 重新构建并启动 WARP 容器。
-#           1. 确保 Docker 已安装。
-#           2. 检查当前 WARP 状态。
-#           3. 如果已启用，则执行清空容器日志，并重置 WARP 容器。
-#           4. 如果未启用，则跳过。
+# 功能描述: 重置（重建镜像/容器）WARP Proxy。
+#           1. 先判状态：.xray.warp 未开启且不存在 WARP 容器时直接提示无需重置，
+#              不触碰 Docker（不因无意义操作触发 Docker 安装）；
+#           2. 仅交互终端询问重置方式：1=保留注册身份（默认）2=重新注册；
+#           3. 快照配置与 Xray 运行状态（是否 active）后设置 EXIT/HUP/INT/TERM
+#              trap：中断或意外退出时回滚事务并恢复旧配置；
+#           4. --clean-container-logs（失败仅告警）→ --prepare-reset-warp <mode>
+#              → apply_xray_state_transaction → --commit-reset-warp；
+#           5. 任一步失败：回滚容器事务并恢复旧配置（输出 reset_recovered）；
+#              仅当 Xray 原本在运行时才重启它，回滚不完整时把 .xray.warp=0
+#              落盘并提示再次重置修复（输出 reset_rollback_fail）；
+#           6. 成功：配置位为开启时按重置方式输出 reset_keep_done / reset_new_done；
+#              进入时为关闭（只残留容器）时停掉新容器并输出 reset_disabled_done，
+#              保持「配置位=关闭 / 容器停止」一致。
 # 参数: 无
-# 返回值: 无 (通过调用其他函数和脚本执行操作)
+# 返回值: 0-成功或无需重置 1-失败（失败路径均有结论日志）
 # =============================================================================
 function handler_reset_warp() {
-    handler_docker || return 1
-    local warp_status previous_script_config previous_xray_config container_ip
-    local rollback_status=0
-    warp_status="$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
-    [[ "${warp_status}" -eq 1 ]] || return 0
-    previous_script_config="${SCRIPT_CONFIG}"
-    previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")" || return 1
+    local warp_status='' reset_mode='keep' mode_reply='' container_present=0
+    local previous_script_config='' previous_xray_config='' container_ip=''
 
-    exec_docker '--clean-container-logs' || return 1
-    if ! container_ip="$(exec_docker '--prepare-reset-warp')"; then
-        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || true
+    warp_status="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')" || return 1
+    if cmd_exists 'docker' && docker inspect xray-script-warp >/dev/null 2>&1; then
+        container_present=1
+    fi
+    # 先判状态再谈 Docker：配置位未开启且没有容器时本次重置没有可做的事。
+    if [[ "${warp_status}" -ne 1 && "${container_present}" -eq 0 ]]; then
+        log_tip "$(t ".${CUR_FILE}.warp.reset_none")" >&2
+        return 0
+    fi
+
+    # 重置方式只在交互终端询问；非交互调用（脚本/管道）默认保留注册身份。
+    if [[ -t 0 ]]; then
+        while true; do
+            echo -e "  ${GREEN}1)${NC} $(t ".${CUR_FILE}.warp.reset_mode_keep")" >&2
+            echo -e "  ${GREEN}2)${NC} $(t ".${CUR_FILE}.warp.reset_mode_new")" >&2
+            log_config "$(t ".${CUR_FILE}.warp.reset_mode_prompt")" >&2
+            mode_reply="$(read_line_or_abort)" || return 1
+            case "${mode_reply:-1}" in
+            1)
+                reset_mode='keep'
+                break
+                ;;
+            2)
+                reset_mode='new'
+                break
+                ;;
+            *)
+                log_tip "$(t ".${CUR_FILE}.warp.reset_mode_invalid")" >&2
+                ;;
+            esac
+        done
+    fi
+
+    if ! cmd_exists 'docker'; then
+        # 配置位开启或存在残留容器，但 Docker 不可用：明确失败并给出修复方向。
+        log_error "$(t ".${CUR_FILE}.docker_unavailable")" >&2
         return 1
     fi
-    if [[ -z "${container_ip}" ]]; then
-        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || true
+    previous_script_config="${SCRIPT_CONFIG}"
+    if ! previous_xray_config="$(jq '.' "${XRAY_CONFIG_PATH}")"; then
+        log_error "$(t ".${CUR_FILE}.warp.config_unavailable")" >&2
+        return 1
+    fi
+    # 快照 Xray 是否本来在运行：失败回滚只恢复配置文件，不能把用户刻意停止的
+    # 服务启动（handler_restart 对 inactive 服务会 start+enable）。
+    _WARP_RESET_XRAY_WAS_ACTIVE=1
+    if cmd_exists 'systemctl' && ! systemctl -q is-active xray; then
+        _WARP_RESET_XRAY_WAS_ACTIVE=0
+    fi
+
+    # 事务保护覆盖 clean → prepare → apply → commit 全程：中途 Ctrl-C/SIGHUP
+    # 或意外退出都会回滚容器事务并恢复旧配置，不留下悬挂的重置事务。
+    _WARP_RESET_ACTIVE=1
+    _WARP_RESET_COMMITTED=0
+    _WARP_RESET_PREVIOUS_SCRIPT_CONFIG="${previous_script_config}"
+    _WARP_RESET_PREVIOUS_XRAY_CONFIG="${previous_xray_config}"
+    trap '_warp_reset_exit_handler' EXIT
+    trap '_warp_reset_signal_exit 129' HUP
+    trap '_warp_reset_signal_exit 130' INT
+    trap '_warp_reset_signal_exit 143' TERM
+
+    # 日志清理失败不影响重置（docker 层对非 json-file 驱动也只告警）。
+    if ! exec_docker '--clean-container-logs'; then
+        log_warn "$(t ".${CUR_FILE}.warp.log_clean_warn")" >&2
+    fi
+
+    if ! container_ip="$(exec_docker '--prepare-reset-warp' "${reset_mode}")" || [[ -z "${container_ip}" ]]; then
+        _warp_reset_rollback "${previous_script_config}" "${previous_xray_config}" || true
+        _warp_reset_disarm_traps
         return 1
     fi
 
     if ! apply_xray_state_transaction "${previous_script_config}" "${previous_xray_config}"; then
-        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || rollback_status=1
-        SCRIPT_CONFIG="${previous_script_config}"
-        if [[ "${rollback_status}" -eq 0 ]] &&
-            { ! handler_xray_config 1 || ! handler_restart; }; then
-            rollback_status=1
-        fi
-        if [[ "${rollback_status}" -ne 0 ]]; then
-            echo 'WARP reset rollback failed.' >&2
-        fi
+        _warp_reset_rollback "${previous_script_config}" "${previous_xray_config}" || true
+        _warp_reset_disarm_traps
         return 1
     fi
 
     if ! exec_docker '--commit-reset-warp'; then
-        exec_docker '--rollback-reset-warp' >/dev/null 2>&1 || rollback_status=1
-        SCRIPT_CONFIG="${previous_script_config}"
-        if [[ "${rollback_status}" -eq 0 ]] &&
-            { ! handler_xray_config 1 || ! handler_restart; }; then
-            rollback_status=1
-        fi
-        if [[ "${rollback_status}" -ne 0 ]]; then
-            echo 'WARP reset rollback failed.' >&2
-        fi
+        _warp_reset_rollback "${previous_script_config}" "${previous_xray_config}" || true
+        _warp_reset_disarm_traps
         return 1
     fi
+
+    # 提交成功：先标记再解除 trap，避免兜底回滚已提交的事务。
+    _WARP_RESET_COMMITTED=1
+    _warp_reset_disarm_traps
+    if [[ "${warp_status}" -ne 1 ]]; then
+        # 进入时 WARP 处于关闭状态（只残留容器）：重建后保持关闭语义，停掉新容器，
+        # 避免配置位与容器状态不一致、菜单显示「检测到遗留容器」。
+        if ! exec_docker '--disable-warp'; then
+            log_warn "$(t ".${CUR_FILE}.warp.disable_container_fail")" >&2
+        fi
+        log_config "$(t ".${CUR_FILE}.warp.reset_disabled_done")" >&2
+        return 0
+    fi
+    case "${reset_mode}" in
+    new) log_config "$(t ".${CUR_FILE}.warp.reset_new_done")" >&2 ;;
+    *) log_config "$(t ".${CUR_FILE}.warp.reset_keep_done")" >&2 ;;
+    esac
+    return 0
 }
 
 # =============================================================================

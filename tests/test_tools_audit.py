@@ -30,13 +30,13 @@ class StandaloneToolTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_tool(self, path, *args, env=None):
+    def run_tool(self, path, *args, env=None, timeout=30):
         return subprocess.run(
             ["bash", str(ROOT / path), *args],
             env=self.env | (env or {}),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=timeout,
         )
 
     def setup_traffic(self, response, status=0):
@@ -83,18 +83,33 @@ class StandaloneToolTests(unittest.TestCase):
     def setup_warp(self, *, ignore_term=False):
         self.command("warp-svc", ('trap "" TERM\n' if ignore_term else "") + 'echo "$$" >"${TEST_WORK}/daemon-pid"\nexec sleep 60')
         self.command("socat", 'touch "${TEST_WORK}/forwarded"\nexit 9')
-        self.command("warp-cli", '''printf '%s\\n' "$*" >>"${TEST_WORK}/cli-log"
+        self.command("warp-cli", r'''printf '%s\n' "$*" >>"${TEST_WORK}/cli-log"
 # Model real daemon IPC readiness: settings cannot succeed before the
 # background daemon has started. This is an explicit handshake, not a sleep.
-if [[ "$*" == *" settings" ]]; then
+if [[ "$*" == *" settings"* ]]; then
     [[ -s "${TEST_WORK}/daemon-pid" ]]
-elif [[ "$*" == *"registration show"* ]]; then
+elif [[ "$*" == *" registration delete"* ]]; then
+    rm -f "${TEST_WORK}/registered"
+elif [[ "$*" == *" registration show"* ]]; then
     [[ -f "${TEST_WORK}/registered" ]]
-elif [[ "$*" == *"registration new"* ]]; then
+elif [[ "$*" == *" registration new"* ]]; then
     touch "${TEST_WORK}/registered"
+elif [[ "$*" == *" status"* ]]; then
+    printf 'Status update: %s\n' "${TEST_WARP_STATUS:-Connected}"
 elif [[ -n "${TEST_FAIL_STEP:-}" && "$*" == *"${TEST_FAIL_STEP}"* ]]; then
     exit 7
 fi''')
+
+    def warp_env(self, **overrides):
+        state_dir = self.work / "warp-state"
+        state_dir.mkdir(exist_ok=True)
+        env = {
+            "WARP_STATE_DIR": str(state_dir),
+            "WARP_CONNECT_TIMEOUT": "3",
+            "WARP_MONITOR_INTERVAL": "0",
+        }
+        env.update(overrides)
+        return env
 
     def assert_daemon_stopped(self):
         pid = int((self.work / "daemon-pid").read_text())
@@ -103,7 +118,7 @@ fi''')
 
     def test_warp_configuration_failure_stops_daemon_before_forwarding(self):
         self.setup_warp()
-        result = self.run_tool("config/cloudflare-warp/startup.sh", env={"TEST_FAIL_STEP": "mode proxy"})
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env(TEST_FAIL_STEP="mode proxy"))
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "forwarded").exists())
         self.assert_daemon_stopped()
@@ -112,7 +127,7 @@ fi''')
         self.setup_warp()
         # A persisted registration still requires proxy mode and connect.
         (self.work / "registered").touch()
-        result = self.run_tool("config/cloudflare-warp/startup.sh")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env())
         self.assertEqual(result.returncode, 9, result.stderr)
         commands = (self.work / "cli-log").read_text()
         self.assertIn("settings", commands)
@@ -123,16 +138,38 @@ fi''')
 
     def test_warp_first_registration_connects_without_restart(self):
         self.setup_warp()
-        result = self.run_tool("config/cloudflare-warp/startup.sh")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env())
         self.assertEqual(result.returncode, 9, result.stderr)
         self.assertTrue((self.work / "registered").exists())
         self.assertTrue((self.work / "forwarded").exists())
         self.assert_daemon_stopped()
 
+    def test_warp_connect_failure_deregisters_and_reregisters_once(self):
+        self.setup_warp()
+        (self.work / "registered").touch()
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env(TEST_FAIL_STEP="connect"))
+        self.assertNotEqual(result.returncode, 0)
+        commands = (self.work / "cli-log").read_text()
+        self.assertIn("registration delete", commands)
+        self.assertIn("registration new", commands)
+        self.assertFalse((self.work / "forwarded").exists())
+        self.assert_daemon_stopped()
+
+    def test_warp_not_connected_does_not_start_forwarding(self):
+        self.setup_warp()
+        (self.work / "registered").touch()
+        result = self.run_tool(
+            "config/cloudflare-warp/startup.sh",
+            env=self.warp_env(TEST_WARP_STATUS="Disconnected", WARP_CONNECT_TIMEOUT="2"),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "forwarded").exists())
+        self.assert_daemon_stopped()
+
     def test_warp_cleanup_kills_daemon_that_ignores_term(self):
         self.setup_warp(ignore_term=True)
         # run_tool's subprocess deadline also verifies cleanup is bounded.
-        result = self.run_tool("config/cloudflare-warp/startup.sh")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env())
         self.assertEqual(result.returncode, 9, result.stderr)
         self.assert_daemon_stopped()
 

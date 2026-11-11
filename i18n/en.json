@@ -38,7 +38,9 @@
       "not_installed": "Not Installed",
       "not_configured": "Not Configured",
       "enabled": "Enabled",
-      "disabled": "Disabled"
+      "disabled": "Disabled",
+      "warp_abnormal": "Enabled (container unhealthy)",
+      "warp_orphan": "Disabled (orphan container detected)"
     },
     "index": {
       "description": "Xray Management Script",
@@ -152,8 +154,8 @@
       "option6": "Add WARP domain route",
       "info1": "WARP Proxy is deployed via Docker, Docker will be auto-installed.",
       "info2": "WARP Proxy details: https://github.com/haoel/haoel.github.io?tab=readme-ov-file#1043-docker-proxy",
-      "info3": "Re-applying WARP account frequently may get IP banned by Cloudflare.",
-      "info4": "Clear WARP container log files and reset the container.",
+      "info3": "Enable/disable WARP reuses the existing container and WARP registration; disabling keeps configured WARP routing rules",
+      "info4": "Rebuild the WARP image and container; the registration is kept by default, or choose re-registration (changes WARP identity, avoid frequent use)",
       "info5": "Add IP-based block route to ruleTag block-ip.",
       "info6": "Add domain-based block route to ruleTag block-domain.",
       "info7": "(WARP must be enabled) Add WARP IP route to ruleTag warp-ip.",
@@ -212,14 +214,17 @@
       "config_update": "Updating script configuration"
     },
     "purge": {
-      "warning": "Purging removes the Xray server and all local configuration managed by this script, and cannot be undone.",
+      "warning": "Purging removes the Xray server, all local configuration managed by this script, and WARP containers/images/registration data; it cannot be undone.",
       "confirm": "Type yes to continue",
       "cancelled": "Purge cancelled; nothing was changed.",
       "tty_required": "Not an interactive terminal; refusing to purge. Retry from an interactive terminal.",
       "read_ledger_failed": "Failed to read the owned firewall ledger; purge aborted (local state unchanged).",
       "close_port_failed": "Failed to release firewall ports owned by ${owned_feature}; purge aborted (local state unchanged).",
       "legacy_sweep_removed": "Removed a legacy firewall rule",
-      "legacy_sweep_failed": "Failed to remove a legacy firewall rule"
+      "legacy_sweep_failed": "Failed to remove a legacy firewall rule",
+      "warp_start": "Cleaning up WARP container, image and registration data",
+      "warp_success": "WARP container, image and registration data removed",
+      "warp_fail": "WARP cleanup was incomplete; check Docker containers/images and the data directory"
     },
     "xray": {
       "config_update": "Updating Xray configuration"
@@ -247,7 +252,28 @@
       "parse_fail": "Failed to parse vlessenc output, skipping VLESS enc"
     },
     "warp": {
-      "status": "WARP PROXY is disabled, unable to add WARP routing"
+      "status": "WARP PROXY is disabled, unable to add WARP routing",
+      "rules_pending": "WARP Proxy is disabled: routing rules have been saved and will take effect after WARP is enabled.",
+      "unavailable": "WARP Proxy is enabled but the container is unavailable; configuration cannot be applied.",
+      "repair_hint": "Run 【Custom Routing -> Reset WARP Proxy】 to repair, or check logs: docker logs --tail 100 xray-script-warp",
+      "enabled": "WARP Proxy enabled, current state: enabled (endpoint 127.0.0.1:40001)",
+      "disabled_keep_rules": "WARP Proxy disabled; existing WARP routing rules were kept and will take effect again after re-enabling.",
+      "disable_no_docker": "WARP Proxy disabled in configuration; Docker was not found, container state was not changed.",
+      "disable_container_fail": "WARP Proxy disabled in configuration, but stopping the container failed; check the Docker service.",
+      "enable_fail": "Failed to enable WARP.",
+      "reset_none": "WARP Proxy is not enabled and no WARP container was found; nothing to reset.",
+      "reset_mode_prompt": "Reset mode [1=keep WARP registration, rebuild image/container only (default); 2=re-register WARP identity]: ",
+      "reset_mode_keep": "keep WARP registration",
+      "reset_mode_new": "re-register WARP identity (old device will be deregistered)",
+      "reset_mode_invalid": "Enter 1 or 2",
+      "reset_keep_done": "WARP Proxy rebuilt (registration kept), current state: enabled",
+      "reset_new_done": "WARP Proxy rebuilt and re-registered, current state: enabled",
+      "reset_recovered": "WARP reset failed; rolled back to the previous WARP state.",
+      "reset_rollback_fail": "WARP reset failed and rollback was incomplete; WARP was disabled in configuration to avoid routing blackholes. Run reset again to repair.",
+      "disable_config_fail": "Failed to update the Xray configuration while disabling WARP; WARP is still enabled. Retry, or run Reset WARP Proxy if it keeps failing.",
+      "log_clean_warn": "Failed to clear WARP container logs; continuing with the reset",
+      "reset_disabled_done": "WARP Proxy rebuilt; it remains disabled and no routing is active (enable WARP to use it)",
+      "config_unavailable": "Cannot read the current Xray runtime configuration; operation aborted (install or repair Xray first)"
     },
     "geodata": {
       "close_cron": "Successfully stopped geodata auto-update task",
@@ -422,7 +448,9 @@
       "export_prompt": "Enter site ID to export: ",
       "exported": "Edge deployment directory",
       "archive": "Edge archive"
-    }
+    },
+    "docker_unavailable": "Docker daemon is not running. Start it first (systemctl start docker).",
+    "docker_start_fail": "Failed to start the Docker service."
   },
   "read": {
     "version": "Custom version (e.g. v1.0.0): ",
@@ -588,16 +616,35 @@
     "warp": {
       "build": {
         "start": "Building WARP image",
-        "fail": "Failed to build WARP image"
+        "fail": "Failed to build WARP image",
+        "skip": "WARP image is up to date; skipping build"
       },
       "enable": {
         "start": "Enabling WARP container",
-        "success": "WARP container enabled (IP: ${container_ip})"
+        "success": "WARP container enabled (endpoint: ${warp_host})",
+        "fail": "WARP container started but did not reach Connected state within ${timeout} seconds",
+        "recreate": "WARP image or container configuration changed; recreating the container while keeping registration data",
+        "logs_hint": "Check container logs: docker logs --tail 100 xray-script-warp",
+        "start_fail": "Failed to create or start the WARP container"
       },
       "disable": {
         "stop": "Stopping WARP container",
-        "success": "WARP container stopped"
-      }
+        "success": "WARP container stopped (restart policy is now manual; host reboots will not start it)",
+        "restart_warn": "Failed to update the WARP container restart policy; Docker may start the container again after a restart"
+      },
+      "reset": {
+        "previous_pending": "An unfinished WARP reset transaction was detected; recovering automatically",
+        "registration_delete_warn": "Could not deregister the old WARP device (container not executable or command failed); the old device may remain on Cloudflare",
+        "cleanup_warn": "WARP reset committed, but old transaction artifacts were not fully cleaned up; they will be cleaned on the next reset",
+        "rollback_failed": "WARP reset rollback was incomplete; transaction artifacts were retained"
+      },
+      "purge": {
+        "start": "Cleaning up WARP container, image and registration data",
+        "success": "WARP container, image and registration data removed",
+        "fail": "WARP cleanup was incomplete; check manually"
+      },
+      "log_driver_unsupported": "WARP container log driver is not json-file; log cleanup skipped",
+      "unknown_option": "Unknown option"
     },
     "cloudreve_v3": {
       "create_dir": "Creating Cloudreve v3 related directories.",

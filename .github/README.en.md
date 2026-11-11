@@ -74,9 +74,11 @@
 5. Direct Xray CDN requires an HTTPS origin mode (Cloudflare Full or Full (strict), never Flexible). Enable HTTP/2/gRPC at the CDN for streaming XHTTP, and restrict origin port 443 to CDN source IPs in the VPS firewall/security group where possible. This mode has no camouflage site or Cloudreve
 6. For upstream/downstream separation details, see [XHTTP: Beyond REALITY][XHTTP] and [xhttp 五合一配置][xhttp 五合一配置]
 7. When using SNI to obtain a certificate and encountering the error ["Could not get nonce, let's try again"], please check the [ZeroSSL Status Page](https://status.zerossl.com/) . It is highly likely that ZeroSSL's "Free ACME Service" is experiencing "Service disruption" or "Service outage"
-8. Version v2025.11.19 resolves the issue where 【"WARP was enabled without log limits, causing container logs to accumulate continuously, eventually filling up disk space"】.
-   1. Users who have already started WARP can go to 【"Manage Configuration"】 -> 【"Routing Management"】 and select the 【"Reset WARP Proxy"】 option. This option clears container logs and resets the WARP Proxy.
-   2. Log limits have been added. To use the WARP feature, simply enable it directly.
+8. WARP Proxy notes:
+   1. 【"Manage Configuration"】 -> 【"Custom Routing"】 -> 【"Enable/Disable WARP Proxy"】 toggles WARP. Disabling keeps existing WARP routing rules (they take effect again after re-enabling) and changes the container restart policy to manual so host/Docker restarts will not bring it back.
+   2. 【"Reset WARP Proxy"】 rebuilds the image and container. By default it **keeps the current WARP registration identity** (rebuild only); choosing re-registration will try to deregister the old device and register a new one, so avoid doing it frequently.
+   3. After a script upgrade, the first WARP enable automatically detects the image content fingerprint and rebuilds the image/container if needed (registration data is kept), so new container startup logic takes effect without a manual reset.
+   4. WARP proxy mode only supports TCP; UDP traffic (QUIC, games, etc.) is not guaranteed to work.
 9. Version v2026.07.28 fixes Nginx CDN path drift, VLESS enc prompts on pure-HY2 multi-node setups, config generation after HY2 certificate failure, ACME email validation, current X25519 output parsing, continuation after service failures, and accidental script self-update downgrades.
 
 ## Share Links
@@ -157,7 +159,7 @@ Copyright (C) zxcvos | https://github.com/zxcvos/Xray-script
 -------------------------------------------
 Xray       : v25.7.26
 CONFIG     : VLESS-XHTTP-REALITY
-WARP Proxy : Running
+WARP Proxy : Enabled
 -------------------------------------------
 
 --------------- Xray-script ---------------
@@ -232,7 +234,7 @@ The drawback is that compilation takes a long time.
 
 **Cloudreve:** `$HOME/.xray-script/cloudreve`
 
-**Cloudflare-warp:** `$HOME/.xray-script/cloudflare_warp`
+**Cloudflare-warp:** `$HOME/.xray-script/docker/cloudflare-warp` (contains WARP device registration credentials; treat as sensitive data when backing up or cleaning up)
 
 **Xray:** See **[Xray-install](https://github.com/XTLS/Xray-install)**
 

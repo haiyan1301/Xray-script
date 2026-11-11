@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.10.28"
+readonly SCRIPT_VERSION="v2026.11.11"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -622,6 +622,7 @@ function validate_xray_script_archive() {
         # 容器构建与编排文件
         'config/cloudflare-warp/Dockerfile'
         'config/cloudflare-warp/startup.sh'
+        'config/cloudflare-warp/healthcheck.sh'
         'config/cloudreve/v3/docker-compose.yaml'
         'config/cloudreve/v4/docker-compose.yaml'
     )

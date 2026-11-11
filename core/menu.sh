@@ -399,6 +399,40 @@ function print_banner() {
 }
 
 # =============================================================================
+# 函数名称: warp_status_text
+# 功能描述: 结合 config.json 的开关位与 WARP 容器的真实状态，生成状态栏文案。
+#           1. 开关为 1 且容器已连接 → 绿色「已启用」；
+#           2. 开关为 1 但容器缺失/停止/未连接/Docker 不可用 → 黄色「已启用（容器异常）」；
+#           3. 开关为 0 但检测到仍在运行的容器 → 黄色「未启动（检测到遗留容器）」；
+#           4. 其余 → 红色「未启动」。
+#           探测通过 service/docker.sh --warp-status 完成，有 timeout 时限，失败不阻塞菜单。
+# 参数: 无 (读取全局变量 SCRIPT_CONFIG_PATH)
+# 返回值: 无 (echo 带颜色的状态文本)
+# =============================================================================
+function warp_status_text() {
+    local config_warp='0' container_state='' probe_prefix=''
+
+    config_warp="$(jq -r '(.xray.warp // 0) | tonumber? // 0' "${SCRIPT_CONFIG_PATH}" 2>/dev/null || echo 0)"
+    [[ "${config_warp}" =~ ^[0-9]+$ ]] || config_warp=0
+    if cmd_exists docker; then
+        cmd_exists timeout && probe_prefix='timeout 8'
+        container_state="$(${probe_prefix} bash "${PROJECT_ROOT}/service/docker.sh" --warp-status 2>/dev/null | head -n 1)" || container_state=''
+    fi
+
+    if [[ "${config_warp}" -eq 1 ]]; then
+        case "${container_state}" in
+        enabled) printf '%s%s%s\n' "${GREEN}" "$(t ".${CUR_FILE}.status.enabled")" "${NC}" ;;
+        *) printf '%s%s%s\n' "${YELLOW}" "$(t ".${CUR_FILE}.status.warp_abnormal")" "${NC}" ;;
+        esac
+    else
+        case "${container_state}" in
+        enabled) printf '%s%s%s\n' "${YELLOW}" "$(t ".${CUR_FILE}.status.warp_orphan")" "${NC}" ;;
+        *) printf '%s%s%s\n' "${RED}" "$(t ".${CUR_FILE}.status.disabled")" "${NC}" ;;
+        esac
+    fi
+}
+
+# =============================================================================
 # 函数名称: print_status
 # 功能描述: 打印当前脚本配置的状态信息，包括 Xray 版本、配置标签和 WARP 状态。
 # 参数: 无 (直接使用全局变量 SCRIPT_CONFIG_PATH 和 I18N)
@@ -411,7 +445,7 @@ function print_status() {
     # 从配置中提取 Xray 版本、配置标签和 WARP 状态
     local XRAY_VERSION=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.version // ""')
     local CONFIG_TAG=$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')
-    local WARP_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.warp // 0) | tonumber? // 0')
+    local WARP_STATUS_TEXT=''
     local REVERSE_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.reverse // 0) | tonumber? // 0')
     local LAN_STATUS=$(echo "${SCRIPT_CONFIG}" | jq -r '(.xray.lan.enabled // 0) | tonumber? // 0')
 
@@ -425,8 +459,9 @@ function print_status() {
     [[ ${XRAY_VERSION} ]] && XRAY_VERSION="${GREEN}${XRAY_VERSION}${NC}" || XRAY_VERSION="${RED}${not_installed}${NC}"
     # 根据配置标签是否存在，设置显示颜色和文本
     [[ ${CONFIG_TAG} ]] && CONFIG_TAG="${GREEN}${CONFIG_TAG}${NC}" || CONFIG_TAG="${RED}${not_configured}${NC}"
-    # 根据 WARP 状态 (1 或 0)，设置显示颜色和文本
-    [[ ${WARP_STATUS} -eq 1 ]] && WARP_STATUS="${GREEN}${enabled}${NC}" || WARP_STATUS="${RED}${disabled}${NC}"
+    # WARP 状态同时参考 config bit 与容器真实状态（见 warp_status_text），
+    # 避免容器已停止/被删除时状态栏仍显示「已启用」。
+    WARP_STATUS_TEXT="$(warp_status_text)"
     # 根据反向代理状态，设置显示颜色和文本
     [[ ${REVERSE_STATUS} -eq 1 ]] && REVERSE_STATUS="${GREEN}${enabled}${NC}" || REVERSE_STATUS="${RED}${disabled}${NC}"
     [[ ${LAN_STATUS} -eq 1 ]] && LAN_STATUS="${GREEN}${enabled}${NC}" || LAN_STATUS="${RED}${disabled}${NC}"
@@ -435,7 +470,7 @@ function print_status() {
     echo -e "------------------------------------------------------"
     echo -e "Xray          : ${XRAY_VERSION}"
     echo -e "CONFIG        : ${CONFIG_TAG}"
-    echo -e "WARP Proxy    : ${WARP_STATUS}"
+    echo -e "WARP Proxy    : ${WARP_STATUS_TEXT}"
     echo -e "Reverse Proxy : ${REVERSE_STATUS}"
     echo -e "Virtual LAN   : ${LAN_STATUS}"
     echo -e "------------------------------------------------------"

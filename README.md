@@ -75,9 +75,11 @@
 5. CDN 的 Nginx 后端会重建托管站点；Xray 直连后端会停止并禁用 Nginx、移除其自动更新任务，由 Xray 直接监听 443，以节省低配 VPS 的内存和后台进程。
 6. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
 7. 使用 SNI 获取证书时遇到 【Could not get nonce, let's try again】 请查看 [ZeroSSL 状态页](https://status.zerossl.com/)，大概率是 ZeroSSL 的【Free ACME Service】处于 【Service disruption】或【Service outage】状态。
-8. v2025.11.19 版本解决【开启 WARP 时没有设置日志限制，导致容器日志会一直叠加，最终占满硬盘空间】问题。
-   1. 已启动 WARP 分流的用户可以在【管理配置】->【分流管理】中选择【重置 WARP Proxy】选项，该选项实现清空容器日志与重置 WARP Proxy。
-   2. 已添加日志限制，如需使用 WARP 功能直接启用即可。
+8. WARP Proxy 说明：
+   1. 【管理配置】->【自定义分流】->【开/关 WARP Proxy】用于开启/关闭。关闭 WARP 时**已配置的 WARP 分流规则会保留**，重新开启后继续生效；容器重启策略会同步改为手动，主机/Docker 重启后不会自动恢复。
+   2. 【重置 WARP Proxy】会重建镜像与容器：默认**保留当前 WARP 注册身份**（只重建，不更换账号）；也可选择重新注册（会尝试注销旧设备并申请新账号，请勿频繁操作）。
+   3. 脚本升级后首次开启 WARP 会自动检测镜像内容指纹并按需重建镜像/容器（保留注册数据），升级后无需手动重置即可让新的容器启动逻辑生效。
+   4. WARP Proxy 仅提供 TCP 代理（proxy 模式不支持 UDP），QUIC、游戏等 UDP 流量不保证可用。
 9. Xray 直连 CDN 要求 CDN 使用 HTTPS 回源（Cloudflare 为 Full 或 Full (strict)，不能使用 Flexible）；使用流式 XHTTP 时还需在 CDN 开启 HTTP/2/gRPC。建议在 VPS 防火墙/安全组中将源站 443 仅放行 CDN 回源 IP；该模式不提供伪装站点或 Cloudreve。
 10. v2026.07.28 修复 CDN 路径未同步 Nginx、多节点纯 HY2 误显示 VLESS enc、HY2 证书失败后仍生成配置，以及 ACME 邮箱误校验、X25519 新版输出解析、服务失败后仍继续分享和脚本自更新误降级等安装流程问题。
 11. v2026.08.16 修复 ACME ECC 证书列表解析、HY2/CDN 证书复用选择和重复申请失败问题；重新申请证书会强制使用 `--force`，复用证书则只重新部署已有 ACME 证书。
@@ -88,6 +90,7 @@
 16. v2026.09.10 修复已有 CDN 配置从旧版 TCP `:443` 监听迁移到共享 Unix Socket 时的兼容性问题；为 CDN 下行站点使用无重复选项的 socket 监听，避免 Nginx 因 `duplicate listen options` 校验失败。
 17. v2026.09.11 继续清理失败回滚或旧版本遗留的 CDN 站点配置，扫描 `sites-available` 和 `sites-enabled` 中所有受脚本管理的 CDN Socket 配置，避免残留域名再次触发重复监听选项。
 18. v2026.09.12 修复 CDN 使用 Nginx 回源时误删 `stream.conf` 导致公网 443 未监听的问题；该模式现在会正确生成并加载 TCP 443 分流配置，CDN 直连 Xray 模式仍由 Xray 负责监听 443。
+19. v2026.11.11 WARP 全链路修复：就绪判定改为 WARP 隧道 `Connected` + ready 标记（不再只探 socat 端口）、开启/重置超时可配且失败不再静默退出；镜像按内容指纹自动重建并在升级后自动迁移旧容器（保留 WARP 注册数据）；端点固定发布到 `127.0.0.1:40001`；关闭 WARP 保留已有分流规则且重启 Docker/主机不会让容器复活；重置支持「保留注册身份」/「重新注册」两种模式；卸载会清理 WARP 容器/镜像/注册数据；修复关闭 WARP 时会永久删除分流规则、状态栏误报等问题。
 
 ## 分享链接
 
@@ -193,7 +196,7 @@ Copyright (C) zxcvos | https://github.com/zxcvos/Xray-script
 -------------------------------------------
 Xray       : v25.7.26
 CONFIG     : VLESS-Vision-REALITY
-WARP Proxy : 已启动
+WARP Proxy : 已启用
 -------------------------------------------
 
 --------------- Xray-script ---------------
@@ -271,7 +274,7 @@ CDN/SNI 的域名和证书可在「管理配置 -> CDN / SNI 站点管理」中�
 
 **Cloudreve:** `$HOME/.xray-script/docker/cloudreve`
 
-**Cloudflare-warp:** `$HOME/.xray-script/docker/warp`
+**Cloudflare-warp:** `$HOME/.xray-script/docker/cloudflare-warp`（含 WARP 设备注册凭据，备份/清理时按敏感数据处理）
 
 **Xray:** 见 **[Xray-install](https://github.com/XTLS/Xray-install)**
 

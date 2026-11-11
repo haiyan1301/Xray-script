@@ -38,7 +38,9 @@
       "not_installed": "未安装",
       "not_configured": "未配置",
       "enabled": "已启用",
-      "disabled": "未启动"
+      "disabled": "未启动",
+      "warp_abnormal": "已启用（容器异常）",
+      "warp_orphan": "未启动（检测到遗留容器）"
     },
     "index": {
       "description": "Xray 管理脚本",
@@ -152,8 +154,8 @@
       "option6": "添加 WARP domain 分流",
       "info1": "WARP Proxy 功能通过 Docker 部署, 开启时自动安装 Docker",
       "info2": "WARP Proxy 详情 https://github.com/haoel/haoel.github.io?tab=readme-ov-file#1043-docker-%E4%BB%A3%E7%90%86",
-      "info3": "每次成功开启 WARP Proxy 都会重新申请 WARP 账号, 频繁操作可能导致 IP 被 Cloud­flare 拉黑",
-      "info4": "清空 WARP 容器日志文件，并重置容器",
+      "info3": "开/关 WARP 复用已有容器与 WARP 注册身份；关闭时会保留已配置的 WARP 分流规则",
+      "info4": "重建 WARP 镜像与容器；默认保留注册身份，也可选择重新注册（会更换 WARP 身份，请勿频繁操作）",
       "info5": "添加关于 ip 的屏蔽分流, 相关分流添加在 ruleTag 为 block-ip 中",
       "info6": "添加关于 domain 的屏蔽分流, 相关分流添加在 ruleTag 为 block-domain 中",
       "info7": "(需要开启 WARP)添加关于 ip 的 WARP 分流, 相关分流添加在 ruleTag 为 warp-ip 中",
@@ -212,14 +214,17 @@
       "config_update": "正在更新脚本配置"
     },
     "purge": {
-      "warning": "卸载将删除服务端 Xray 与本脚本的全部本地配置，且无法恢复。",
+      "warning": "卸载将删除服务端 Xray 与本脚本的全部本地配置，并清理 WARP 容器/镜像与注册数据，且无法恢复。",
       "confirm": "请输入 yes 确认继续",
       "cancelled": "已取消卸载，未做任何改动。",
       "tty_required": "当前不是交互式终端，已拒绝执行卸载。请在交互式终端中重试。",
       "read_ledger_failed": "无法读取防火墙放行记录，已中止卸载（本地配置未被修改）。",
       "close_port_failed": "回收 ${owned_feature} 的防火墙放行端口失败，已中止卸载（本地配置未被修改）。",
       "legacy_sweep_removed": "已回收历史遗留的防火墙放行规则",
-      "legacy_sweep_failed": "回收历史遗留的防火墙放行规则失败"
+      "legacy_sweep_failed": "回收历史遗留的防火墙放行规则失败",
+      "warp_start": "正在清理 WARP 容器、镜像与注册数据",
+      "warp_success": "WARP 容器、镜像与注册数据已清理",
+      "warp_fail": "WARP 清理未完全成功，请检查 Docker 容器/镜像与数据目录"
     },
     "xray": {
       "config_update": "正在更新 Xray 配置"
@@ -247,7 +252,28 @@
       "parse_fail": "解析 vlessenc 输出失败，已跳过 VLESS enc"
     },
     "warp": {
-      "status": "WARP PROXY 没有开启，无法添加 WARP 分流"
+      "status": "WARP PROXY 没有开启，无法添加 WARP 分流",
+      "rules_pending": "WARP Proxy 未开启：分流规则已保存，开启 WARP 后自动生效",
+      "unavailable": "WARP Proxy 已开启，但容器不可用，无法应用配置",
+      "repair_hint": "请到【自定义分流 → 重置 WARP Proxy】执行修复，或查看日志：docker logs --tail 100 xray-script-warp",
+      "enabled": "WARP Proxy 已开启，当前状态: 已启用（端点 127.0.0.1:40001）",
+      "disabled_keep_rules": "WARP Proxy 已关闭；已有 WARP 分流规则已保留，重新开启后继续生效",
+      "disable_no_docker": "WARP Proxy 配置已关闭；未检测到 Docker，容器状态未处理",
+      "disable_container_fail": "WARP Proxy 配置已关闭，但停止容器失败；请检查 Docker 服务状态",
+      "enable_fail": "开启 WARP 失败",
+      "reset_none": "WARP Proxy 未启用，且未发现 WARP 容器，无需重置",
+      "reset_mode_prompt": "请选择重置方式 [1=保留 WARP 注册身份，仅重建镜像/容器（默认）；2=重新注册 WARP 身份]: ",
+      "reset_mode_keep": "保留 WARP 注册身份",
+      "reset_mode_new": "重新注册 WARP 身份（会注销旧设备）",
+      "reset_mode_invalid": "请输入 1 或 2",
+      "reset_keep_done": "WARP Proxy 已重建（保留原注册身份），当前状态: 已启用",
+      "reset_new_done": "WARP Proxy 已重建并重新注册，当前状态: 已启用",
+      "reset_recovered": "重置 WARP 失败，已回滚到原有 WARP 状态",
+      "reset_rollback_fail": "重置 WARP 失败且回滚不完整；为避免分流黑洞已关闭 WARP 配置，请再次执行重置修复",
+      "disable_config_fail": "关闭 WARP 时更新 Xray 配置失败，WARP 仍处于开启状态，请重试；若持续失败请执行重置 WARP 修复",
+      "log_clean_warn": "清理 WARP 容器日志失败，继续执行重置",
+      "reset_disabled_done": "WARP Proxy 已重建；当前配置为关闭，未启用任何分流（如需使用请开启 WARP）",
+      "config_unavailable": "无法读取当前 Xray 运行配置，操作已中止（请先安装或修复 Xray）"
     },
     "geodata": {
       "close_cron": "成功停止 geodata 自动更新任务",
@@ -422,7 +448,9 @@
       "export_prompt": "请输入要导出的地点 ID: ",
       "exported": "地点端部署目录",
       "archive": "地点端压缩包"
-    }
+    },
+    "docker_unavailable": "Docker 服务未运行，请先启动 Docker（systemctl start docker）",
+    "docker_start_fail": "尝试启动 Docker 服务失败"
   },
   "read": {
     "version": "自选版本(e.g. v1.0.0): ",
@@ -588,16 +616,35 @@
     "warp": {
       "build": {
         "start": "正在构建 WARP 镜像",
-        "fail": "WARP 镜像构建失败"
+        "fail": "WARP 镜像构建失败",
+        "skip": "WARP 镜像已是最新，跳过构建"
       },
       "enable": {
         "start": "正在开启 WARP 容器",
-        "success": "WARP 容器已启用 (IP: ${container_ip})"
+        "success": "WARP 容器已启用 (端点: ${warp_host})",
+        "fail": "WARP 容器已启动，但 ${timeout} 秒内未进入 Connected 状态",
+        "recreate": "检测到 WARP 镜像或容器配置已更新，正在保留注册数据重建容器",
+        "logs_hint": "请查看容器日志：docker logs --tail 100 xray-script-warp",
+        "start_fail": "WARP 容器创建或启动失败"
       },
       "disable": {
         "stop": "正在停止 WARP 容器",
-        "success": "WARP 容器已停止"
-      }
+        "success": "WARP 容器已停止（重启策略已改为手动，重启主机不会自动恢复）",
+        "restart_warn": "无法修改 WARP 容器重启策略，Docker 重启后容器可能自动恢复"
+      },
+      "reset": {
+        "previous_pending": "检测到未完成的 WARP 重置事务，正在自动恢复",
+        "registration_delete_warn": "无法注销旧 WARP 设备（容器不可执行或命令失败），旧设备可能残留在 Cloudflare",
+        "cleanup_warn": "WARP 重置已提交，但旧事务工件清理未完成，将在下次重置时自动清理",
+        "rollback_failed": "WARP 重置回滚未完成，事务工件已保留"
+      },
+      "purge": {
+        "start": "正在清理 WARP 容器、镜像与注册数据",
+        "success": "WARP 容器、镜像与注册数据已清理",
+        "fail": "WARP 清理未完全成功，请手动检查"
+      },
+      "log_driver_unsupported": "当前 WARP 容器日志驱动不是 json-file，已跳过日志清理",
+      "unknown_option": "未知选项"
     },
     "cloudreve_v3": {
       "create_dir": "创建 Cloudreve v3 相关目录。",
