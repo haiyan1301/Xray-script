@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cloudflare WARP 容器入口：启动守护进程、确保注册、切到 proxy 模式并连接，
-# 连接确认后写 ready 标记并启动 40001 -> 40000 转发，运行期持续监督隧道状态。
+# 连接和 40001 -> 40000 转发均确认后写 ready 标记，运行期持续监督隧道状态。
 # 任何致命故障都以非 0 退出，交给容器的 restart 策略；状态日志一律写 stderr。
 set -euo pipefail
 
@@ -25,6 +25,7 @@ DISCONNECTED_LIMIT=3
 
 warp_svc_pid=''
 forwarding_pid=''
+preserve_registration=0
 
 # 统一日志入口：容器内没有 lib/log.sh，直接写 stderr 供 docker logs 查看。
 function log_info() {
@@ -49,6 +50,7 @@ function warp_cli() {
 function cleanup() {
     local child_pid
     trap - EXIT HUP INT TERM
+    rm -f -- "${WARP_READY_FILE}" 2>/dev/null || true
     for child_pid in "${forwarding_pid}" "${warp_svc_pid}"; do
         [[ -z "${child_pid}" ]] || kill "${child_pid}" 2>/dev/null || true
     done
@@ -80,6 +82,11 @@ function prepare_state_dir() {
         exit 1
     fi
     rm -f -- "${WARP_READY_FILE}" 2>/dev/null || true
+    # Check before warp-svc writes its own state. An unknown CLI error with
+    # existing state must not be interpreted as permission to replace identity.
+    if [[ -n "$(find "${WARP_STATE_DIR}" -mindepth 1 -maxdepth 1 ! -name 'ready.tmp' -print -quit)" ]]; then
+        preserve_registration=1
+    fi
 }
 
 # 写入 ready 标记（先写临时文件再原子替换）；宿主 wait_for_warp 以该标记 + status 判定就绪。
@@ -119,7 +126,7 @@ function wait_for_connected() {
     while :; do
         kill -0 "${warp_svc_pid}" 2>/dev/null ||
             { log_error "Cloudflare WARP daemon exited while waiting for connection (stage=connect-check)"; exit 1; }
-        if status_connected; then
+        if status_connected && probe_proxy_port; then
             return 0
         fi
         (( SECONDS < deadline )) || break
@@ -128,40 +135,56 @@ function wait_for_connected() {
     return 1
 }
 
-# 确保存在可用注册：registration show 失败时 registration new 重试（最多 3 次，间隔 2s），
-# 成功后再次 registration show 校验；返回非 0 表示注册失败。
+# 已成功注册的标记不依赖客户端私有文件布局；同时保护旧版的 reg.json。
+function has_registration_identity() {
+    [[ -e "${WARP_STATE_DIR}/.registration-established" ||
+        -L "${WARP_STATE_DIR}/.registration-established" ||
+        -e "${WARP_STATE_DIR}/reg.json" || -L "${WARP_STATE_DIR}/reg.json" ]]
+}
+
+function remember_registration() {
+    : >"${WARP_STATE_DIR}/.registration-established"
+}
+
+# 普通 settings/log 文件可能由一次失败的首次启动留下。仅明确的未注册响应
+# 允许这种目录重试；超时、IPC 错误和未知响应都不能授权替换已有身份。
+function registration_missing() {
+    grep -qiE '^[[:space:]]*(Error:[[:space:]]*)?Missing registration([[:space:].:]|$)' <<<"$1"
+}
+
+# 只为确认尚未注册的设备申请身份；申请成功后即使查询暂时失败也不重复申请。
 function ensure_registration() {
     local attempt=1
-    if warp_cli registration show >/dev/null 2>&1; then
-        return 0
+    local registration_output=''
+    if registration_output="$(warp_cli registration show 2>&1)"; then
+        remember_registration
+        return $?
+    fi
+    if has_registration_identity ||
+        { [[ "${preserve_registration}" -eq 1 ]] && ! registration_missing "${registration_output}"; }; then
+        log_error "Existing WARP registration could not be read; keeping its data (stage=registration)"
+        return 1
     fi
     log_info "Registering a new Cloudflare WARP device"
     while (( attempt <= REGISTRATION_ATTEMPTS )); do
-        if warp_cli registration new >/dev/null 2>&1 && warp_cli registration show >/dev/null 2>&1; then
+        if warp_cli registration new >/dev/null 2>&1; then
+            # Save before verification: a failed follow-up query must not replace
+            # an identity created successfully in this or a previous startup.
+            remember_registration || return 1
+            warp_cli registration show >/dev/null 2>&1 || return 1
             return 0
+        fi
+        # A timed-out command may still have registered the daemon. Re-query it
+        # and retry only after an explicit missing-registration response.
+        if registration_output="$(warp_cli registration show 2>&1)"; then
+            remember_registration
+            return $?
+        fi
+        if has_registration_identity || ! registration_missing "${registration_output}"; then
+            log_error "Registration outcome is uncertain; preserving device state (stage=registration)"
+            return 1
         fi
         log_warn "warp-cli registration new failed (attempt ${attempt}/${REGISTRATION_ATTEMPTS})"
-        if (( attempt < REGISTRATION_ATTEMPTS )); then
-            sleep "${RETRY_INTERVAL}"
-        fi
-        attempt=$((attempt + 1))
-    done
-    return 1
-}
-
-# 坏注册自愈：删除现有注册并重新注册一次（有上限），成功后由调用方重试失败的配置动作。
-function repair_registration() {
-    local stage="$1"
-    local attempt=1
-    log_warn "WARP '${stage}' failed with the current registration; resetting registration (stage=${stage})"
-    if ! warp_cli registration delete >/dev/null 2>&1; then
-        log_warn "warp-cli registration delete failed; continuing with re-registration (stage=${stage})"
-    fi
-    while (( attempt <= REGISTRATION_ATTEMPTS )); do
-        if warp_cli registration new >/dev/null 2>&1 && warp_cli registration show >/dev/null 2>&1; then
-            return 0
-        fi
-        log_warn "warp-cli registration new failed after reset (attempt ${attempt}/${REGISTRATION_ATTEMPTS})"
         if (( attempt < REGISTRATION_ATTEMPTS )); then
             sleep "${RETRY_INTERVAL}"
         fi
@@ -189,40 +212,29 @@ function warp_cli_retry() {
     return 1
 }
 
-# 配置 proxy 模式并连接：每步最多 3 次重试；仍失败时做一次坏注册自愈再重试，仍失败返回 1。
+# 配置失败只重试连接，不注销身份；重新注册仅由显式 new 重置操作执行。
 function configure_warp() {
     log_info "Setting Cloudflare WARP mode to proxy"
     if ! warp_cli_retry "${CONFIG_ATTEMPTS}" "${RETRY_INTERVAL}" mode proxy; then
-        repair_registration 'mode proxy' ||
-            { log_error "Cloudflare WARP proxy mode could not be enabled (stage=mode-proxy)"; return 1; }
-        if ! warp_cli_retry "${CONFIG_ATTEMPTS}" "${RETRY_INTERVAL}" mode proxy; then
-            log_error "Cloudflare WARP proxy mode could not be enabled after registration reset (stage=mode-proxy)"
-            return 1
-        fi
+        log_error "Cloudflare WARP proxy mode could not be enabled; registration preserved (stage=mode-proxy)"
+        return 1
     fi
     log_info "Connecting Cloudflare WARP"
     if ! warp_cli_retry "${CONFIG_ATTEMPTS}" "${RETRY_INTERVAL}" connect; then
-        repair_registration 'connect' ||
-            { log_error "Cloudflare WARP connect failed (stage=connect)"; return 1; }
-        if ! warp_cli_retry "${CONFIG_ATTEMPTS}" "${RETRY_INTERVAL}" connect; then
-            log_error "Cloudflare WARP connect failed after registration reset (stage=connect)"
-            return 1
-        fi
+        log_error "Cloudflare WARP connect failed; registration preserved (stage=connect)"
+        return 1
     fi
 }
 
-# 尽力探测容器内 40000（WARP 本地 socks 代理）；失败只告警，不阻塞启动。
+# Connected 不是代理可用的充分条件；拒绝缺少有界 TCP 探测的环境。
 function probe_proxy_port() {
-    if ! command -v timeout >/dev/null 2>&1; then
-        log_warn "timeout command is not available; skipping 127.0.0.1:${WARP_PROXY_PORT} probe"
-        return 0
-    fi
-    if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${WARP_PROXY_PORT}" 2>/dev/null; then
-        log_info "Cloudflare WARP proxy is accepting connections on 127.0.0.1:${WARP_PROXY_PORT}"
-    else
-        log_warn "Cloudflare WARP proxy 127.0.0.1:${WARP_PROXY_PORT} is not accepting connections yet; continuing because status is Connected"
-    fi
-    return 0
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${WARP_PROXY_PORT}" 2>/dev/null
+}
+
+function probe_forward_port() {
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${WARP_FORWARD_PORT}" 2>/dev/null
 }
 
 # 子进程存活检查：socat 退出时取其退出码退出容器（兼容 rc=9 语义），
@@ -251,10 +263,16 @@ function supervise() {
     # 不必等到第一个巡检周期（默认 15s）才退出。
     sleep 1
     check_children
+    if ! probe_proxy_port || ! probe_forward_port; then
+        log_error "WARP proxy or forwarder is not accepting connections (stage=proxy-ready)"
+        exit 1
+    fi
+    mark_ready
+    log_info "Cloudflare WARP is ready (${WARP_READY_FILE})"
     while :; do
         sleep "${WARP_MONITOR_INTERVAL}"
         check_children
-        if status_connected; then
+        if status_connected && probe_proxy_port && probe_forward_port; then
             if (( disconnected_count > 0 )); then
                 log_info "Cloudflare WARP tunnel is connected again"
                 disconnected_count=0
@@ -263,7 +281,7 @@ function supervise() {
         else
             disconnected_count=$((disconnected_count + 1))
             remove_ready
-            log_warn "Cloudflare WARP is not Connected (${disconnected_count}/${DISCONNECTED_LIMIT})"
+            log_warn "Cloudflare WARP tunnel or proxy is unavailable (${disconnected_count}/${DISCONNECTED_LIMIT})"
             if (( disconnected_count >= DISCONNECTED_LIMIT )); then
                 log_error "Cloudflare WARP stayed disconnected for ${DISCONNECTED_LIMIT} checks; exiting container so Docker can restart it"
                 exit 1
@@ -303,14 +321,10 @@ if ! configure_warp; then
 fi
 
 if ! wait_for_connected; then
-    log_error "Cloudflare WARP did not reach the Connected state within ${WARP_CONNECT_TIMEOUT}s (stage=connect-check)"
+    log_error "Cloudflare WARP tunnel and SOCKS proxy did not become ready within ${WARP_CONNECT_TIMEOUT}s (stage=connect-check)"
     exit 1
 fi
 log_info "Cloudflare WARP tunnel is connected"
-
-probe_proxy_port
-mark_ready
-log_info "Cloudflare WARP is ready (${WARP_READY_FILE})"
 
 log_info "Forwarding 0.0.0.0:${WARP_FORWARD_PORT} to 127.0.0.1:${WARP_PROXY_PORT}"
 socat "TCP-LISTEN:${WARP_FORWARD_PORT},reuseaddr,fork" "TCP:127.0.0.1:${WARP_PROXY_PORT}" &

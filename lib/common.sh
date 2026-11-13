@@ -212,13 +212,22 @@ function hy2_ip_cron_identifier() {
     local suffix=" --ecc --force --home ${HOME}/.acme.sh >/dev/null 2>&1"
     local marker=' # xray-script-hy2-ip-renew'
     local identifier
+    local marked=0
 
-    [[ "${line}" == *"${marker}" ]] && line="${line%"${marker}"}"
+    if [[ "${line}" == *"${marker}" ]]; then
+        marked=1
+        line="${line%"${marker}"}"
+    fi
     [[ "${line}" == "${prefix}"*"${suffix}" ]] || return 1
     identifier="${line#"${prefix}"}"
     identifier="${identifier%"${suffix}"}"
     [[ "${line}" == "${prefix}${identifier}${suffix}" ]] || return 1
-    valid_ip_literal "${identifier}" || return 1
+    # Legacy unmarked jobs belonged to this script only for literal IPs.
+    # New jobs can target a DNS primary record containing an IP SAN, but
+    # require our marker so a user-created domain renewal is not removed.
+    if ! valid_ip_literal "${identifier}"; then
+        [[ "${marked}" -eq 1 ]] && valid_domain "${identifier}" || return 1
+    fi
     printf '%s\n' "${identifier}"
 }
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,6 +82,14 @@ class StandaloneToolTests(unittest.TestCase):
         self.assertNotIn("SUM->TOTAL", result.stdout)
 
     def setup_warp(self, *, ignore_term=False):
+        # Simulate the proxy probe separately from warp-cli/daemon lifecycle.
+        real_timeout = shutil.which("timeout")
+        self.command("timeout", r'''
+if [[ "$*" == *'/dev/tcp/'* ]]; then
+    [[ "${TEST_PROXY_CLOSED:-0}" != 1 ]]
+else
+    exec "''' + real_timeout + r'''" "$@"
+fi''')
         self.command("warp-svc", ('trap "" TERM\n' if ignore_term else "") + 'echo "$$" >"${TEST_WORK}/daemon-pid"\nexec sleep 60')
         self.command("socat", 'touch "${TEST_WORK}/forwarded"\nexit 9')
         self.command("warp-cli", r'''printf '%s\n' "$*" >>"${TEST_WORK}/cli-log"
@@ -91,8 +100,19 @@ if [[ "$*" == *" settings"* ]]; then
 elif [[ "$*" == *" registration delete"* ]]; then
     rm -f "${TEST_WORK}/registered"
 elif [[ "$*" == *" registration show"* ]]; then
-    [[ -f "${TEST_WORK}/registered" ]]
+    if [[ -n "${TEST_REGISTRATION_QUERY_ERROR:-}" ]]; then
+        printf '%s\n' "${TEST_REGISTRATION_QUERY_ERROR}" >&2
+        exit 1
+    fi
+    if [[ ! -f "${TEST_WORK}/registered" ]]; then
+        printf 'Error: Missing registration. Try running: warp-cli registration new\n' >&2
+        exit 1
+    fi
 elif [[ "$*" == *" registration new"* ]]; then
+    if [[ "${TEST_FAIL_REGISTRATION:-0}" == 1 ]]; then
+        printf '{}' >"${WARP_STATE_DIR}/settings.json"
+        exit 7
+    fi
     touch "${TEST_WORK}/registered"
 elif [[ "$*" == *" status"* ]]; then
     printf 'Status update: %s\n' "${TEST_WARP_STATUS:-Connected}"
@@ -144,15 +164,85 @@ fi''')
         self.assertTrue((self.work / "forwarded").exists())
         self.assert_daemon_stopped()
 
-    def test_warp_connect_failure_deregisters_and_reregisters_once(self):
+    def test_warp_connect_failure_preserves_registration(self):
         self.setup_warp()
         (self.work / "registered").touch()
         result = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env(TEST_FAIL_STEP="connect"))
         self.assertNotEqual(result.returncode, 0)
         commands = (self.work / "cli-log").read_text()
-        self.assertIn("registration delete", commands)
-        self.assertIn("registration new", commands)
+        self.assertNotIn("registration delete", commands)
+        self.assertNotIn("registration new", commands)
+        self.assertTrue((self.work / "registered").exists())
         self.assertFalse((self.work / "forwarded").exists())
+        self.assert_daemon_stopped()
+
+    def test_warp_connected_without_proxy_never_starts_forwarding(self):
+        self.setup_warp()
+        (self.work / "registered").touch()
+        env = self.warp_env(TEST_PROXY_CLOSED="1", WARP_CONNECT_TIMEOUT="0")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.work / "forwarded").exists())
+        self.assertFalse((Path(env["WARP_STATE_DIR"]) / "ready").exists())
+        self.assert_daemon_stopped()
+
+    def test_warp_registration_query_failure_preserves_existing_state(self):
+        self.setup_warp()
+        env = self.warp_env()
+        identity = Path(env["WARP_STATE_DIR"]) / "reg.json"
+        identity.write_text("existing device")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        commands = (self.work / "cli-log").read_text()
+        self.assertNotIn("registration new", commands)
+        self.assertNotIn("registration delete", commands)
+        self.assertEqual(identity.read_text(), "existing device")
+        self.assertFalse((self.work / "forwarded").exists())
+        self.assert_daemon_stopped()
+
+    def test_warp_first_registration_failure_can_retry_after_restart(self):
+        self.setup_warp()
+        env = self.warp_env(TEST_FAIL_REGISTRATION="1")
+        failed = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue((Path(env["WARP_STATE_DIR"]) / "settings.json").exists())
+        self.assertFalse((self.work / "registered").exists())
+        self.assert_daemon_stopped()
+        recovered = self.run_tool("config/cloudflare-warp/startup.sh", env=self.warp_env())
+        self.assertEqual(recovered.returncode, 9, recovered.stderr)
+        self.assertTrue((self.work / "registered").exists())
+        self.assertTrue((self.work / "forwarded").exists())
+        self.assert_daemon_stopped()
+
+    def test_warp_unknown_existing_state_is_preserved_on_ipc_error(self):
+        self.setup_warp()
+        env = self.warp_env(TEST_REGISTRATION_QUERY_ERROR="IPC unavailable")
+        identity = Path(env["WARP_STATE_DIR"]) / "future-registration-format"
+        identity.write_text("existing device")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("registration new", (self.work / "cli-log").read_text())
+        self.assertEqual(identity.read_text(), "existing device")
+        self.assert_daemon_stopped()
+
+    def test_warp_successful_registration_is_not_repeated_after_query_failure(self):
+        self.setup_warp()
+        env = self.warp_env(TEST_REGISTRATION_QUERY_ERROR="IPC unavailable")
+        for _ in range(2):
+            result = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assert_daemon_stopped()
+        commands = (self.work / "cli-log").read_text().splitlines()
+        self.assertEqual(commands.count("--accept-tos registration new"), 1)
+        self.assertTrue((Path(env["WARP_STATE_DIR"]) / ".registration-established").exists())
+
+    def test_warp_ambiguous_failed_registration_is_not_retried(self):
+        self.setup_warp()
+        env = self.warp_env(TEST_FAIL_REGISTRATION="1", TEST_REGISTRATION_QUERY_ERROR="IPC unavailable")
+        result = self.run_tool("config/cloudflare-warp/startup.sh", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        commands = (self.work / "cli-log").read_text().splitlines()
+        self.assertEqual(commands.count("--accept-tos registration new"), 1)
         self.assert_daemon_stopped()
 
     def test_warp_not_connected_does_not_start_forwarding(self):

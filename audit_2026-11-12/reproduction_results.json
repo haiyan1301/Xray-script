@@ -1,0 +1,37 @@
+[
+  {
+    "id": "CDN-1/CDN-2",
+    "status": "CONFIRMED",
+    "evidence": "pure CDN render exit=1\nlegacy domain present: render exit=0, downlink mapping absent"
+  },
+  {
+    "id": "CERT-EXPIRED",
+    "status": "CONFIRMED",
+    "evidence": "expired stored certificate: renew entry exit=1, ACME renewal not reached\nvalid certificate control: renewal reached"
+  },
+  {
+    "id": "CERT-WILDCARD",
+    "status": "CONFIRMED",
+    "evidence": "wildcard record found; renewal callback consumers=0; hook restoration exit=1"
+  },
+  {
+    "id": "IP-CRON",
+    "status": "CONFIRMED",
+    "evidence": "saved ACME main=192.0.2.10; dedicated renewal cron targets SAN=192.0.2.11"
+  },
+  {
+    "id": "WARP-IDENTITY",
+    "status": "CONFIRMED",
+    "evidence": "three generic connect failures triggered registration delete/new, then success"
+  },
+  {
+    "id": "WARP-READY",
+    "status": "CONFIRMED",
+    "evidence": "closed SOCKS probe accepted; wait_for_warp and warp_health succeed without checking Docker health or endpoint"
+  },
+  {
+    "id": "WARP-MIGRATION",
+    "status": "CONFIRMED",
+    "evidence": "repair exit=1 after deleting old container; no restoration attempted"
+  }
+]

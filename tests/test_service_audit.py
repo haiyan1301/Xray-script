@@ -281,7 +281,7 @@ disable_warp
 WARP_NAME='xray-script-warp'
 docker() { [[ "${TEST_DOCKER_INFO_OK}" == 1 ]]; }
 _warp_container_state() { printf '%s\n' "${TEST_WARP_STATE}"; }
-_warp_container_connected() { [[ "${TEST_WARP_CONNECTED}" == 0 ]]; }
+_warp_container_ready() { [[ "${TEST_WARP_CONNECTED}" == 0 ]]; }
 _warp_status
 '''
         for token, info_failed, state, connected_rc in cases:
@@ -374,7 +374,7 @@ WARP_NAME='xray-script-warp'
 WARP_HOST='127.0.0.1'
 docker() { printf 'running\n'; }
 sleep() { SECONDS=$((SECONDS + 11)); }   # 跳过 10s 等待窗口，快速命中超时
-_warp_container_connected() { return 0; }
+_warp_container_ready() { return 0; }
 _warp_container_has_expected_runtime() { return 1; }
 obtain_container_ip
 '''
@@ -386,7 +386,7 @@ obtain_container_ip
 WARP_NAME='xray-script-warp'
 WARP_HOST='127.0.0.1'
 docker() { printf 'running\n'; }
-_warp_container_connected() { return 0; }
+_warp_container_ready() { return 0; }
 _warp_container_has_expected_runtime() { return 0; }
 obtain_container_ip
 '''

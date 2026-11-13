@@ -84,6 +84,58 @@ function valid_certificate_domain() {
     ((${#domain} <= 253)) && [[ "${domain}" =~ ${DOMAIN_REGEX} ]]
 }
 
+# Record-management actions also accept wildcard and IP primary identifiers.
+# Keep this separate from issue: that action builds a DNS-only Nginx vhost.
+function valid_certificate_record() {
+    local identifier="$1"
+    local octet value suffix normalized part
+    local group_count=0 compressed=0
+    local -a groups=()
+
+    valid_certificate_domain "${identifier}" && return 0
+    if [[ "${identifier}" == '*.'* ]]; then
+        ((${#identifier} <= 253)) && valid_certificate_domain "${identifier#*.}"
+        return $?
+    fi
+    if [[ "${identifier}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+        IFS='.' read -r -a groups <<<"${identifier}"
+        for octet in "${groups[@]}"; do
+            [[ "${#octet}" -le 3 ]] && ((10#${octet} <= 255)) || return 1
+        done
+        return 0
+    fi
+
+    value="${identifier}"
+    [[ "${value}" == *:* ]] || return 1
+    if [[ "${value}" == *.* ]]; then
+        valid_certificate_record "${value##*:}" || return 1
+        [[ "${value##*:}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+        value="${value%:*}:0:0"
+    fi
+    [[ "${value}" =~ ^[0-9a-fA-F:]+$ && "${value}" != *:::* ]] || return 1
+    [[ "${value}" != :* || "${value}" == ::* ]] || return 1
+    [[ "${value}" != *: || "${value}" == *:: ]] || return 1
+    if [[ "${value}" == *::* ]]; then
+        compressed=1
+        suffix="${value#*::}"
+        [[ "${suffix}" != *::* ]] || return 1
+        normalized="${value/::/:__compressed__:}"
+    else
+        normalized="${value}"
+    fi
+    IFS=':' read -r -a groups <<<"${normalized}"
+    for part in "${groups[@]}"; do
+        [[ -z "${part}" || "${part}" == '__compressed__' ]] && continue
+        [[ "${part}" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        group_count=$((group_count + 1))
+    done
+    if [[ "${compressed}" -eq 1 ]]; then
+        ((group_count < 8))
+    else
+        ((group_count == 8))
+    fi
+}
+
 # =============================================================================
 # 函数名称: install_acme_sh
 # 功能描述: 安装 acme.sh 脚本。
@@ -673,26 +725,42 @@ function check_certificate_status() {
 
 function find_acme_main_domain() {
     local requested_domain="${1,,}"
-    local main_domain
+    local main_domain acme_list
 
-    main_domain="$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null |
-        awk -v requested="${requested_domain}" '
+    valid_certificate_record "${requested_domain}" || return 1
+    acme_list="$("${HOME}/.acme.sh/acme.sh" --list --home "${HOME}/.acme.sh" 2>/dev/null)" || return 1
+    main_domain="$(awk -v requested="${requested_domain}" '
+            function remember(main, rank) {
+                if (rank > best_rank) {
+                    best_rank = rank
+                    best_main = main
+                    ambiguous = 0
+                } else if (rank == best_rank && tolower(main) != tolower(best_main)) {
+                    ambiguous = 1
+                }
+            }
             NR == 1 { next }
             {
                 key_length = tolower($2)
                 gsub(/"/, "", key_length)
                 if (key_length !~ /^ec-/) next
                 main = tolower($1)
-                if (main == requested) { print $1; exit }
+                if (main == requested) remember($1, 2)
                 sans = $3
                 gsub(/[,;]/, " ", sans)
                 count = split(sans, values, /[[:space:]]+/)
                 for (i = 1; i <= count; i++) {
-                    if (tolower(values[i]) == requested) { print $1; exit }
+                    if (tolower(values[i]) == requested) remember($1, 1)
                 }
             }
-        ')" || return 1
-    [[ -n "${main_domain}" ]] || return 1
+            END {
+                if (best_main == "" || ambiguous) exit 1
+                print best_main
+            }
+        ' <<<"${acme_list}")" || return 1
+    # The returned primary becomes a filesystem component during removal;
+    # validate ACME output as well as the user-provided lookup name.
+    valid_certificate_record "${main_domain}" || return 1
     printf '%s\n' "${main_domain}"
 }
 
@@ -819,8 +887,12 @@ function main() {
     # 如果没有提供操作命令，则显示帮助
     [[ -z ${ACTION} ]] && show_help
     case "${ACTION}" in
-    issue|stop-renew|status|info)
+    issue)
         valid_certificate_domain "${DOMAIN}" ||
+            print_error "$(t ".${CUR_FILE}.domain_invalid")"
+        ;;
+    stop-renew|status|info)
+        valid_certificate_record "${DOMAIN}" ||
             print_error "$(t ".${CUR_FILE}.domain_invalid")"
         ;;
     esac

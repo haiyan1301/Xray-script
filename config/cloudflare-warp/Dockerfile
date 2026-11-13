@@ -29,7 +29,7 @@ COPY startup.sh /bin/startup.sh
 COPY healthcheck.sh /bin/healthcheck.sh
 RUN chmod a+x /bin/startup.sh /bin/healthcheck.sh
 
-# 健康检查：ready 标记 + warp-cli status Connected + 40000 可连接（见 healthcheck.sh）。
+# 健康检查：ready 标记 + warp-cli status Connected + 40000/40001 可连接（见 healthcheck.sh）。
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 CMD /bin/healthcheck.sh
 
 ENTRYPOINT ["/bin/startup.sh"]

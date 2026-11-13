@@ -1,0 +1,21 @@
+{
+  "version": "OpenSSL 1.1.1f  31 Mar 2020",
+  "checks": [
+    {
+      "argument": "right.example.com",
+      "exit": 0,
+      "output": "Hostname right.example.com does match certificate"
+    },
+    {
+      "argument": "wrong.example.com",
+      "exit": 0,
+      "output": "Hostname wrong.example.com does NOT match certificate"
+    },
+    {
+      "argument": "192.0.2.11",
+      "exit": 0,
+      "output": "IP 192.0.2.11 does NOT match certificate"
+    }
+  ],
+  "project_validation": "wrong_domain_validator_exit=0\nwrong_ip_validator_exit=0"
+}

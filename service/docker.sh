@@ -323,28 +323,25 @@ function _warp_container_connected() {
 
 # =============================================================================
 # 函数名称: _warp_container_ready
-# 功能描述: 就绪判定：容器内 status 含 Connected，且 startup.sh 已写出
-#           /var/lib/cloudflare-warp/ready 标记。标记只在隧道连上后写入，
-#           因此能区分「socat 已监听」与「隧道真正可用」。
+# 功能描述: 运行容器的实时健康检查（ready + Connected + 两个代理端口），
+#           再确认宿主发布端点可连接。避免只凭 Connected 或旧 health 状态放行。
 # 参数:
 #   $1: 容器名（默认 WARP_NAME）
 # 返回值: 0-就绪；1-未就绪/无法执行
 # =============================================================================
 function _warp_container_ready() {
     local container_name="${1:-${WARP_NAME}}"
-    local ready_command='test -f /var/lib/cloudflare-warp/ready && warp-cli --accept-tos status 2>/dev/null | grep -qiw Connected'
 
-    if cmd_exists timeout; then
-        timeout 10 docker exec "${container_name}" sh -c "${ready_command}" >/dev/null 2>&1
-    else
-        docker exec "${container_name}" sh -c "${ready_command}" >/dev/null 2>&1
-    fi
+    cmd_exists timeout || return 1
+    timeout -k 2 10 docker exec "${container_name}" /bin/healthcheck.sh >/dev/null 2>&1 || return 1
+    timeout 2 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' bash \
+        "${WARP_HOST}" "${WARP_PORT}" >/dev/null 2>&1
 }
 
 # =============================================================================
 # 函数名称: wait_for_warp
 # 功能描述: 等待 WARP 容器进入真正可用状态，并输出宿主端点。
-#           判定为「容器内 warp-cli status 含 Connected + ready 标记」（W3/W5），
+#           判定为「容器实时健康检查 + 宿主端点可连接」，
 #           不再只探 40001（socat 活着不代表隧道可用）。超时参数化：enable /
 #           prepare 默认 240s，repair / rollback 默认 120s。容器已退出或不存在
 #           时快速失败，避免白等到超时。
@@ -447,6 +444,7 @@ function enable_warp() {
     local container_state='' timeout='' container_ip=''
 
     docker_ready || return 1
+    _warp_recover_pending_transaction || return 1
     print_info "$(t '.docker.warp.enable.start')"
     build_warp || return 1
 
@@ -461,14 +459,8 @@ function enable_warp() {
     running | stopped)
         if ! _warp_container_has_expected_runtime; then
             log_info "$(t '.docker.warp.enable.recreate')"
-            docker rm -f "${WARP_NAME}" >/dev/null 2>&1 || {
-                log_error "$(t '.docker.warp.enable.start_fail')"
-                return 1
-            }
-            _warp_run_container "${WARP_IMAGE}" || {
-                log_error "$(t '.docker.warp.enable.start_fail')"
-                return 1
-            }
+            _warp_migrate_container "${WARP_READY_TIMEOUT:-240}"
+            return $?
         else
             if ! docker update --restart=unless-stopped "${WARP_NAME}" >/dev/null 2>&1; then
                 log_error "$(t '.docker.warp.enable.start_fail')"
@@ -614,10 +606,9 @@ function _warp_finish_transaction_cleanup() {
 
 # =============================================================================
 # 函数名称: _warp_tx_restore_data
-# 功能描述: 换目录模式下恢复重置前的 WARP_DIR（注册数据）。
+# 功能描述: 恢复重置前的 WARP_DIR（注册数据），包括 keep 模式的数据快照。
 #           幂等：成功后写 data-restored 标记，重复回滚不再动数据目录；
-#           事务目录里没有 data 时绝不删除 WARP_DIR，避免把尚未替换的旧数据
-#           误当成「事务新建的空目录」清掉。
+#           缺少 data 时仅在 no-data 明确记录原目录不存在的情况下删除新目录。
 # 参数: 无
 # 返回值: 0-已恢复/无需恢复；1-恢复失败
 # =============================================================================
@@ -630,6 +621,11 @@ function _warp_tx_restore_data() {
             rm -rf -- "${WARP_DIR}" || return 1
         fi
         mv -- "${transaction_dir}/data" "${WARP_DIR}" || return 1
+    elif [[ -f "${transaction_dir}/no-data" ]]; then
+        # There was no registration directory before this transaction.
+        if [[ -e "${WARP_DIR}" || -L "${WARP_DIR}" ]]; then
+            rm -rf -- "${WARP_DIR}" || return 1
+        fi
     elif [[ -f "${transaction_dir}/had-data" && ! -e "${WARP_DIR}" && ! -L "${WARP_DIR}" ]]; then
         # 旧版本事务记录过数据，但事务目录里找不到：无法安全恢复，保留现场。
         return 1
@@ -677,8 +673,8 @@ function _warp_recover_pending_transaction() {
 
 # =============================================================================
 # 函数名称: rollback_warp_reset
-# 功能描述: 回滚 WARP 重置事务：删除事务新建的容器、恢复原 WARP_DIR（仅换目录
-#           模式）、把备份容器改名回来并恢复 unless-stopped / 运行状态，最后清理
+# 功能描述: 回滚 WARP 重置事务：删除事务新建的容器、恢复原 WARP_DIR / 数据快照、
+#           把备份容器改名回来并恢复原重启策略与运行状态，最后清理
 #           事务工件。仅当容器与数据全部恢复成功才把 latest 指回旧镜像（P3-6）；
 #           失败时保留工件并 warn，可由下一次 prepare 自动重试。
 #           幂等：rolled-back / data-restored 标记保证重复执行不会二次破坏现场。
@@ -690,6 +686,7 @@ function rollback_warp_reset() {
     local backup_container='' restored_container=''
     local restore_status=0 cleanup_status=0 backup_image_exists=0
     local transaction_exists=0 keep_mode=0 new_mode=0
+    local restart_policy='unless-stopped' current_restart_policy='' current_restart_retries=''
 
     if [[ -e "${transaction_dir}" && ! -L "${transaction_dir}" ]]; then
         transaction_exists=1
@@ -732,16 +729,28 @@ function rollback_warp_reset() {
     #    只在它确实使用 reset-new 镜像时才删，避免误删尚未被替换的旧容器。
     if docker inspect "${WARP_NAME}" >/dev/null 2>&1; then
         if [[ -n "${backup_container}" ]] ||
-            _warp_container_uses_image "${WARP_NAME}" "${WARP_RESET_IMAGE}"; then
+            { [[ -f "${transaction_dir}/candidate-started" || -f "${transaction_dir}/created" ]] &&
+                _warp_container_uses_image "${WARP_NAME}" "${WARP_RESET_IMAGE}"; }; then
             docker rm -f "${WARP_NAME}" >/dev/null 2>&1 || restore_status=1
         else
             restored_container="${WARP_NAME}"
         fi
     fi
 
-    # 2) 换目录模式恢复原 WARP_DIR；keep 模式不动数据（注册身份保留）。
+    # Once the candidate is gone, clear its ownership markers before renaming
+    # the old container back. A later rollback retry must not mistake the
+    # restored container for a same-image candidate and delete it.
+    if [[ "${restore_status}" -eq 0 && -n "${backup_container}" ]]; then
+        rm -f -- "${transaction_dir}/candidate-started" "${transaction_dir}/created" || restore_status=1
+    fi
+
+    # 2) new 模式恢复原目录；keep 模式恢复候选启动前的快照，避免状态迁移
+    #    或配置写入使旧容器无法读取原注册身份。
     #    候选容器若仍在运行（删除失败），先不移动数据目录，避免它继续读写被换掉的数据。
-    if [[ "${new_mode}" -eq 1 ]]; then
+    if [[ ! -f "${transaction_dir}/data-restored" &&
+        ( ( "${new_mode}" -eq 1 && -d "${transaction_dir}/data" ) ||
+            -f "${transaction_dir}/data-snapshot" || -f "${transaction_dir}/no-data" ||
+            -f "${transaction_dir}/had-data" ) ]]; then
         if docker inspect "${WARP_NAME}" >/dev/null 2>&1 &&
             [[ "$(docker inspect --format='{{.State.Running}}' "${WARP_NAME}" 2>/dev/null)" == 'true' ]]; then
             restore_status=1
@@ -750,16 +759,27 @@ function rollback_warp_reset() {
         fi
     fi
 
-    # 3) 备份容器改名回来，恢复 unless-stopped 与运行状态。
-    if [[ -n "${backup_container}" ]]; then
+    # 3) 备份容器改名回来，恢复原重启策略与运行状态。
+    if [[ -n "${backup_container}" && "${restore_status}" -eq 0 ]]; then
         if docker rename "${backup_container}" "${WARP_NAME}" >/dev/null 2>&1; then
             restored_container="${WARP_NAME}"
         else
             restore_status=1
         fi
     fi
+    if [[ -f "${transaction_dir}/restart-policy" ]]; then
+        restart_policy="$(cat "${transaction_dir}/restart-policy")"
+        [[ "${restart_policy}" =~ ^(no|always|unless-stopped|on-failure(:[0-9]+)?)$ ]] || restore_status=1
+    fi
     if [[ -n "${restored_container}" && "${restore_status}" -eq 0 ]]; then
-        docker update --restart=unless-stopped "${restored_container}" >/dev/null 2>&1 || restore_status=1
+        current_restart_policy="$(docker inspect --format='{{.HostConfig.RestartPolicy.Name}}' "${restored_container}" 2>/dev/null)" || restore_status=1
+        if [[ "${current_restart_policy}" == 'on-failure' ]]; then
+            current_restart_retries="$(docker inspect --format='{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "${restored_container}" 2>/dev/null)" || restore_status=1
+            current_restart_policy="on-failure:${current_restart_retries}"
+        fi
+        if [[ "${restore_status}" -eq 0 && "${current_restart_policy}" != "${restart_policy}" ]]; then
+            docker update "--restart=${restart_policy}" "${restored_container}" >/dev/null 2>&1 || restore_status=1
+        fi
     fi
     if [[ -n "${restored_container}" && "${restore_status}" -eq 0 &&
         -f "${transaction_dir}/backup-running" ]]; then
@@ -811,8 +831,10 @@ function rollback_warp_reset() {
 # =============================================================================
 function prepare_warp_reset() (
     local mode="${1:-keep}"
+    local candidate_image="${2:-}"
     local container_state='' current_image='' backup_container=''
     local container_ip='' timeout='' assets_hash=''
+    local restart_policy='' restart_retries=''
 
     case "${mode,,}" in
     new) mode='new' ;;
@@ -851,15 +873,21 @@ function prepare_warp_reset() (
 
     # 重置镜像同样要写 assets 指纹 label：commit 会把它 tag 成 latest，缺 label 会让
     # 下一次 build_warp 误判镜像过期而反复全量构建（W2）。
-    assets_hash="$(warp_assets_hash)" || {
-        log_error "$(t '.docker.warp.build.fail')"
-        return 1
-    }
-    print_info "$(t '.docker.warp.build.start')"
-    if ! docker build --no-cache --label "${WARP_ASSETS_LABEL}=${assets_hash}" \
-        -t "${WARP_RESET_IMAGE}" "${WARP_BUILD_CONTEXT}" >&2; then
-        log_error "$(t '.docker.warp.build.fail')"
-        return 1
+    if [[ -n "${candidate_image}" ]]; then
+        # Automatic migration already built the assets-matched image. Use the
+        # same rollback transaction without rebuilding it or replacing identity.
+        docker tag "${candidate_image}" "${WARP_RESET_IMAGE}" >/dev/null 2>&1 || return 1
+    else
+        assets_hash="$(warp_assets_hash)" || {
+            log_error "$(t '.docker.warp.build.fail')"
+            return 1
+        }
+        print_info "$(t '.docker.warp.build.start')"
+        if ! docker build --no-cache --label "${WARP_ASSETS_LABEL}=${assets_hash}" \
+            -t "${WARP_RESET_IMAGE}" "${WARP_BUILD_CONTEXT}" >&2; then
+            log_error "$(t '.docker.warp.build.fail')"
+            return 1
+        fi
     fi
 
     mkdir -p -- "${DOCKER_DIR}" || return 1
@@ -871,6 +899,17 @@ function prepare_warp_reset() (
     fi
 
     if [[ "${container_state}" != 'missing' ]]; then
+        restart_policy="$(docker inspect --format='{{.HostConfig.RestartPolicy.Name}}' "${WARP_NAME}")" || return 1
+        case "${restart_policy}" in
+        no|always|unless-stopped) ;;
+        on-failure)
+            restart_retries="$(docker inspect --format='{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "${WARP_NAME}")" || return 1
+            [[ "${restart_retries}" =~ ^[0-9]+$ ]] || return 1
+            restart_policy="on-failure:${restart_retries}"
+            ;;
+        *) return 1 ;;
+        esac
+        printf '%s\n' "${restart_policy}" >"${WARP_TRANSACTION_DIR}/restart-policy" || return 1
         # new 模式先尽力注销旧设备；容器不在运行态时无法注销，同样只 warn。
         if [[ "${mode}" == 'new' ]]; then
             _warp_exec_registration_delete "${WARP_NAME}" ||
@@ -893,8 +932,17 @@ function prepare_warp_reset() (
     if [[ "${mode}" == 'new' && ( -e "${WARP_DIR}" || -L "${WARP_DIR}" ) ]]; then
         [[ -d "${WARP_DIR}" && ! -L "${WARP_DIR}" ]] || return 1
         mv -- "${WARP_DIR}" "${WARP_TRANSACTION_DIR}/data" || return 1
+    elif [[ "${mode}" == 'keep' && ( -e "${WARP_DIR}" || -L "${WARP_DIR}" ) ]]; then
+        [[ -d "${WARP_DIR}" && ! -L "${WARP_DIR}" ]] || return 1
+        # A stopped daemon gives a consistent snapshot. Do not mark a partial
+        # copy as restorable if copying failed before a candidate was started.
+        cp -a -- "${WARP_DIR}" "${WARP_TRANSACTION_DIR}/data" || return 1
+        : >"${WARP_TRANSACTION_DIR}/data-snapshot" || return 1
+    else
+        : >"${WARP_TRANSACTION_DIR}/no-data" || return 1
     fi
 
+    : >"${WARP_TRANSACTION_DIR}/candidate-started" || return 1
     _warp_run_container "${WARP_RESET_IMAGE}" || return 1
     # 记录「新容器已创建」：容器缺失（只有镜像/数据）时不会走 swapped 分支，
     # commit 需要这个标记来区分「事务已建立新容器」与「准备阶段提前失败」。
@@ -919,6 +967,30 @@ function prepare_warp_reset() (
 
     trap - EXIT HUP INT TERM
     printf '%s\n' "${container_ip}"
+)
+
+# Reuse the reset transaction for upgrades; keep the old container, image and
+# registration snapshot until readiness and commit have both succeeded.
+function _warp_migrate_container() (
+    local WARP_READY_TIMEOUT="${1:-240}"
+    local endpoint=''
+
+    function finish_warp_migration() {
+        local status="$1"
+        txn_finish_enter ignore
+        if ! txn_is_committed; then
+            rollback_warp_reset || log_warn "$(t '.docker.warp.reset.rollback_failed')"
+            [[ "${status}" -ne 0 ]] || status=1
+        fi
+        exit "${status}"
+    }
+
+    txn_begin finish_warp_migration
+    endpoint="$(prepare_warp_reset keep "${WARP_IMAGE}")" || return 1
+    [[ -n "${endpoint}" ]] || return 1
+    commit_warp_reset || return 1
+    txn_commit
+    printf '%s\n' "${endpoint}"
 )
 
 # =============================================================================
@@ -1399,7 +1471,7 @@ function _warp_status() {
     case "${container_state}" in
     missing) printf 'missing\n' ;;
     running)
-        if _warp_container_connected "${WARP_NAME}"; then
+        if _warp_container_ready "${WARP_NAME}"; then
             printf 'enabled\n'
         else
             printf 'unhealthy\n'
@@ -1437,6 +1509,7 @@ function repair_warp() {
     local container_state='' timeout=''
 
     docker_ready || return 1
+    _warp_recover_pending_transaction || return 1
     container_state="$(_warp_container_state)"
     [[ "${container_state}" != 'missing' ]] || return 1
 
@@ -1444,8 +1517,8 @@ function repair_warp() {
         build_warp || return 1
         if ! _warp_container_has_expected_runtime; then
             log_info "$(t '.docker.warp.enable.recreate')"
-            docker rm -f "${WARP_NAME}" >/dev/null 2>&1 || return 1
-            _warp_run_container "${WARP_IMAGE}" || return 1
+            _warp_migrate_container "${WARP_REPAIR_TIMEOUT:-120}" >/dev/null
+            return $?
         fi
         container_state="$(_warp_container_state)"
     fi
@@ -1581,7 +1654,7 @@ function obtain_container_ip() {
         case "${container_status}" in
         running)
             if _warp_container_has_expected_runtime "${container_name}" &&
-                _warp_container_connected "${container_name}"; then
+                _warp_container_ready "${container_name}"; then
                 printf '%s\n' "${WARP_HOST}"
                 return 0
             fi

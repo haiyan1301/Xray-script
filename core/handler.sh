@@ -1328,15 +1328,21 @@ function certificate_matches_server_name() {
     local fullchain="$1"
     local server_name="$2"
     local san_output candidate pattern suffix prefix subject common_name
+    local match_output match_label
 
-    # OpenSSL 1.1.1+ performs RFC-compliant hostname/IP checks itself.
+    # OpenSSL 1.1.1/early 3.x print a mismatch but still exit successfully.
+    # Require the affirmative result as well as success; do not infer a match
+    # from the process status alone. LC_ALL keeps the result text stable.
     if openssl x509 -help 2>&1 | grep -q -- '-checkhost'; then
         if [[ "${server_name}" == *:* || "${server_name}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            openssl x509 -in "${fullchain}" -noout -checkip "${server_name}" >/dev/null 2>&1
+            match_label='IP'
+            match_output="$(LC_ALL=C openssl x509 -in "${fullchain}" -noout -checkip "${server_name}" 2>/dev/null)" || return 1
         else
-            openssl x509 -in "${fullchain}" -noout -checkhost "${server_name}" >/dev/null 2>&1
+            match_label='Hostname'
+            match_output="$(LC_ALL=C openssl x509 -in "${fullchain}" -noout -checkhost "${server_name}" 2>/dev/null)" || return 1
         fi
-        return $?
+        [[ "${match_output}" == "${match_label} ${server_name} does match certificate" ]]
+        return
     fi
 
     # CentOS 7 ships OpenSSL 1.0.2, whose x509 command has no -checkhost or
@@ -3244,6 +3250,90 @@ function build_certificate_reload_command() {
         "${handler_q}" "${acme_domain_q}" "${target_dir_q}"
 }
 
+function acme_certificate_config_path() {
+    local domain="$1" record_dir
+
+    # ACME primary identifiers become path components; never accept paths or
+    # follow links when updating the saved renewal configuration.
+    valid_ip_literal "${domain}" || valid_domain "${domain#\*.}" || return 1
+    record_dir="${HOME}/.acme.sh/${domain}_ecc"
+    [[ -d "${record_dir}" && ! -L "${record_dir}" &&
+        -f "${record_dir}/${domain}.conf" && ! -L "${record_dir}/${domain}.conf" ]] || return 1
+    printf '%s\n' "${record_dir}/${domain}.conf"
+}
+
+function read_acme_certificate_webroot() {
+    # Read only a literal assignment. Never source an ACME account/domain file
+    # just to inspect the challenge type (it may contain executable hooks).
+    awk '
+        /^Le_Webroot=/ {
+            count++
+            value = substr($0, 12)
+            quote = sprintf("%c", 39)
+            if (substr(value, 1, 1) != quote ||
+                substr(value, length(value), 1) != quote) exit 1
+            value = substr(value, 2, length(value) - 2)
+            if (index(value, quote) || value == "") exit 1
+            result = value
+        }
+        END { if (count != 1 || result == "") exit 1; print result }
+    ' "$1"
+}
+
+function configure_acme_certificate_challenge() {
+    local domain="$1" consumer="$2" config_path webroots desired root updated=''
+    local temp_config
+    local -a roots=()
+
+    case "${consumer}" in
+    nginx) desired='/var/www/_zerossl' ;;
+    xray) desired='no' ;;
+    *) return 1 ;;
+    esac
+    config_path="$(acme_certificate_config_path "${domain}")" || return 1
+    webroots="$(read_acme_certificate_webroot "${config_path}")" || return 1
+    [[ "${webroots}" != ,* && "${webroots}" != *, && "${webroots}" != *,,* ]] || return 1
+    IFS=',' read -r -a roots <<<"${webroots}"
+    for root in "${roots[@]}"; do
+        case "${root}" in
+        no|/*) root="${desired}" ;;
+        dns|dns_*) ;; # DNS validation, including wildcard records, stays intact.
+        *) return 1 ;; # Unsupported methods must not silently become HTTP-01.
+        esac
+        [[ -z "${updated}" ]] || updated+=','
+        updated+="${root}"
+    done
+    [[ "${updated}" != "${webroots}" ]] || return 0
+    temp_config="$(mktemp "${config_path}.XXXXXX")" || return 1
+    # Change only the challenge list. SANs, CA, profile, renewal interval and
+    # user hooks remain byte-for-byte unchanged; keep the original permissions.
+    if ! cp -p -- "${config_path}" "${temp_config}" ||
+        ! ACME_HTTP_WEBROOT="${updated}" awk '
+            BEGIN { value = ENVIRON["ACME_HTTP_WEBROOT"] }
+            /^Le_Webroot=/ { printf "Le_Webroot=%c%s%c\n", 39, value, 39; next }
+            { print }
+        ' "${config_path}" >"${temp_config}" ||
+        ! mv -f -- "${temp_config}" "${config_path}"; then
+        rm -f -- "${temp_config}"
+        return 1
+    fi
+}
+
+function renew_acme_certificate() {
+    local domain="$1" consumer="$2" config_path webroots
+
+    configure_acme_certificate_challenge "${domain}" "${consumer}" || return 1
+    config_path="$(acme_certificate_config_path "${domain}")" || return 1
+    webroots="$(read_acme_certificate_webroot "${config_path}")" || return 1
+    if [[ ",${webroots}," == *,no,* ]]; then
+        run_with_nginx_temporarily_stopped \
+            "${ACME_PATH}" --renew -d "${domain}" --ecc --force --home "${HOME}/.acme.sh"
+    else
+        # A webroot challenge needs Nginx to keep serving port 80.
+        "${ACME_PATH}" --renew -d "${domain}" --ecc --force --home "${HOME}/.acme.sh"
+    fi
+}
+
 function install_acme_managed_certificate() {
     local acme_domain="$1"
     local server_name="$2"
@@ -3253,6 +3343,7 @@ function install_acme_managed_certificate() {
     local backup_flags=''
     local restore_status=0
     local reload_command=''
+    local config_path
 
     case "${consumer}" in
     xray|nginx) ;;
@@ -3261,6 +3352,7 @@ function install_acme_managed_certificate() {
     reload_command="$(build_certificate_reload_command \
         "${consumer}" "${target_dir}" "${acme_domain}")" ||
         return 1
+    config_path="$(acme_certificate_config_path "${acme_domain}")" || return 1
 
     [[ ! -L "${target_dir}" &&
         ! -L "${target_dir}/fullchain.pem" &&
@@ -3275,8 +3367,14 @@ function install_acme_managed_certificate() {
         return 1
     fi
     read -r had_fullchain had_privkey <<<"${backup_flags}"
+    if ! cp -p -- "${config_path}" "${backup_dir}/acme.conf"; then
+        rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
+        rmdir -- "${backup_dir}" 2>/dev/null || true
+        return 1
+    fi
 
-    if ! "${ACME_PATH}" --install-cert --ecc -d "${acme_domain}" \
+    if ! configure_acme_certificate_challenge "${acme_domain}" "${consumer}" ||
+        ! "${ACME_PATH}" --install-cert --ecc -d "${acme_domain}" \
             --key-file "${target_dir}/privkey.pem" \
             --fullchain-file "${target_dir}/fullchain.pem" \
             --reloadcmd "${reload_command}" ||
@@ -3285,6 +3383,7 @@ function install_acme_managed_certificate() {
             "${target_dir}/privkey.pem" \
             "${server_name}" ||
         ! cert_set_permissions "${target_dir}" "${consumer}"; then
+        cp -p -- "${backup_dir}/acme.conf" "${config_path}" || restore_status=1
         if ! cert_restore_pair \
             "${target_dir}" "${backup_dir}" \
             "${had_fullchain}" "${had_privkey}"; then
@@ -3297,15 +3396,16 @@ function install_acme_managed_certificate() {
                 restore_status=1
             fi
         fi
-        rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
-        rmdir -- "${backup_dir}" 2>/dev/null || true
         if [[ "${restore_status}" -ne 0 ]]; then
-            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}" >&2
+            log_error "$(t ".${CUR_FILE}.cdn_direct.cert_restore_fail") ${target_dir}; backup: ${backup_dir}" >&2
+        else
+            rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem" "${backup_dir}/acme.conf"
+            rmdir -- "${backup_dir}" 2>/dev/null || true
         fi
         return 1
     fi
 
-    rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem"
+    rm -f -- "${backup_dir}/fullchain.pem" "${backup_dir}/privkey.pem" "${backup_dir}/acme.conf"
     rmdir -- "${backup_dir}" 2>/dev/null || true
 }
 
@@ -3319,23 +3419,55 @@ function install_acme_nginx_certificate() {
 
 function acme_main_domain_for_name() {
     local domain="$1"
+    local acme_list
 
-    [[ -x "${ACME_PATH}" ]] || return 1
-    "${ACME_PATH}" --list --home "${HOME}/.acme.sh" 2>/dev/null |
-        awk -v domain="${domain,,}" '
+    [[ -x "${ACME_PATH}" && -n "${domain}" &&
+        "${domain}" != *[[:space:]]* ]] || return 1
+    acme_list="$("${ACME_PATH}" --list --home "${HOME}/.acme.sh" 2>/dev/null)" || return 1
+    # Prefer an exact primary record over an exact SAN, and either over a
+    # wildcard. A wildcard covers one DNS label only, never the zone apex or
+    # an IP. Refuse ambiguous equally specific records instead of rebinding
+    # renewal to whichever row acme.sh happened to print first.
+    awk -v domain="${domain,,}" '
+            function covers(pattern, name, suffix, prefix) {
+                if (substr(pattern, 1, 2) != "*." || index(name, ":") ||
+                    name ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
+                suffix = substr(pattern, 3)
+                if (index(suffix, "*") || length(name) <= length(suffix) + 1 ||
+                    substr(name, length(name) - length(suffix)) != "." suffix) return 0
+                prefix = substr(name, 1, length(name) - length(suffix) - 1)
+                return prefix != "" && !index(prefix, ".") && !index(prefix, "*")
+            }
+            function remember(main, rank) {
+                if (rank > best_rank) {
+                    best_rank = rank
+                    best_main = main
+                    ambiguous = 0
+                } else if (rank == best_rank && tolower(main) != tolower(best_main)) {
+                    ambiguous = 1
+                }
+            }
             NR > 1 {
                 key_length = tolower($2)
                 gsub(/"/, "", key_length)
                 if (key_length !~ /^ec-/) next
-                if (tolower($1) == domain) { print $1; exit }
+                main = tolower($1)
+                if (main == domain) remember($1, 3)
+                else if (covers(main, domain)) remember($1, 1)
                 sans = $3
                 gsub(/[,;]/, " ", sans)
                 count = split(sans, values, /[[:space:]]+/)
                 for (i = 1; i <= count; i++) {
-                    if (tolower(values[i]) == domain) { print $1; exit }
+                    candidate = tolower(values[i])
+                    if (candidate == domain) remember($1, 2)
+                    else if (covers(candidate, domain)) remember($1, 1)
                 }
             }
-        '
+            END {
+                if (best_main == "" || ambiguous) exit 1
+                print best_main
+            }
+        ' <<<"${acme_list}"
 }
 
 function emit_active_acme_certificate_consumer() {
@@ -3601,7 +3733,7 @@ function cleanup_acme_certificate_if_unused() {
         usage_status=$?
         case "${usage_status}" in
         0) ;;
-        1) exec_ssl '--stop-renew' "--domain=${domain}" '--keep-cert' || return 1 ;;
+        1) exec_ssl '--stop-renew' "--domain=${managed_domain}" '--keep-cert' || return 1 ;;
         *) return 1 ;;
         esac
     fi
@@ -3688,6 +3820,11 @@ function configure_hy2_ip_renewal_cron() {
     local existing_cron='' rendered_cron='' line
     local removed_managed_line=0
 
+    # This identifier is the ACME primary record, which may be a DNS name
+    # when the configured IP is one of that certificate's SANs.
+    if [[ "${cert_source}" == '2' ]]; then
+        valid_ip_literal "${cert_domain}" || valid_domain "${cert_domain}" || return 1
+    fi
     if ! command -v crontab >/dev/null 2>&1; then
         [[ "${cert_source}" != '2' ]]
         return $?
@@ -3837,9 +3974,7 @@ function handler_cdn_direct_cert_role() {
         if [[ -n "${acme_action}" ]]; then
             handler_ssl_install || return 1
             if [[ "${acme_action}" == 'renew' ]]; then
-                if run_with_nginx_temporarily_stopped \
-                    "${ACME_PATH}" --renew -d "${managed_acme_domain}" --ecc --force \
-                    --home "${HOME}/.acme.sh"; then
+                if renew_acme_certificate "${managed_acme_domain}" 'xray'; then
                     acme_status=0
                 else
                     acme_status=$?
@@ -4371,7 +4506,7 @@ function handler_hy2_cert() {
     if [[ "${CERT_SOURCE}" =~ ^[12]$ ]]; then
         log_config "$(t ".${CUR_FILE}.hy2_cert.cron_setup")" >&2
     fi
-    if ! configure_hy2_ip_renewal_cron "${CERT_SOURCE}" "${CERT_DOMAIN}"; then
+    if ! configure_hy2_ip_renewal_cron "${CERT_SOURCE}" "${CERT_ACME_DOMAIN}"; then
         log_error "$(t ".${CUR_FILE}.hy2_cert.cron_fail")" >&2
         return 1
     fi
@@ -6192,16 +6327,48 @@ function normalize_cdn_site_listeners() {
 
 function render_nginx_stream_config() {
     local output_file="$1"
-    local domain cdn
-    domain="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.domain // ""')"
-    cdn="$(echo "${SCRIPT_CONFIG}" | jq -r '.nginx.cdn // ""')"
-    [[ -n "${domain}" && -n "${cdn}" ]] || return 1
+    local config_tag domain='' cdn cdn_down=''
+    local template="${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf"
 
-    awk -v domain="${domain}" -v cdn="${cdn}" '
-        $2 == "nginx_to_xray_vision;" { sub(/[^[:space:]]+/, domain) }
-        $2 == "cdn_to_nginx;" { sub(/[^[:space:]]+/, cdn) }
+    config_tag="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -er '.xray.tag | strings')" || return 1
+    cdn="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -er '.nginx.cdn | strings')" || return 1
+    valid_domain_filename "${cdn}" || return 1
+    cdn="${cdn,,}"
+    case "${config_tag,,}" in
+    sni)
+        domain="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -er '.nginx.domain | strings')" || return 1
+        valid_domain_filename "${domain}" || return 1
+        domain="${domain,,}"
+        [[ "${domain}" != "${cdn}" ]] || return 1
+        ;;
+    cdn)
+        [[ "$(get_cdn_backend)" == 'nginx' ]] || return 1
+        # Standalone CDN has no REALITY/SNI origin domain. Both CDN names
+        # terminate TLS at the shared Nginx socket, using their own sites.
+        cdn_down="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -er '(.nginx.cdnDown // "") | strings')" || return 1
+        if [[ -n "${cdn_down}" ]]; then
+            valid_domain_filename "${cdn_down}" || return 1
+            cdn_down="${cdn_down,,}"
+            [[ "${cdn_down}" != "${cdn}" ]] || return 1
+        fi
+        ;;
+    *) return 1 ;;
+    esac
+    [[ -f "${template}" ]] || return 1
+
+    awk -v domain="${domain}" -v cdn="${cdn}" -v cdn_down="${cdn_down}" '
+        { sub(/\r$/, "") }
+        $2 == "nginx_to_xray_vision;" {
+            if (domain != "") print "        " domain " nginx_to_xray_vision;"
+            next
+        }
+        $2 == "cdn_to_nginx;" {
+            print "        " cdn " cdn_to_nginx;"
+            if (cdn_down != "") print "        " cdn_down " cdn_to_nginx;"
+            next
+        }
         { print }
-    ' "${CONFIG_DIR}/nginx/conf/modules-enabled/stream.conf" >"${output_file}"
+    ' "${template}" >"${output_file}"
 }
 
 function change_domain_transaction_relative_path_is_safe() {
@@ -6556,6 +6723,22 @@ function handler_change_domain() {
             .xray.cdnDownCertFullchain = "" |
             .xray.cdnDownCertPrivkey = ""
         ')"
+        # Removing the downlink site must also remove its public SNI map
+        # entry; otherwise it keeps reaching the uplink/default TLS site.
+        if [[ "${CONFIG_TAG,,}" == 'cdn' && "$(get_cdn_backend)" == 'nginx' ]]; then
+            local downlink_stream_temp
+            downlink_stream_temp="$(mktemp "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf.tmp.XXXXXX")" || {
+                rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
+                return 1
+            }
+            if ! render_nginx_stream_config "${downlink_stream_temp}" ||
+                ! remove_change_domain_transaction_target "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf" 'n' ||
+                ! mv -f -- "${downlink_stream_temp}" "${NGINX_CONFIG_DIR}/modules-enabled/stream.conf"; then
+                rm -f -- "${downlink_stream_temp}"
+                rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
+                return 1
+            fi
+        fi
         if ! write_config "${SCRIPT_CONFIG}" "${SCRIPT_CONFIG_PATH}"; then
             rollback_change_domain_transaction "${transaction_dir}" "${restart_nginx}" || true
             return 1
@@ -6927,19 +7110,30 @@ function handler_change_domain() {
 # 返回值: 无 (通过文件操作和调用其他脚本执行)
 # =============================================================================
 function handler_renew_ssl() {
-    local config_tag
+    local config_tag consumer_lines managed_domain consumer server_name target_dir domain_key
+    local -A prepared_domains=()
+
     config_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"
     if [[ "${config_tag,,}" == 'cdn' && "$(get_cdn_backend)" == 'xray' ]]; then
-        handler_restore_certificate_renewal_hooks || return 1
         handler_cdn_direct_cert 'renew' || return 1
         handler_restart
         return $?
     fi
 
-    # 任何续签或服务重载失败都必须反馈给调用者，不能让 if 的空分支
-    # 把失败状态吞掉。
-    handler_restore_certificate_renewal_hooks || return 1
+    # Migrate challenge metadata without installing the current certificate:
+    # it may have expired. Keep the existing renew-all behavior, then validate
+    # and rebind deployment hooks only after ACME has produced fresh material.
+    consumer_lines="$(list_active_acme_certificate_consumers)" || return 1
+    while IFS=$'\t' read -r managed_domain consumer server_name target_dir; do
+        [[ -n "${managed_domain}" ]] || continue
+        domain_key="${managed_domain,,}"
+        if [[ -z "${prepared_domains[${domain_key}]:-}" ]]; then
+            configure_acme_certificate_challenge "${managed_domain}" "${consumer}" || return 1
+            prepared_domains["${domain_key}"]=1
+        fi
+    done <<<"${consumer_lines}"
     exec_ssl '--renew' || return 1
+    handler_restore_certificate_renewal_hooks || return 1
     if current_protocol_uses_nginx; then
         handler_nginx_restart || return 1
     fi
