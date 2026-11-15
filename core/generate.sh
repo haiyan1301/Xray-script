@@ -186,57 +186,19 @@ function generate_target() {
 
 # =============================================================================
 # 函数名称: generate_server_names
-# 功能描述: 为给定的 target 生成或获取其对应的服务器名称列表。
-#           如果 target 在配置文件中不存在，则将其添加到 .target 对象中，
-#           其值为一个仅包含该 target 名称的数组。
-#           最后返回该 target 对应的服务器名称数组。
+# 功能描述: 读取目标的 SNI 列表，未记录的目标返回仅含该目标的列表。
+#           生成器不写脚本状态：调用方负责提交配置，避免子进程修改状态破坏
+#           配置事务与并发变更检测。
 # 参数:
 #   $1: 目标名称 (target)
-# 返回值: JSON 格式的数组，包含服务器名称 (echo 输出)
-# 注意: 会修改 ${SCRIPT_CONFIG_PATH} 文件内容
+# 返回值: JSON 格式的服务器名称数组
 # =============================================================================
 function generate_server_names() {
-    local target="${1:-}" # 获取目标名称参数
-    local script_config=''
-    local temp_file=''
-
+    local target="${1:-}"
     [[ -n "${target}" && -f "${SCRIPT_CONFIG_PATH}" ]] || return 1
-    # 分离 local 声明与命令替换，确保 jq 解析/更新失败不会被 local
-    # 的成功状态吞掉，更不能把配置文件截断为空。
-    if ! script_config="$(jq --arg key "${target}" '
-        .target //= {} |
-        if .target | has($key) then
-            .
-        else
-            .target += { ($key): [$key] }
-        end
-    ' "${SCRIPT_CONFIG_PATH}")"; then
-        return 1
-    fi
-
-    [[ -n "${script_config}" ]] &&
-        printf '%s\n' "${script_config}" | jq empty >/dev/null 2>&1 ||
-        return 1
-    temp_file="$(mktemp "${SCRIPT_CONFIG_PATH}.tmp.XXXXXX")" || return 1
-    if ! printf '%s\n' "${script_config}" >"${temp_file}"; then
-        rm -f -- "${temp_file}"
-        return 1
-    fi
-    chmod --reference="${SCRIPT_CONFIG_PATH}" "${temp_file}" 2>/dev/null ||
-        chmod 600 "${temp_file}" || {
-        rm -f -- "${temp_file}"
-        return 1
-    }
-    chown --reference="${SCRIPT_CONFIG_PATH}" "${temp_file}" 2>/dev/null || true
-    if ! mv -f -- "${temp_file}" "${SCRIPT_CONFIG_PATH}"; then
-        rm -f -- "${temp_file}"
-        return 1
-    fi
-    sync
-
-    # 从修改后的配置中提取并输出指定 target 的服务器名称列表
-    printf '%s\n' "${script_config}" |
-        jq -e --arg key "${target}" '.target[$key]'
+    jq -e --arg key "${target}" '
+        if ((.target // {}) | has($key)) then .target[$key] else [$key] end
+    ' "${SCRIPT_CONFIG_PATH}"
 }
 
 # =============================================================================

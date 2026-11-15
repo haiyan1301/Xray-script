@@ -159,7 +159,9 @@
       "info5": "添加关于 ip 的屏蔽分流, 相关分流添加在 ruleTag 为 block-ip 中",
       "info6": "添加关于 domain 的屏蔽分流, 相关分流添加在 ruleTag 为 block-domain 中",
       "info7": "(需要开启 WARP)添加关于 ip 的 WARP 分流, 相关分流添加在 ruleTag 为 warp-ip 中",
-      "info8": "(需要开启 WARP)添加关于 domain 的 WARP 分流, 相关分流添加在 ruleTag 为 warp-domain 中"
+      "info8": "(需要开启 WARP)添加关于 domain 的 WARP 分流, 相关分流添加在 ruleTag 为 warp-domain 中",
+      "option7": "出站中转",
+      "info9": "管理中转节点、全流量或域名策略；支持导入节点分享链接"
     },
     "sni_config": {
       "title": "SNI 配置",
@@ -450,7 +452,41 @@
       "archive": "地点端压缩包"
     },
     "docker_unavailable": "Docker 服务未运行，请先启动 Docker（systemctl start docker）",
-    "docker_start_fail": "尝试启动 Docker 服务失败"
+    "docker_start_fail": "尝试启动 Docker 服务失败",
+    "relay": {
+      "title": "出站中转",
+      "nodes": "节点（编号 / 名称 / 地址 / 端口 / 协议；认证信息已隐藏）",
+      "no_nodes": "尚未保存中转节点，请先添加或导入。",
+      "node_number": "请选择节点编号：",
+      "invalid_choice": "选择无效。",
+      "mode": "模式",
+      "saved": "中转设置已应用。",
+      "config_unavailable": "无法读取当前 Xray 配置，操作已中止。",
+      "edit_hint": "编辑：回车保留原值，输入 - 清空可选项；认证信息不回显。",
+      "invalid_node": "中转节点无效，请检查 IP、端口、协议参数，以及是否回指本机 Xray 监听端口。",
+      "active_delete": "此节点正在使用，请先切换节点或关闭中转，再删除。",
+      "confirm_delete": "删除此节点？[y/N]",
+      "test_requirements": "测试需要已安装的 Xray 和 curl。",
+      "test_start_failed": "无法启动临时测试实例（可能端口冲突或内核不支持节点参数），运行配置未改变。",
+      "tcp_testing": "通过节点请求 HTTPS 出口地址（最长 8 秒）…",
+      "tcp_pass": "TCP 代理请求成功，出口 IP：",
+      "tcp_fail": "TCP 代理请求失败（包括测试站点不可达的情况）。",
+      "udp_pass": "UDP DNS 代理请求成功（1.1.1.1:53）。",
+      "udp_fail": "UDP DNS 代理请求失败或超时（1.1.1.1:53），请检查节点的 UDP 支持与防火墙。",
+      "udp_unknown": "未找到 python3，无法测试 UDP，当前结果为未知。",
+      "udp_scope": "UDP 测试只验证 DNS 端口，不代表所有 UDP 端口可用；Vision 的 UDP 443 行为取决于 flow。",
+      "mode_prompt": "策略 [1=全流量，2=按域名]：",
+      "domains_prompt": "请输入域名（逗号或换行分隔，空行结束）；example.com 匹配子域名，full:api.example.com 精确匹配。",
+      "invalid_domains": "域名列表无效，未应用。",
+      "preview": "即将应用的节点（认证信息已隐藏）：",
+      "all_warning": "全流量模式将接管脚本代理入站的 TCP 和 UDP；UDP 测试失败或未知时可能影响 UDP 连接。节点故障时中转连接失败，不会自动切到直连。",
+      "confirm_apply": "确认应用此策略？[y/N]",
+      "actions": "1. 粘贴分享链接导入  2. 编辑节点  3. 测试节点  4. 删除节点  5. 应用策略  6. 关闭中转  7. 手动添加  0. 返回",
+      "choose": "请选择：",
+      "import_requirements": "导入分享链接需要 python3。",
+      "invalid_link": "分享链接无效或不受支持，未保存（不支持 CDN 或 Fallback 组合）。",
+      "imported_edit": "此节点来自分享链接 [1=重命名，2=替换分享链接]："
+    }
   },
   "read": {
     "version": "自选版本(e.g. v1.0.0): ",
@@ -484,7 +520,22 @@
     "block_domain": "请输入分流到 block 的 domain",
     "reverse_port": "请输入反向代理入口端口 (默认: 8443): ",
     "reverse_target": "请输入内网服务目标地址 (格式: IP:PORT, 例如 192.168.1.100:80): ",
-    "reverse_uuid": "请输入反向代理专用 UUID (留空自动生成): "
+    "reverse_uuid": "请输入反向代理专用 UUID (留空自动生成): ",
+    "relay": {
+      "name": "节点名称：",
+      "address": "B 的 IP（IPv4 或不带方括号的 IPv6）：",
+      "port": "B 的端口（1–65535）：",
+      "protocol": "协议 [1=VLESS + REALITY TCP，2=SOCKS5]：",
+      "uuid": "B 的 UUID（不回显）：",
+      "serverName": "B 的 SNI：",
+      "publicKey": "B 的 REALITY 公钥（不回显）：",
+      "shortId": "B 的 Short ID（允许留空，不回显）：",
+      "flow": "flow（留空、xtls-rprx-vision 或 xtls-rprx-vision-udp443，按 B 的配置填写）：",
+      "encryption": "encryption（默认 none）：",
+      "username": "SOCKS5 用户名（留空表示无认证，不回显）：",
+      "password": "SOCKS5 密码（不回显）：",
+      "shareLink": "粘贴单个节点分享链接（不回显）："
+    }
   },
   "share": {
     "client": "客户端配置",

@@ -71,6 +71,61 @@ def configuration_matrix(base, pq):
     for tag in ["Vision", "XHTTP", "Fallback", "SNI"]:
         add(tag, name=tag + "/reverse", reverse=1, reversePort=18443,
             reverseUuid=str(uuid.uuid4()), reverseTarget="127.0.0.1:18080")
+
+    relay_node = {
+        "id": "audit-relay", "name": "Audit relay", "protocol": "socks",
+        "address": "203.0.113.10", "port": 1080, "username": "", "password": "",
+    }
+    relay_cases = [
+        ("Vision", "all", "nginx", True),
+        ("Vision", "domains", "nginx", False),
+        ("XHTTP", "domains", "nginx", False),
+        ("Trojan", "all", "nginx", False),
+        ("Fallback", "all", "nginx", True),
+        ("hy2", "domains", "nginx", False),
+        ("ss2022", "all", "nginx", False),
+        ("mKCP", "domains", "nginx", False),
+        ("SNI", "all", "nginx", False),
+        ("CDN", "domains", "nginx", False),
+        ("CDN", "all", "xray", True),
+        ("multi", "domains", "nginx", False),
+        ("multi", "all", "nginx", True),
+        ("Vision", "off", "nginx", False),
+    ]
+    for tag, mode, backend, warp in relay_cases:
+        node = copy.deepcopy(relay_node)
+        # The second Vision case also exercises REALITY as an outbound.
+        if tag == "Vision" and mode == "domains":
+            node.update(protocol="vless", port=443, uuid=str(uuid.uuid4()),
+                        serverName="relay.example.com", publicKey="A" * 43,
+                        shortId="0123456789abcdef", flow="xtls-rprx-vision",
+                        encryption="none")
+        relay = {"nodes": [node], "active": node["id"] if mode != "off" else None,
+                 "mode": mode, "domains": ["domain:example.com", "full:api.example.net"]}
+        add(tag, backend, name=f"{tag}/{backend}/relay-{mode}" + ("/warp" if warp else ""),
+            nodes=nodes if tag == "multi" else None, relay=relay, warp=int(warp))
+        config = cases[-1][1]
+        config["rules"] += [
+            {"ruleTag": "audit-custom-block", "domain": ["domain:blocked.example"], "outboundTag": "block"},
+            {"ruleTag": "audit-warp", "domain": ["domain:example.com"], "outboundTag": "warp"},
+        ]
+        if tag in {"Fallback", "SNI"}:
+            config["xray"].update(reverse=1, reversePort=18443,
+                                  reverseUuid=str(uuid.uuid4()), reverseTarget="127.0.0.1:18080")
+        # LAN, reverse, Vision anti-steal, custom blocking, WARP and relay must
+        # coexist without a dedicated service or a remote relay being online.
+        if tag == "Vision" and mode == "all":
+            config["xray"].update(reverse=1, reversePort=18443,
+                                  reverseUuid=str(uuid.uuid4()), reverseTarget="127.0.0.1:18080")
+            config["xray"]["lan"].update(
+                enabled=1, port=19443, target="example.com", serverName="example.com",
+                serverAddress="203.0.113.1", privateKey=base["xray"]["privateKey"],
+                publicKey="A" * 43, shortId="01", sites=[{
+                    "id": "audit-site", "accessUuid": str(uuid.uuid4()),
+                    "reverseUuid": str(uuid.uuid4()), "reverseTag": "lan-reverse-audit-site",
+                    "localCidrs": ["10.23.0.0/24"],
+                }],
+            )
     return cases
 
 
@@ -98,6 +153,44 @@ def check_optional_features(config, runtime):
     if state.get("reverse") == 1:
         if not any(inbound.get("tag") == "reverse-portal" for inbound in runtime["inbounds"]):
             raise RuntimeError("Reverse portal was lost during generation")
+    relay = state.get("relay", {})
+    if "mode" in relay:
+        rules = runtime["routing"]["rules"]
+        relay_rules = [rule for rule in rules if rule.get("ruleTag") == "xray-script-relay"]
+        relay_outbounds = [outbound for outbound in runtime["outbounds"]
+                           if outbound.get("tag", "").startswith("xray-script-relay-")]
+        if runtime["outbounds"][0]["tag"] != "direct":
+            raise RuntimeError("Relay changed the default direct outbound")
+        if relay["mode"] == "off":
+            if relay_rules or relay_outbounds:
+                raise RuntimeError("Disabled relay still generated routing or outbounds")
+            return
+        if len(relay_rules) != 1 or len(relay_outbounds) != 1:
+            raise RuntimeError("Relay rule/outbound is missing or duplicated")
+        rule = relay_rules[0]
+        business = [inbound for inbound in runtime["inbounds"]
+                    if inbound.get("protocol") in {"vless", "trojan", "vmess", "shadowsocks", "hysteria", "hysteria2", "socks", "http"}
+                    and not inbound.get("tag", "").startswith(("lan-", "reverse-"))]
+        if set(rule["inboundTag"]) != {inbound["tag"] for inbound in business}:
+            raise RuntimeError("Relay does not match all and only business inbound tags")
+        if relay["mode"] == "domains":
+            if rule.get("domain") != relay["domains"]:
+                raise RuntimeError("Relay domain list was changed during generation")
+            if any(not inbound.get("sniffing", {}).get("routeOnly") for inbound in business):
+                raise RuntimeError("Domain relay sniffing does not preserve the original target")
+        elif "domain" in rule:
+            raise RuntimeError("All-traffic relay unexpectedly limits domains")
+        index = rules.index(rule)
+        for other in rules:
+            tag = other.get("ruleTag", "")
+            if (other.get("outboundTag") == "block" or tag == "api"
+                    or tag.startswith(("anti-steal-", "reverse-", "lan-"))):
+                if rules.index(other) >= index:
+                    raise RuntimeError("Relay takes precedence over a special/blocking rule")
+            elif other.get("outboundTag") == "warp" and rules.index(other) <= index:
+                raise RuntimeError("WARP takes precedence over relay")
+        if bool(state.get("warp")) != any(outbound.get("tag") == "warp" for outbound in runtime["outbounds"]):
+            raise RuntimeError("WARP outbound does not match its enabled state")
 
 
 def smoke_start(binary, runtime, work, env):
@@ -272,6 +365,7 @@ xray() {
 }
 firewall_owned_open() { return 0; }
 handler_lan_open_firewall() { return 0; }
+obtain_warp_endpoint() { printf '%s\\n' '127.0.0.1'; }
 get_hy2_cert_dir() { printf '%s' "${XRAY_AUDIT_CERTS}"; }
 get_cdn_direct_cert_dir() { printf '%s' "${XRAY_AUDIT_CERTS}"; }
 load_i18n

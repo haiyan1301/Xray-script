@@ -42,7 +42,7 @@ readonly SCRIPT_CONFIG_PATH="${SCRIPT_CONFIG_DIR}/config.json"
 # GitHub 仓库设置
 readonly SCRIPT_REPO_OWNER="haiyan1301"
 readonly SCRIPT_REPO_NAME="Xray-script"
-readonly SCRIPT_VERSION="v2026.11.11"
+readonly SCRIPT_VERSION="v2026.11.15"
 
 # --- 引入公共库 ---
 # install.sh 可能在项目下载之前运行，因此需要内联后备函数
@@ -342,14 +342,14 @@ function check_os() {
 # =============================================================================
 function check_dependencies() {
     # 定义基础必需的软件包列表
-    local packages=("ca-certificates" "openssl" "curl" "wget" "git" "jq" "tzdata" "qrencode" "socat")
+    local packages=("ca-certificates" "openssl" "curl" "wget" "git" "jq" "tzdata" "qrencode" "socat" "python3" "util-linux" "coreutils")
     local missing_packages=() # 声明数组存储缺失的包
 
     # 根据操作系统类型检查特定的软件包
     case "$(_os)" in
     centos)
         # 为 CentOS/RHEL 添加系统管理工具
-        packages+=("crontabs" "util-linux" "iproute" "procps-ng" "bind-utils")
+        packages+=("crontabs" "iproute" "procps-ng" "bind-utils")
         # 遍历包列表，检查是否安装
         for pkg in "${packages[@]}"; do
             if ! rpm -q "$pkg" &>/dev/null; then
@@ -386,13 +386,13 @@ function check_dependencies() {
 # =============================================================================
 function install_dependencies() {
     # 定义基础必需的软件包列表
-    local packages=("ca-certificates" "openssl" "curl" "wget" "git" "jq" "tzdata" "qrencode" "socat")
+    local packages=("ca-certificates" "openssl" "curl" "wget" "git" "jq" "tzdata" "qrencode" "socat" "python3" "util-linux" "coreutils")
 
     # 根据操作系统类型添加特定的软件包并执行安装
     case "$(_os)" in
     centos)
         # 为 CentOS/RHEL 添加系统管理工具
-        packages+=("crontabs" "util-linux" "iproute" "procps-ng" "bind-utils")
+        packages+=("crontabs" "iproute" "procps-ng" "bind-utils")
         # 检查是否使用 dnf 包管理器 (较新版本)
         if cmd_exists "dnf"; then
             # 使用 dnf 更新系统并安装软件包
@@ -581,6 +581,11 @@ function validate_xray_script_archive() {
         'lib/cert.sh'
         'lib/transaction.sh'
         'lib/protocols.sh'
+        'lib/relay.sh'
+        'lib/relay-menu.sh'
+        'lib/relay-probe.py'
+        'lib/relay-links.py'
+        'lib/runtime-guard.sh'
         'service/docker.sh'
         'service/nginx.sh'
         'service/ssl.sh'

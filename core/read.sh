@@ -102,6 +102,26 @@ function main() {
     # 加载国际化数据
     load_i18n
 
+    # Relay fields are node data, not inbound protocol fields. Keep their
+    # prompts separate from FIELD_ORDER and never echo credentials on a TTY.
+    if [[ "${1:-}" == '--relay-field' ]]; then
+        local field="${2:-}" secret=0 value
+        case "${field}" in
+        name|address|port|protocol|serverName|flow|encryption) ;;
+        uuid|publicKey|shortId|username|password|shareLink) secret=1 ;;
+        *) return 1 ;;
+        esac
+        read_input config "$(t ".read.relay.${field}")"
+        if [[ "${secret}" -eq 1 && -t 0 ]]; then
+            IFS= read -rs value || return 1
+            printf '\n' >&2
+        else
+            IFS= read -r value || return 1
+        fi
+        printf '%s\n' "${value}"
+        return 0
+    fi
+
     local opt="${1#--}"
     # 未登记的选项保持静默返回：调用方会拿到空输入而不是报错。
     field_known "${opt}" || return 0

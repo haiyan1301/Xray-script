@@ -440,6 +440,9 @@ printf '%s' "${CLIENT_CONFIG[seed]}"
                         "uuid": config["xray"]["uuid"], "kcp": "new-seed",
                     }]
                 self.config.write_text(json.dumps(config))
+                # Each subcase is a fresh installation. Retaining the previous
+                # runtime with an unrelated state now correctly triggers drift.
+                self.runtime.unlink(missing_ok=True)
                 self.bash("""
 id() { return 1; }
 cmd_exists() { return 1; }

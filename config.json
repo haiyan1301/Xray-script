@@ -1,5 +1,5 @@
 {
-  "version": "v2026.11.11",
+  "version": "v2026.11.15",
   "path": "",
   "language": "",
   "xray": {
@@ -67,6 +67,12 @@
       "tunName": "xray0",
       "mtu": 1400,
       "sites": []
+    },
+    "relay": {
+      "nodes": [],
+      "active": null,
+      "mode": "off",
+      "domains": []
     }
   },
   "nginx": {

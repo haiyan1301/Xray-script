@@ -309,9 +309,17 @@ function write_config() {
         rm -f -- "${temp_file}"
         return 1
     fi
+    if [[ "${_XRAY_RUNTIME_GUARD_ARMED:-0}" == 1 && "${target}" == "${SCRIPT_CONFIG_PATH:-}" ]] &&
+        ! runtime_guard_assert_current; then
+        rm -f -- "${temp_file}"
+        return 1
+    fi
     if ! mv -f -- "${temp_file}" "${target}"; then
         rm -f -- "${temp_file}"
         return 1
+    fi
+    if [[ "${_XRAY_RUNTIME_GUARD_ARMED:-0}" == 1 && "${target}" == "${SCRIPT_CONFIG_PATH:-}" ]]; then
+        runtime_guard_refresh_script_digest || return 1
     fi
     sync
 }

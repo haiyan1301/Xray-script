@@ -266,6 +266,8 @@ function menu_route() {
     # 打印选项 6
     echo -e "${GREEN}6.${NC} $(t ".${CUR_FILE}.route_management.option6")"
 
+    echo -e "${GREEN}7.${NC} $(t ".${CUR_FILE}.route_management.option7")"
+
     # 打印分隔线
     echo -e "------------------------------------------------------"
     # 打印选项 1 的说明信息
@@ -282,6 +284,7 @@ function menu_route() {
     echo -e "5. $(t ".${CUR_FILE}.route_management.info7")"
     # 打印选项 6 的说明信息
     echo -e "6. $(t ".${CUR_FILE}.route_management.info8")"
+    echo -e "7. $(t ".${CUR_FILE}.route_management.info9")"
     # 打印分隔线
     echo -e "------------------------------------------------------"
 }
@@ -495,7 +498,7 @@ function menu_option_max() {
     --web) echo 3 ;;
     --cdn-backend) echo 2 ;;
     --management) echo 8 ;;
-    --route) echo 6 ;;
+    --route) echo 7 ;;
     --sni) echo 7 ;;
     --cdn-config) echo 7 ;;
     --cdn-direct-config) echo 3 ;;

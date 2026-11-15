@@ -858,6 +858,7 @@ function processes_routing() {
     4) exec_handler '--routing' 'block' 'domain' ;;           # 选择 4：配置阻止 Domain 规则
     5) exec_handler '--routing' 'warp' 'ip' ;;                # 选择 5：配置 WARP IP 规则
     6) exec_handler '--routing' 'warp' 'domain' ;;            # 选择 6：配置 WARP Domain 规则
+    7) exec_handler '--relay' ;;
     *) exit 0 ;;                                              # 其他情况：退出脚本
     esac
 }

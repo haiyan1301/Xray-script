@@ -36,6 +36,9 @@ readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)"
 # 引入公共库
 source "${PROJECT_ROOT}/lib/common.sh"
 source "${PROJECT_ROOT}/lib/protocols.sh"
+source "${PROJECT_ROOT}/lib/relay.sh"
+source "${PROJECT_ROOT}/lib/relay-menu.sh"
+source "${PROJECT_ROOT}/lib/runtime-guard.sh"
 
 # 定义项目内相关目录和脚本的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"
@@ -410,6 +413,10 @@ function commit_xray_and_script_config() {
         }
     fi
 
+    if declare -F runtime_guard_assert_current >/dev/null && ! runtime_guard_assert_current; then
+        rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}" "${script_backup}"
+        return 1
+    fi
     if ! mv -f -- "${runtime_temp}" "${XRAY_CONFIG_PATH}"; then
         rm -f -- "${runtime_temp}" "${script_temp}" "${runtime_backup}" "${script_backup}"
         return 1
@@ -440,6 +447,12 @@ function commit_xray_and_script_config() {
     fi
 
     rm -f -- "${runtime_backup}" "${script_backup}"
+    if [[ "${_XRAY_TRANSACTION_ACTIVE:-0}" == 1 ]]; then
+        _XRAY_TRANSACTION_COMMITTED=1
+    fi
+    if [[ "${_XRAY_RUNTIME_GUARD_ARMED:-0}" == 1 ]]; then
+        runtime_guard_after_commit "${runtime_content}" "${script_content}" || return 1
+    fi
     sync
 }
 
@@ -457,7 +470,9 @@ function user_route_rules() {
             # 避免用户关闭开关后旧规则仍从 .rules 被重新合并生效。
             $tag == "bt" or
             $tag == "cn-ip" or
-            $tag == "ad-domain";
+            $tag == "ad-domain" or
+            $tag == "xray-script-relay" or
+            ($tag | startswith("xray-script-relay-"));
         if type == "array" then map(select(is_derived_rule | not)) else [] end
     '
 }
@@ -586,16 +601,58 @@ function normalize_and_validate_xray_state() {
     fi
 }
 
+# Verify old runtime before rebuilding. Legacy installations are compared with a
+# side-effect-free generation from their old disk state, never blindly adopted.
+function runtime_guard_preflight() {
+    [[ "${_XRAY_RUNTIME_GUARD_DRY_RUN:-0}" != 1 ]] || return 0
+    if [[ "${_XRAY_RUNTIME_GUARD_ARMED:-0}" == 1 ]]; then
+        runtime_guard_assert_current
+        return $?
+    fi
+    local expected='' old_state=''
+    if [[ -f "${XRAY_CONFIG_PATH}" ]] &&
+        [[ "$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.runtimeRoutingSnapshot // empty')" == '' ]]; then
+        old_state="$(jq -s -e 'if length == 1 and (.[0] | type == "object") then .[0] else error("invalid state") end' "${SCRIPT_CONFIG_PATH}")" || return 1
+        expected="$(
+            SCRIPT_CONFIG="${old_state}"
+            _XRAY_GENERATE_ONLY=1
+            _XRAY_RUNTIME_GUARD_DRY_RUN=1
+            # This revision manages WARP at a fixed loopback endpoint. Never
+            # infer the expected address from the untrusted runtime itself;
+            # doing so would silently bless manual WARP outbound edits.
+            # Health checks/automatic repair must not run in this dry pass.
+            obtain_warp_endpoint() { printf '%s\n' '127.0.0.1'; }
+            handler_xray_config 1 >&2 || exit 1
+            printf '%s\n' "${XRAY_CONFIG}"
+        )" || {
+            runtime_guard_error 'cannot reconstruct the legacy routing baseline / 无法重建旧版路由基准'
+            return 1
+        }
+    fi
+    runtime_guard_begin "${SCRIPT_CONFIG}" "${expected}"
+}
+
 function apply_xray_state_transaction() {
     local previous_script_config="$1"
     local previous_xray_config="$2"
     local candidate_script_config new_firewall_rules rule rollback_script_config
     local failed_firewall_rules='[]'
+    runtime_guard_preflight || return 1
+    local _XRAY_TRANSACTION_ACTIVE=1 _XRAY_TRANSACTION_COMMITTED=0
 
     if handler_xray_config 1 && handler_restart; then
         return 0
     fi
 
+    # A validation/drift failure before the first commit changed neither file
+    # nor service. In particular never "roll back" over an external editor.
+    if [[ "${_XRAY_TRANSACTION_COMMITTED}" != 1 ]]; then
+        SCRIPT_CONFIG="${previous_script_config}"
+        XRAY_CONFIG="${previous_xray_config}"
+        return 1
+    fi
+    runtime_guard_assert_current || return 1
+    runtime_guard_disarm
     candidate_script_config="${SCRIPT_CONFIG}"
     new_firewall_rules="$(firewall_ledger_delta "${previous_script_config}" "${candidate_script_config}")"
     while IFS= read -r rule; do
@@ -1703,6 +1760,7 @@ function handler_routing() {
 # 返回值: 无 (直接修改 SCRIPT_CONFIG 全局变量和 SCRIPT_CONFIG_PATH 文件)
 # =============================================================================
 function handler_reset_script_config() {
+    runtime_guard_preflight || return 1
     local TARGET_CONFIG="${1:-xray}" # 获取目标配置部分，默认为 xray
     # 根据目标配置部分调用 reset_json_fields 进行重置
     case "${TARGET_CONFIG,,}" in
@@ -1710,7 +1768,7 @@ function handler_reset_script_config() {
         # 保留 CDN 后端和证书来源，才能在重配过程中安全判断 443
         # 当前由 Nginx 还是 Xray 占用，并复用已验证的证书。
         SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray' \
-            'version' 'githubProxy' 'warp' 'rules' 'lan' 'firewallRules' \
+            'version' 'githubProxy' 'warp' 'rules' 'lan' 'firewallRules' 'relay' 'runtimeRoutingSnapshot' \
             'reverse' 'reverseUuid' 'reversePort' 'reverseTarget' 'reverseMode' \
             'cdnBackend' 'cdnCertHostname' 'cdnCertSource' \
             'cdnCertFullchain' 'cdnCertPrivkey' \
@@ -2459,10 +2517,14 @@ function handler_multi_xray_config() {
         handler_reverse_config || return 1
     fi
     handler_apply_lan_config || return 1
+    handler_apply_relay_config || return 1
+    relay_validate_runtime_references "${XRAY_CONFIG}" || return 1
 
     # 持久化过滤前的用户规则：WARP 未开启时运行时被过滤的 warp 规则必须保留，
     # 模板和功能派生规则在每次构建时重建。
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson nodes "${nodes}" --argjson rules "${XRAY_RULES}" '.xray.nodes = $nodes | .rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
+    [[ "${_XRAY_GENERATE_ONLY:-0}" != 1 ]] || return 0
+    runtime_guard_record_candidate || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
     handler_multi_firewall_ports || return 1
 
@@ -2490,7 +2552,14 @@ function handler_xray_config() {
     local skip_vlessenc="${1:-0}"
     # 打印绿色的 Xray 配置更新提示
     log_config "$(t ".${CUR_FILE}.xray.config_update")" >&2
+    if [[ "${_XRAY_RUNTIME_GUARD_DRY_RUN:-0}" != 1 ]]; then
+        runtime_guard_preflight || return 1
+    fi
     normalize_and_validate_xray_state || return 1
+    normalize_and_validate_relay_state || return 1
+    if [[ "$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.rules.reset')" == 1 ]] && xray_rules_reset_is_current; then
+        SCRIPT_CONFIG="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq '.xray.relay.mode = "off" | .xray.relay.active = null | .xray.relay.domains = []')" || return 1
+    fi
     # 从脚本配置中读取各项参数
     local CONFIG_TAG="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag')"                # 获取配置标签
     local XRAY_PORT="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.port')"                 # 获取端口
@@ -2769,11 +2838,15 @@ function handler_xray_config() {
         handler_reverse_config || return 1
     fi
     handler_apply_lan_config || return 1
+    handler_apply_relay_config || return 1
+    relay_validate_runtime_references "${XRAY_CONFIG}" || return 1
 
     # 持久化过滤前的用户规则：WARP 未开启时运行时被过滤的 warp 规则必须保留，
     # 模板和功能派生规则在每次构建时重建。
     # reset 在本次生成后复位：它描述的是「这一次要不要丢弃旧规则」，不是长期状态。
     SCRIPT_CONFIG="$(echo "${SCRIPT_CONFIG}" | jq --argjson rules "${XRAY_RULES}" '.rules = $rules | .xray.rules.reset = 0 | .xray.rules.resetBy = ""')" || return 1
+    [[ "${_XRAY_GENERATE_ONLY:-0}" != 1 ]] || return 0
+    runtime_guard_record_candidate || return 1
     commit_xray_and_script_config "${XRAY_CONFIG}" "${SCRIPT_CONFIG}" || return 1
 
     # 仅在配置已通过 xray 校验并成功落盘后修改防火墙。
@@ -7814,6 +7887,16 @@ function main() {
     local option="$1" # 获取第一个参数作为操作选项
     shift             # 移除第一个参数，剩下的参数留给具体函数处理
 
+    # Serialize the whole operation through restart/rollback. Read-only
+    # commands remain available when a manual routing conflict needs repair.
+    case "${option}" in
+    --relay|--routing|--warp|--reset-warp|--reverse|--lan-enable|--lan-disable|--lan-add|--lan-remove|--script-config|--xray-config|--change-port|--change-domain|--change-cdn-down|--cdn-backend|--quick|--install)
+        runtime_guard_acquire_lock || return 1
+        SCRIPT_CONFIG="$(jq '.' "${SCRIPT_CONFIG_PATH}")" || return 1
+        runtime_guard_preflight || return 1
+        ;;
+    esac
+
     # 根据第一个参数调用对应的处理器函数
     case "${option}" in
     --quick) handler_quick_install "$1" ;;    # 一键快速安装
@@ -7871,6 +7954,7 @@ function main() {
             handler_xray_config 1 || return 1
         fi
         ;;
+    --relay) handler_relay "$@" ;;
     --routing) handler_routing "$@" ;; # 处理路由规则
     --change-domain)
         local change_tag="$(echo "${SCRIPT_CONFIG}" | jq -r '.xray.tag // ""')"

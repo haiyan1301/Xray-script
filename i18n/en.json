@@ -159,7 +159,9 @@
       "info5": "Add IP-based block route to ruleTag block-ip.",
       "info6": "Add domain-based block route to ruleTag block-domain.",
       "info7": "(WARP must be enabled) Add WARP IP route to ruleTag warp-ip.",
-      "info8": "(WARP must be enabled) Add WARP domain route to ruleTag warp-domain."
+      "info8": "(WARP must be enabled) Add WARP domain route to ruleTag warp-domain.",
+      "option7": "Outbound relay",
+      "info9": "Manage relay nodes, all-traffic/domain policies and imported share links"
     },
     "sni_config": {
       "title": "SNI Configuration",
@@ -450,7 +452,41 @@
       "archive": "Edge archive"
     },
     "docker_unavailable": "Docker daemon is not running. Start it first (systemctl start docker).",
-    "docker_start_fail": "Failed to start the Docker service."
+    "docker_start_fail": "Failed to start the Docker service.",
+    "relay": {
+      "title": "Outbound relay",
+      "nodes": "Nodes (number / name / address / port / protocol; credentials hidden)",
+      "no_nodes": "No relay nodes saved. Add or import a node first.",
+      "node_number": "Select a node number:",
+      "invalid_choice": "Invalid selection.",
+      "mode": "Mode",
+      "saved": "Relay settings applied.",
+      "config_unavailable": "Cannot read the current Xray configuration; operation aborted.",
+      "edit_hint": "Edit: Enter keeps the current value; - clears an optional value. Credentials are hidden.",
+      "invalid_node": "Invalid relay node. Check IP, port, protocol parameters, and references to local Xray listeners.",
+      "active_delete": "This node is active. Select another node or turn the relay off before deleting it.",
+      "confirm_delete": "Delete this node? [y/N]",
+      "test_requirements": "Testing requires an installed Xray binary and curl.",
+      "test_start_failed": "Cannot start the temporary test instance (port conflict or unsupported parameters). Runtime configuration is unchanged.",
+      "tcp_testing": "Requesting an HTTPS egress address through the node (up to 8 seconds)…",
+      "tcp_pass": "TCP proxy request succeeded. Egress IP:",
+      "tcp_fail": "TCP proxy request failed (the test site may also be unreachable).",
+      "udp_pass": "UDP DNS proxy request succeeded (1.1.1.1:53).",
+      "udp_fail": "UDP DNS proxy request failed or timed out (1.1.1.1:53). Check node UDP support and firewall rules.",
+      "udp_unknown": "python3 is unavailable; UDP test status is unknown.",
+      "udp_scope": "The UDP test covers DNS only, not all UDP ports. Vision UDP 443 behavior depends on flow.",
+      "mode_prompt": "Policy [1=all traffic, 2=domains]:",
+      "domains_prompt": "Enter domains separated by commas or newlines; a blank line finishes input. example.com includes subdomains; full:api.example.com is exact.",
+      "invalid_domains": "Invalid domain list; nothing was applied.",
+      "preview": "Node to apply (credentials hidden):",
+      "all_warning": "All traffic mode routes managed proxy TCP and UDP through this node. A failed or unknown UDP test may affect UDP connections. Relay failures do not automatically switch to direct.",
+      "confirm_apply": "Apply this policy? [y/N]",
+      "actions": "1. Import share link  2. Edit  3. Test  4. Delete  5. Apply policy  6. Turn off  7. Add manually  0. Back",
+      "choose": "Select:",
+      "import_requirements": "Importing share links requires python3.",
+      "invalid_link": "Invalid or unsupported share link; nothing saved (CDN and Fallback combinations are unsupported).",
+      "imported_edit": "This node was imported [1=rename, 2=replace share link]:"
+    }
   },
   "read": {
     "version": "Custom version (e.g. v1.0.0): ",
@@ -484,7 +520,22 @@
     "block_domain": "Enter domain to route to block",
     "reverse_port": "Enter reverse proxy tunnel port (default: 8443): ",
     "reverse_target": "Enter internal service target address (format: IP:PORT, e.g. 192.168.1.100:80): ",
-    "reverse_uuid": "Enter reverse proxy UUID (leave empty to auto-generate): "
+    "reverse_uuid": "Enter reverse proxy UUID (leave empty to auto-generate): ",
+    "relay": {
+      "name": "Node name:",
+      "address": "B IP (IPv4 or IPv6 without brackets):",
+      "port": "B port (1–65535):",
+      "protocol": "Protocol [1=VLESS + REALITY TCP, 2=SOCKS5]:",
+      "uuid": "B UUID (hidden):",
+      "serverName": "B SNI:",
+      "publicKey": "B REALITY public key (hidden):",
+      "shortId": "B Short ID (may be empty; hidden):",
+      "flow": "flow (empty, xtls-rprx-vision or xtls-rprx-vision-udp443, as configured on B):",
+      "encryption": "encryption (default: none):",
+      "username": "SOCKS5 username (empty for no authentication; hidden):",
+      "password": "SOCKS5 password (hidden):",
+      "shareLink": "Paste one node share link (hidden):"
+    }
   },
   "share": {
     "client": "Client Configuration",
