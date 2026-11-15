@@ -84,16 +84,25 @@ function relay_canonical_ip() {
 }
 
 function relay_address_is_local() {
-    local canonical="$1" value normalized
+    local canonical="$1" value normalized address_json local_addresses
     case "${canonical}" in
     127.*|0.0.0.0|0000:0000:0000:0000:0000:0000:0000:0000|0000:0000:0000:0000:0000:0000:0000:0001) return 0 ;;
     esac
     if command -v ip >/dev/null 2>&1; then
+        if address_json="$(ip -j addr show 2>/dev/null)" &&
+            local_addresses="$(printf '%s\n' "${address_json}" | jq -er '.[].addr_info[]?.local' 2>/dev/null)"; then
+            :
+        else
+            # CentOS 7 ships iproute versions predating JSON output. Preserve
+            # local-address loop detection there using the stable one-line form.
+            local_addresses="$(ip -o addr show 2>/dev/null | awk '{print $4}')"
+        fi
         while IFS= read -r value; do
+            value="${value%/*}"
             [[ -n "${value}" ]] || continue
             normalized="$(relay_canonical_ip "${value}")" || continue
             [[ "${normalized}" != "${canonical}" ]] || return 0
-        done < <(ip -j addr show 2>/dev/null | jq -r '.[].addr_info[]?.local' 2>/dev/null)
+        done <<<"${local_addresses}"
     fi
     return 1
 }
@@ -271,10 +280,28 @@ function relay_build_outbound() {
     '
 }
 
+# Sniffing must supply routing metadata without replacing the original target.
+# Otherwise an HTTP Host/SNI can turn a private-IP request into a domain before
+# the private-IP blocking rule sees it. Keep this protection when relay is off.
+# The compatibility flag is for reconstructing a pre-fix baseline only; a new
+# candidate must always run this normalization.
+function relay_preserve_sniffed_targets() {
+    [[ "${_XRAY_LEGACY_SNIFFING:-0}" != 1 ]] || return 0
+    XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq '
+        .inbounds |= map(
+            if (.protocol | IN("vless","vmess","trojan","shadowsocks","hysteria","hysteria2","socks","http")) and
+               (((.tag // "") | test("^(api$|lan-|reverse-|anti-steal-)")) | not) and
+               (.sniffing | type) == "object"
+            then .sniffing.routeOnly = true else . end
+        )
+    ')" || return 1
+}
+
 function handler_apply_relay_config() {
     local mode node outbound
     normalize_and_validate_relay_state || return 1
     mode="$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.relay.mode')" || return 1
+    relay_preserve_sniffed_targets || return 1
     # Repeated application always produces a single selected outbound/rule.
     XRAY_CONFIG="$(printf '%s\n' "${XRAY_CONFIG}" | jq '
         .outbounds |= map(select(((.tag // "") | startswith("xray-script-relay-")) | not)) |

@@ -647,6 +647,13 @@ function validate_xray_script_archive() {
         jq empty "${relative_path}" >/dev/null 2>&1 || return 1
     done < <(find "${archive_root}" -type f -name '*.json' -print0)
 
+    # Parse production Python helpers without executing archive code or
+    # creating bytecode. Test programs can require newer Python than runtime.
+    for relative_path in 'lib/relay-links.py' 'lib/relay-probe.py'; do
+        python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), filename=sys.argv[1])' \
+            "${archive_root}/${relative_path}" >/dev/null 2>&1 || return 1
+    done
+
     archive_version="$(jq -r '.version // ""' "${archive_root}/config.json" 2>/dev/null || true)"
     [[ "${archive_version}" == "${expected_version}" ]]
 }

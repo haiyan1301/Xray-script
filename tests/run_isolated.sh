@@ -36,10 +36,14 @@ if ! { apt-get "${apt_options[@]}" update >/tmp/test-packages.log 2>&1 &&
     exit 1
 fi
 head -2 /etc/os-release
-python3 -m unittest discover -s tests -v
-shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034,SC2155 \
-    install.sh core/*.sh lib/*.sh service/*.sh tool/*.sh \
-    config/lan/*.sh config/cloudflare-warp/*.sh tests/run_isolated.sh
+XRAY_TEST_BIN=/opt/core/xray python3 -m unittest discover -s tests -v
+# Debian ShellCheck retains every parsed file in one invocation; checking each
+# file separately keeps the complete check inside the container memory limit.
+for test_script in install.sh core/*.sh lib/*.sh service/*.sh tool/*.sh \
+    config/lan/*.sh config/cloudflare-warp/*.sh tests/run_isolated.sh; do
+    shellcheck --severity=warning --exclude=SC1090,SC1091,SC2034,SC2155 "${test_script}"
+done
 python3 tests/check_core_configs.py --xray /opt/core/xray --smoke
+python3 tests/check_relay_data_plane.py --xray /opt/core/xray
 python3 tests/isolated_lifecycle.py --core /opt/core --previous-core /opt/previous-core
 '

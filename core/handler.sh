@@ -601,6 +601,19 @@ function normalize_and_validate_xray_state() {
     fi
 }
 
+# Compare only deterministic generations of trusted script state. The legacy
+# flag reproduces sniffing before routeOnly preservation was introduced.
+function runtime_guard_expected_runtime() (
+    SCRIPT_CONFIG="$1"
+    _XRAY_LEGACY_SNIFFING="${2:-0}"
+    _XRAY_GENERATE_ONLY=1
+    _XRAY_RUNTIME_GUARD_DRY_RUN=1
+    # Never infer expected WARP addresses from the runtime being audited.
+    obtain_warp_endpoint() { printf '%s\n' '127.0.0.1'; }
+    handler_xray_config 1 >&2 || return 1
+    printf '%s\n' "${XRAY_CONFIG}"
+)
+
 # Verify old runtime before rebuilding. Legacy installations are compared with a
 # side-effect-free generation from their old disk state, never blindly adopted.
 function runtime_guard_preflight() {
@@ -613,21 +626,23 @@ function runtime_guard_preflight() {
     if [[ -f "${XRAY_CONFIG_PATH}" ]] &&
         [[ "$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.runtimeRoutingSnapshot // empty')" == '' ]]; then
         old_state="$(jq -s -e 'if length == 1 and (.[0] | type == "object") then .[0] else error("invalid state") end' "${SCRIPT_CONFIG_PATH}")" || return 1
-        expected="$(
-            SCRIPT_CONFIG="${old_state}"
-            _XRAY_GENERATE_ONLY=1
-            _XRAY_RUNTIME_GUARD_DRY_RUN=1
-            # This revision manages WARP at a fixed loopback endpoint. Never
-            # infer the expected address from the untrusted runtime itself;
-            # doing so would silently bless manual WARP outbound edits.
-            # Health checks/automatic repair must not run in this dry pass.
-            obtain_warp_endpoint() { printf '%s\n' '127.0.0.1'; }
-            handler_xray_config 1 >&2 || exit 1
-            printf '%s\n' "${XRAY_CONFIG}"
-        )" || {
+        expected="$(runtime_guard_expected_runtime "${old_state}" 0)" || {
             runtime_guard_error 'cannot reconstruct the legacy routing baseline / 无法重建旧版路由基准'
             return 1
         }
+        # Older clean runtimes used destination-replacing sniffing. Accept an
+        # exact generation of that previous behavior as a migration baseline,
+        # then the real candidate upgrades sniffing to routeOnly. No arbitrary
+        # runtime value is copied into either expected generation.
+        local actual_snapshot='' expected_snapshot='' legacy_expected=''
+        actual_snapshot="$(runtime_routing_snapshot "$(cat -- "${XRAY_CONFIG_PATH}")")" || actual_snapshot=''
+        expected_snapshot="$(runtime_routing_snapshot "${expected}")" || return 1
+        if [[ -n "${actual_snapshot}" && "${actual_snapshot}" != "${expected_snapshot}" ]]; then
+            legacy_expected="$(runtime_guard_expected_runtime "${old_state}" 1)" || return 1
+            if [[ "$(runtime_routing_snapshot "${legacy_expected}")" == "${actual_snapshot}" ]]; then
+                expected="${legacy_expected}"
+            fi
+        fi
     fi
     runtime_guard_begin "${SCRIPT_CONFIG}" "${expected}"
 }

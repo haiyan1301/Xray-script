@@ -36,7 +36,7 @@ CDN 和 Fallback 不是本次承诺的导入场景。独立分享链接只描述
 
 `example.com` 规范化为 `domain:example.com`，包括其子域名；`full:api.example.net` 只匹配该域名。输入接受逗号或换行，去空白、转小写、去重；不接受 URL、端口、通配符和正则表达式。国际化域名请先转为 ASCII/Punycode。
 
-域名分流只对可获得域名的连接生效。IP 连接没有可识别的 HTTP Host、TLS SNI 或 QUIC 域名时走未命中策略。启用 ECH、非 HTTP/TLS 协议、应用绕开代理的 DNS、缓存连接均可能影响观察结果。`routeOnly: true` 让嗅探只决定路由，保留客户端原目标地址。此功能不会让客户端本地 DNS 自动经过 B；需要根据客户端的 DNS 策略单独确认 DNS 出口。
+域名分流只对可获得域名的连接生效。IP 连接没有可识别的 HTTP Host、TLS SNI 或 QUIC 域名时走未命中策略。启用 ECH、非 HTTP/TLS 协议、应用绕开代理的 DNS、缓存连接均可能影响观察结果。`routeOnly: true` 让嗅探只决定路由，保留客户端原目标地址。所有已有业务嗅探器在全流量、域名及关闭中转时均保留此行为，防止目标 IP 被嗅探域名替换后绕过私网屏蔽；旧版干净配置会在验证原生成结果后迁移。此功能不会让客户端本地 DNS 自动经过 B；需要根据客户端的 DNS 策略单独确认 DNS 出口。
 
 ## 手动修改 Xray JSON 后会怎样
 
@@ -85,6 +85,7 @@ CDN 和 Fallback 不是本次承诺的导入场景。独立分享链接只描述
 ```bash
 python3 -m unittest discover -s tests -v
 python3 tests/check_core_configs.py --xray /path/to/xray --smoke
+python3 tests/check_relay_data_plane.py --xray /path/to/xray
 ```
 
 新增回归覆盖输入、域名规范化、所有现有协议模板、Fallback 和多节点标签、规则优先级、重复应用、关闭清理、悬空引用/循环、旧配置迁移、手工配置漂移、重启失败回滚、域名解析和并发文件修改。核心矩阵新增 14 个中转场景，合计 45 组配置由官方 Xray 26.10.21 校验并在临时端口启动，包含 WARP、反向代理、LAN、多节点、Fallback 和两种 CDN 后端。该测试不访问远端 B。

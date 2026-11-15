@@ -177,6 +177,7 @@ mKCP 与包含 mKCP 的多节点配置同步适配 Xray v26.10.21 的 `mkcp-lega
 ```sh
 python3 tests/download_core.py --version v26.10.21 --output /tmp/xray-audit-core
 python3 tests/check_core_configs.py --xray /tmp/xray-audit-core/xray
+python3 tests/check_relay_data_plane.py --xray /tmp/xray-audit-core/xray
 ```
 
 该检查覆盖所有单节点模式、CDN 两种后端、多节点和可选加密参数，使用 `xray run -test` 校验。加上 `--smoke` 会在临时目录启动真实内核、检查监听并清理进程；需要本机端口资源，不修改系统服务。
