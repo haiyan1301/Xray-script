@@ -4871,6 +4871,23 @@ function fetch_xray_install_script() {
 #   $3: resolved_version - (可选) $1 已是具体版本，安装成功后再写入配置 ('y')
 # 返回值: 无 (通过调用外部脚本执行安装)
 # =============================================================================
+# The pinned upstream creates an empty config only for a fresh config directory.
+# Remove this known installer artifact so the first managed build starts from
+# absence. Never use an arbitrary existing empty/malformed JSON as a baseline.
+function cleanup_new_xray_installer_runtime() {
+    local was_absent="$1"
+    [[ "${was_absent}" == 1 ]] || return 0
+    if [[ ! -e "${XRAY_CONFIG_PATH}" && ! -L "${XRAY_CONFIG_PATH}" ]]; then
+        return 0
+    fi
+    if [[ -L "${XRAY_CONFIG_PATH}" || ! -f "${XRAY_CONFIG_PATH}" ]] ||
+        ! jq -se 'length == 1 and .[0] == {}' "${XRAY_CONFIG_PATH}" >/dev/null 2>&1; then
+        log_error 'The installer created unexpected runtime content; refusing to adopt or remove it.' >&2
+        return 1
+    fi
+    rm -f -- "${XRAY_CONFIG_PATH}"
+}
+
 function handler_install() {
     local xray_version="${1:-}"   # 获取版本参数
     local force_install="${2:-n}" # 获取强制安装参数，默认为 'n'
@@ -4878,6 +4895,7 @@ function handler_install() {
     local staged_config='' staged_script_config=''
     local binary_snapshot_dir='' binary_parent='' binary_existed=0
     local service_was_active=0 service_was_enabled=0 service_query_status=0
+    local runtime_was_absent=0 installer_status=0
 
     force_install="${force_install,,}"
     resolved_version="${resolved_version,,}"
@@ -4962,7 +4980,15 @@ function handler_install() {
             fi
         fi
         systemctl -q is-enabled xray && service_was_enabled=1
-        if ! bash -s -- install --version "${CONFIG_DATA['version']}" <<<"${script_content}"; then
+        # The upstream's initial {} is not a user configuration. Track its
+        # provenance before invoking the verified installer, never in preflight.
+        if [[ ! -e "${XRAY_CONFIG_PATH}" && ! -L "${XRAY_CONFIG_PATH}" ]] &&
+            [[ "$(printf '%s\n' "${SCRIPT_CONFIG}" | jq -r '.xray.runtimeRoutingSnapshot // empty')" == '' ]]; then
+            runtime_was_absent=1
+        fi
+        bash -s -- install --version "${CONFIG_DATA['version']}" <<<"${script_content}" || installer_status=$?
+        cleanup_new_xray_installer_runtime "${runtime_was_absent}" || installer_status=1
+        if [[ "${installer_status}" -ne 0 ]]; then
             [[ -z "${staged_config}" ]] || rm -f -- "${staged_config}"
             log_error "$(t ".${CUR_FILE}.gh_proxy.install_fail")" >&2
             if [[ -n "${binary_snapshot_dir}" ]] &&
@@ -4982,6 +5008,11 @@ function handler_install() {
             fi
             return 1
         fi
+        if ! runtime_guard_assert_current; then
+            rm -f -- "${staged_config}"
+            discard_xray_binary_snapshot "${binary_snapshot_dir}" || true
+            return 1
+        fi
         if ! mv -fT -- "${staged_config}" "${SCRIPT_CONFIG_PATH}"; then
             rm -f -- "${staged_config}"
             staged_config=''
@@ -4995,6 +5026,14 @@ function handler_install() {
         fi
         staged_config=''
         SCRIPT_CONFIG="${staged_script_config}"
+        if [[ "${_XRAY_RUNTIME_GUARD_ARMED:-0}" == 1 ]]; then
+            # Use the bytes this process wrote, not a re-read that could adopt
+            # a concurrent state edit. The runtime digest is unchanged.
+            local committed_script_digest
+            committed_script_digest="$(printf '%s\n' "${staged_script_config}" | sha256sum)" || return 1
+            _XRAY_RUNTIME_GUARD_SCRIPT_DIGEST="${committed_script_digest%% *}"
+            runtime_guard_assert_current || return 1
+        fi
         if ! discard_xray_binary_snapshot "${binary_snapshot_dir}"; then
             log_warn "Xray binary recovery data was left at: ${binary_snapshot_dir}" >&2
         fi

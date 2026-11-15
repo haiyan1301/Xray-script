@@ -131,3 +131,84 @@ handler_script_config XHTTP
         self.assertEqual(state["xray"]["tag"], "XHTTP")
         self.assertEqual(state["xray"]["serverNames"], ["custom-relay-review.example"])
         self.assertNotIn("custom-relay-review.example", state["target"])
+
+
+class FreshInstallerReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="xray-first-install-review-")
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        self.state_path = self.work / "script.json"
+        self.runtime_path = self.work / "runtime.json"
+        state = json.loads((ROOT / "config.json").read_text())
+        state["language"] = "en"
+        state["xray"].update(
+            tag="XHTTP", port=14443, githubProxy="n",
+            uuid="4ea7f7dd-118c-4d41-b4b0-67ce8aff917c",
+            target="example.com", serverNames=["example.com"], shortIds=["01"],
+            privateKey="A" * 43, path="/relay-test/", xhttpMode="auto",
+        )
+        self.state_path.write_text(json.dumps(state))
+
+    def bash(self, body):
+        return subprocess.run(
+            ["bash", "-c", f"source {shlex.quote(str(ROOT / 'core/handler.sh'))}\n" + r'''
+sync() { :; }
+id() { return 1; }
+ensure_service_users() { return 0; }
+systemctl() { [[ "$*" != *is-active* ]] || return 3; return 1; }
+firewall_owned_open() { return 0; }
+handler_lan_open_firewall() { return 0; }
+fetch_xray_install_script() {
+    cat <<'INSTALLER'
+printf '#!/usr/bin/env bash\nprintf "Xray 26.10.21 test\\n"\n' >"$XRAY_BIN_PATH_OVERRIDE"
+chmod 755 "$XRAY_BIN_PATH_OVERRIDE"
+runtime="${TEST_INSTALLER_RUNTIME:-}"
+[[ -n "$runtime" ]] || runtime='{}'
+printf '%s\n' "$runtime" >"$XRAY_CONFIG_PATH_OVERRIDE"
+INSTALLER
+}
+load_i18n
+''' + body],
+            env=os.environ | {
+                "SCRIPT_CONFIG_PATH_OVERRIDE": str(self.state_path),
+                "XRAY_CONFIG_PATH_OVERRIDE": str(self.runtime_path),
+                "XRAY_BIN_PATH_OVERRIDE": str(self.work / "xray"),
+                "XRAY_CONFIG_VALIDATE": "0",
+            },
+            cwd=ROOT, text=True, capture_output=True, timeout=25,
+        )
+
+    def test_known_fresh_installer_empty_runtime_allows_first_managed_generation(self):
+        result = self.bash(r'''
+runtime_guard_preflight || exit $?
+handler_install v26.10.21 y y || exit $?
+[[ ! -e "$XRAY_CONFIG_PATH" ]] || exit 90
+runtime_guard_assert_current || exit $?
+handler_xray_config 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads(self.state_path.read_text())
+        runtime = json.loads(self.runtime_path.read_text())
+        self.assertEqual(state["xray"]["version"], "v26.10.21")
+        self.assertEqual(state["xray"]["runtimeRoutingSnapshot"]["version"], 1)
+        self.assertTrue(runtime["inbounds"])
+
+    def test_existing_empty_runtime_is_not_treated_as_installer_artifact(self):
+        self.runtime_path.write_text('{}\n')
+        before_state = self.state_path.read_bytes()
+        result = self.bash('runtime_guard_preflight')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.runtime_path.read_text(), '{}\n')
+        self.assertEqual(self.state_path.read_bytes(), before_state)
+
+    def test_unexpected_new_runtime_is_preserved_instead_of_adopted(self):
+        before_state = self.state_path.read_bytes()
+        result = self.bash(r'''
+runtime_guard_preflight || exit $?
+export TEST_INSTALLER_RUNTIME='{"outbounds":[{"tag":"custom"}]}'
+handler_install v26.10.21 y y
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before_state)
+        self.assertEqual(json.loads(self.runtime_path.read_text()), {"outbounds": [{"tag": "custom"}]})
