@@ -681,13 +681,12 @@ function source_compile() {
     _error_detect tar -zxf "${nginx_version}.tar.gz" --no-same-owner --no-same-permissions
 
     print_info "$(t '.nginx.compile.download_boringssl')"
-    # 下载并编译 BoringSSL。Nginx 直接通过 include/lib 链接到已构建的 BoringSSL，
-    # 不使用 --with-openssl，因为该参数要求 OpenSSL 源码树并会尝试执行 Configure/make。
+    # 只编译 Nginx 需要的 BoringSSL 静态库，避免构建上游的测试程序。
     _error_detect git clone --depth=1 https://github.com/google/boringssl
     mkdir -p boringssl/build || print_error "Failed to create directory: boringssl/build"
     cd boringssl/build || print_error "Failed to enter directory: boringssl/build"
     _error_detect cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0 ..
-    _error_detect ninja "-j$(nproc)"
+    _error_detect ninja "-j$(nproc)" ssl crypto
     cd "${TMPFILE_DIR}" || print_error "Failed to enter directory: ${TMPFILE_DIR}"
 
     # 查找 BoringSSL 静态库（兼容不同版本/生成器的输出路径）。
