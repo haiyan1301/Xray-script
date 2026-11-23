@@ -87,7 +87,7 @@ jobs:
           boringssl_date="$(git -C boringssl show -s --format=%cd --date=format:%Y%m%d HEAD)"
           echo "boringssl_version=${boringssl_date}-${boringssl_sha}" >> "${GITHUB_OUTPUT}"
           cmake -S boringssl -B boringssl/build -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=0
-          ninja -C boringssl/build -j"$(nproc)"
+          ninja -C boringssl/build -j"$(nproc)" ssl crypto
           test -f "$(find "${BUILD_ROOT}/boringssl/build" -name libssl.a -print -quit)"
           test -f "$(find "${BUILD_ROOT}/boringssl/build" -name libcrypto.a -print -quit)"
 
